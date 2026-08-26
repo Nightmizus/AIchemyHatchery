@@ -1,0 +1,24 @@
+.env
+.env.*
+!.env.example
+
+*.db
+*.db-wal
+*.db-shm
+published/
+.ai-backups/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+
+# 本项目明确不使用 Sites；避免误提交其本地元数据
+.openai/
+
+.idea/
+.vscode/
+*.log
+.DS_Store
+Thumbs.db

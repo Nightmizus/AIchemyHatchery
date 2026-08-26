@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="炼丹社Sites——面向校园个人与社团的模块化 AI 建站控制台。">
+  <title>炼丹社Sites｜页面编辑器</title>
+  <link rel="stylesheet" href="/styles.css?v=20260825-15">
+</head>
+<body>
+  <section class="auth-gate" id="authGate" aria-label="炼丹社Sites账号登录">
+    <div class="auth-card">
+      <header><span class="auth-mark">炼</span><div><b>炼丹社Sites控制台</b><small>AIchemySites</small></div></header>
+      <div class="auth-copy"><span>ACCOUNT SYSTEM</span><h1 id="authTitle">欢迎回来</h1><p id="authDescription">登录后继续编辑、保存并发布你的网站。</p></div>
+      <div class="auth-tabs" role="tablist"><button class="active" role="tab" aria-selected="true" data-auth-tab="login">登录</button><button role="tab" aria-selected="false" data-auth-tab="register">注册</button></div>
+      <form class="auth-form" id="loginForm" data-auth-form="login" method="post" action="/api/auth/login" autocomplete="on" novalidate>
+        <label class="auth-field"><span>用户名</span><input id="loginUsername" name="username" autocomplete="username" required pattern="[A-Za-z0-9_-]{3,32}" maxlength="32" placeholder="你的用户名"><small class="field-error" hidden></small></label>
+        <label class="auth-field"><span>密码</span><div class="password-input"><input id="loginPassword" name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="128" placeholder="至少 8 位"><button type="button" data-password-toggle="loginPassword" aria-pressed="false">显示</button></div><small class="field-error" hidden></small></label>
+        <div class="auth-options"><label><input name="remember" type="checkbox" checked><span>在这台设备保持登录 7 天</span></label><button type="button" data-auth-help>忘记密码？</button></div>
+        <button class="auth-submit" type="submit"><b>登录控制台</b><span>→</span></button>
+      </form>
+      <form class="auth-form" id="registerForm" data-auth-form="register" method="post" action="/api/auth/register" autocomplete="on" novalidate hidden>
+        <label class="auth-field"><span>用户名</span><input id="registerUsername" name="username" autocomplete="username" required pattern="[A-Za-z0-9_-]{3,32}" maxlength="32" placeholder="3–32 位字母、数字、_ 或 -"><small class="field-error" hidden></small></label>
+        <label class="auth-field"><span>密码</span><div class="password-input"><input id="registerPassword" name="password" type="password" autocomplete="new-password" data-password-strength required minlength="8" maxlength="128" placeholder="至少 8 位，建议混合字母、数字和符号"><button type="button" data-password-toggle="registerPassword" aria-pressed="false">显示</button></div><div class="password-strength empty"><i></i><i></i><i></i><span>至少 8 位</span></div><small class="field-error" hidden></small></label>
+        <label class="auth-field"><span>确认密码</span><div class="password-input"><input id="registerPasswordConfirm" name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入密码"><button type="button" data-password-toggle="registerPasswordConfirm" aria-pressed="false">显示</button></div><small class="field-error" hidden></small></label>
+        <label class="auth-field"><span>16 位邀请码</span><input id="registerInvite" name="invite" class="invite-input" autocomplete="one-time-code" required pattern="[0-9a-fA-F]{16}" minlength="16" maxlength="16" placeholder="0123456789abcdef"><small class="field-error" hidden></small></label>
+        <button class="auth-submit" type="submit"><b>使用邀请码创建账号</b><span>→</span></button>
+      </form>
+      <p class="auth-error" id="authError" role="alert" hidden></p>
+      <footer><i></i><span>密码加盐哈希 · HttpOnly 会话 · 一次性邀请码</span></footer>
+    </div>
+  </section>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <a class="brand" href="#" aria-label="炼丹社Sites页面编辑器"><span>炼</span><b>炼丹社Sites</b></a>
+        <div class="save-state" id="saveState"><i></i><span>已保存</span></div>
+      </header>
+
+      <nav class="sidebar-tabs" role="tablist" aria-label="编辑器工具">
+        <button role="tab" data-panel="pages" aria-selected="false"><span>▤</span>页面</button>
+        <button role="tab" data-panel="basic" aria-selected="false"><span>⌘</span>基本信息</button>
+        <button role="tab" data-panel="design" aria-selected="false"><span>◐</span>设计</button>
+        <button role="tab" data-panel="elements" aria-selected="true" class="active"><span>＋</span>元素</button>
+        <button role="tab" data-panel="ai" aria-selected="false"><span>✦</span>AI 调整</button>
+      </nav>
+
+      <div class="sidebar-body">
+        <section class="tool-panel page-tree-panel" data-panel-content="pages" hidden aria-label="页面管理">
+          <header><div><span>PAGE MANAGER</span><b>页面树</b><small id="pageCount">1 个页面</small></div><button id="addPageBtn" title="添加一级页面">＋ 页面</button></header>
+          <div class="page-tree" id="pageTree" role="tree" aria-label="网站页面树"></div>
+        </section>
+
+        <section class="tool-panel" data-panel-content="basic" hidden>
+          <div class="panel-heading"><span>01 / BASIC</span><h1>基本信息</h1><p>这些内容会同步到当前页面和站点信息中。</p></div>
+          <label class="field"><span>站点名称</span><input id="siteName" value="未命名网站" autocomplete="off"></label>
+          <label class="field"><span>当前页面名称</span><input id="pageName" value="首页" autocomplete="off"></label>
+          <label class="field"><span>页面路径</span><div class="path-input"><i id="pathPrefix">/…/</i><input id="pagePath" value="home" autocomplete="off"></div></label>
+          <label class="field"><span>一句话介绍</span><textarea id="siteDescription" rows="3">在这里写下网站的一句话介绍。</textarea></label>
+          <div class="field meta-preview"><span>页面标题预览</span><p id="titlePreview">首页｜未命名网站</p></div>
+        </section>
+
+        <section class="tool-panel" data-panel-content="design" hidden>
+          <div class="panel-heading"><span>02 / DESIGN</span><h1>设计</h1><p>风格会改变排版、留白、圆角与整体视觉语气。</p></div>
+          <div class="control-label"><b>视觉系统</b><small>STYLE SYSTEM</small></div>
+          <div class="theme-list" role="radiogroup" aria-label="视觉系统">
+            <button class="theme-option active" data-theme="minimal" role="radio" aria-checked="true"><i class="theme-preview minimal-preview"><b>Aa</b><span></span><span></span></i><div><b>极简网格</b><small>理性、克制、强留白</small></div><em>01</em></button>
+            <button class="theme-option" data-theme="editorial" role="radio" aria-checked="false"><i class="theme-preview editorial-preview"><b>Aa</b><span></span><span></span></i><div><b>编辑杂志</b><small>衬线、叙事、纸张质感</small></div><em>02</em></button>
+            <button class="theme-option" data-theme="terminal" role="radio" aria-checked="false"><i class="theme-preview terminal-preview"><b>&gt;_</b><span></span><span></span></i><div><b>未来终端</b><small>深色、等宽、数字感</small></div><em>03</em></button>
+            <button class="theme-option" data-theme="soft" role="radio" aria-checked="false"><i class="theme-preview soft-preview"><b>●</b><span></span><span></span></i><div><b>柔和拼贴</b><small>圆润、轻松、有趣</small></div><em>04</em></button>
+          </div>
+          <div class="control-label spaced"><b>页面背景</b><small>BACKGROUND</small></div>
+          <div class="color-row" role="radiogroup" aria-label="页面背景">
+            <button data-bg="#ffffff" class="active" style="--swatch:#fff" aria-label="白色背景"></button>
+            <button data-bg="#f3f2ed" style="--swatch:#f3f2ed" aria-label="暖灰背景"></button>
+            <button data-bg="#f0f3ed" style="--swatch:#f0f3ed" aria-label="浅绿背景"></button>
+            <button data-bg="#f3eee7" style="--swatch:#f3eee7" aria-label="纸张背景"></button>
+            <button data-bg="#111310" style="--swatch:#111310" aria-label="深色背景"></button>
+          </div>
+          <label class="range-field"><span><b>内容宽度</b><small id="widthValue">100%</small></span><input type="range" id="contentWidth" min="70" max="100" value="100"></label>
+          <label class="switch-row"><span><b>模块间留白</b><small>显示明显的区块间距</small></span><input type="checkbox" id="sectionGap"><i></i></label>
+        </section>
+
+        <section class="tool-panel active" data-panel-content="elements">
+          <div class="panel-heading"><span>03 / ELEMENTS</span><h1>元素</h1><p>拖到右侧页面中；也可以点击，直接添加到页面末尾。</p></div>
+          <div class="element-group">
+            <div class="element-group-title"><b>页面结构</b><span>STRUCTURE</span></div>
+            <div class="element-grid">
+              <button class="element-card" draggable="true" data-element="nav"><i class="element-visual v-nav"><span></span><span></span><span></span></i><b>导航栏</b><small>LOGO 与页面链接</small></button>
+              <button class="element-card" draggable="true" data-element="hero"><i class="element-visual v-hero"><strong>Aa</strong><span></span></i><b>首页大字</b><small>主标题与行动按钮</small></button>
+              <button class="element-card" draggable="true" data-element="footer"><i class="element-visual v-footer"><span></span><span></span></i><b>页脚</b><small>联系与版权信息</small></button>
+              <button class="element-card" draggable="true" data-element="cta"><i class="element-visual v-cta"><strong>→</strong><span></span></i><b>行动区域</b><small>一句话与主按钮</small></button>
+            </div>
+          </div>
+
+          <div class="element-group">
+            <div class="element-group-title"><b>内容展示</b><span>CONTENT</span></div>
+            <div class="element-grid">
+              <button class="element-card" draggable="true" data-element="projects"><i class="element-visual v-cards"><span></span><span></span><span></span></i><b>作品展示卡片栏</b><small>三列项目作品</small></button>
+              <button class="element-card" draggable="true" data-element="blog"><i class="element-visual v-list"><span></span><span></span><span></span></i><b>文章列表</b><small>日期、标题与摘要</small></button>
+              <button class="element-card" draggable="true" data-element="gallery"><i class="element-visual v-gallery"><span></span><span></span><span></span></i><b>图片画廊</b><small>错落图片网格</small></button>
+              <button class="element-card" draggable="true" data-element="stats"><i class="element-visual v-stats"><strong>24</strong><strong>08</strong><strong>16</strong></i><b>数据栏</b><small>关键数字与指标</small></button>
+              <button class="element-card" draggable="true" data-element="team"><i class="element-visual v-team"><span></span><span></span><span></span></i><b>成员展示</b><small>头像、名字与分工</small></button>
+              <button class="element-card" draggable="true" data-element="timeline"><i class="element-visual v-timeline"><span></span><span></span><span></span></i><b>活动时间线</b><small>日期与活动安排</small></button>
+            </div>
+          </div>
+
+          <div class="element-group">
+            <div class="element-group-title"><b>社区功能</b><span>COMMUNITY</span></div>
+            <div class="element-grid">
+              <button class="element-card wide" draggable="true" data-element="forum"><i class="element-visual v-forum"><span></span><div><b></b><b></b><b></b></div></i><b>论坛板块</b><small>板块导航、话题列表与回复数量</small></button>
+              <button class="element-card" draggable="true" data-element="account"><i class="element-visual v-account"><span>AD</span><b></b></i><b>账号登录</b><small>登录状态、账号信息与退出</small></button>
+              <button class="element-card" draggable="true" data-element="notice"><i class="element-visual v-notice"><strong>!</strong><span></span></i><b>公告栏</b><small>招新与活动通知</small></button>
+              <button class="element-card" draggable="true" data-element="links"><i class="element-visual v-links"><span>↗</span><span>↗</span></i><b>链接集合</b><small>社群与相关站点</small></button>
+            </div>
+          </div>
+        </section>
+        <section class="tool-panel" data-panel-content="ai" hidden>
+          <div class="panel-heading"><span>05 / AI AGENT</span><h1>AI 调整</h1><p>Kimi 可以读取完整站点与底层源码。它只生成方案，确认后才会修改。</p></div>
+          <div class="ai-provider"><div><i>✦</i><span><b>Kimi Code Agent</b><small id="aiModelLabel">正在检测服务…</small></span></div><em id="aiStatusBadge">检测中</em></div>
+          <div class="ai-permissions">
+            <header><b>允许 AI 修改</b><small>PERMISSIONS</small></header>
+            <label><span><b>完整站点内容</b><small>所有页面、元素、文字和数据</small></span><input id="aiScopeSite" type="checkbox" checked><i></i></label>
+            <label><span><b>底层前后端源码</b><small>HTML / CSS / JS / Python</small></span><input id="aiScopeCode" type="checkbox" checked><i></i></label>
+          </div>
+          <label class="field ai-prompt"><span>准确描述要改什么</span><textarea id="aiPrompt" rows="8" placeholder="例如：只把首页主标题改为“校园 AI 共创社”，其他文字、模块和代码一律不动。"></textarea></label>
+          <div class="ai-examples"><button>只优化当前页面文案，不改布局</button><button>检查发布站点交互并给出修复方案</button><button>为论坛增加删除自己帖子的功能</button></div>
+          <button class="ai-run" id="aiAdjustBtn"><span>✦</span><b>生成变更方案</b><em>↗</em></button>
+          <p class="ai-note">不会自动执行。源码仅限本项目 6 个文件，禁止读取密钥与运行数据；应用前自动备份并进行语法检查。</p>
+          <div class="ai-result" id="aiResult" hidden></div>
+          <section class="ai-proposal" id="aiProposal" hidden>
+            <header><div><small>PROPOSED CHANGES</small><b id="aiProposalTitle">待确认方案</b></div><span id="aiRiskBadge">LOW</span></header>
+            <p id="aiProposalSummary"></p>
+            <div class="ai-change-list" id="aiChangeList"></div>
+            <div class="ai-diff-list" id="aiDiffList"></div>
+            <div class="ai-proposal-actions"><button id="aiCancelBtn">放弃</button><button id="aiApplyBtn">确认应用</button></div>
+          </section>
+          <button class="ai-undo" id="aiUndoBtn" hidden>↶ 撤销上一次 AI 修改</button>
+        </section>
+      </div>
+
+      <footer class="sidebar-footer">
+        <div class="console-account-wrap">
+          <button class="console-account" id="consoleAccountBtn" aria-expanded="false">
+            <span class="console-avatar" id="consoleAvatar">?</span>
+            <span class="console-user"><b id="consoleUsername">未登录</b><small id="currentPageFooter">首页 · 0 个元素</small></span>
+            <em>⌃</em>
+          </button>
+          <div class="console-account-menu" id="consoleAccountMenu" hidden>
+            <header><span class="console-avatar" id="menuAvatar">?</span><div><b id="menuUsername">未登录</b><small><i></i> 已登录 · <span id="menuRole">用户</span></small></div></header>
+            <dl><div><dt>控制台账号</dt><dd id="accountUsername">—</dd></div><div><dt>发布目录</dt><dd id="accountPublishPath">—</dd></div></dl>
+            <button id="inviteManagerBtn" hidden>管理注册邀请码</button>
+            <button id="consoleAccountAction">修改密码</button>
+            <button class="account-logout" id="consoleLogoutBtn">退出登录</button>
+          </div>
+        </div>
+        <button id="publishBtn">发布 <span>↗</span></button>
+      </footer>
+    </aside>
+
+    <section class="workspace">
+      <header class="page-control">
+        <div class="workspace-page-title"><span>CURRENT PAGE</span><b id="currentBreadcrumb">首页</b><small id="selectionState">未选择模块</small></div>
+        <div class="page-actions">
+          <div class="history-actions" aria-label="编辑历史"><button id="undoBtn" title="撤销（Ctrl+Z）" disabled>↶</button><button id="redoBtn" title="重做（Ctrl+Shift+Z）" disabled>↷</button></div>
+          <div class="device-switch" role="group" aria-label="预览设备"><button class="active" data-preview-device="desktop" title="桌面预览">桌面</button><button data-preview-device="tablet" title="平板预览">平板</button><button data-preview-device="mobile" title="手机预览">手机</button></div>
+          <div class="zoom-control" aria-label="预览缩放"><button id="zoomOutBtn" title="缩小预览">−</button><span id="zoomValue">100%</span><button id="zoomInBtn" title="放大预览">＋</button></div>
+          <span class="live-state"><i></i> 实时预览</span>
+          <button id="clearPageBtn" title="清空当前页面">清空</button>
+          <button class="preview-button" title="预览网站">↗</button>
+        </div>
+      </header>
+
+      <div class="canvas-scroll" id="canvasScroll">
+        <div class="site-canvas theme-minimal" id="siteCanvas">
+          <div class="canvas-content" id="canvasContent"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" hidden><span></span><button aria-label="关闭提示">×</button></div>
+  <div class="preview-modal" id="previewModal" hidden>
+    <div class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header><span>AIchemySites / 控制面板</span><button id="closeModalBtn" aria-label="关闭弹窗">×</button></header>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+  <div class="element-context" id="elementContextMenu" hidden>
+    <button data-context-action="edit">编辑</button>
+    <button data-context-action="move">上移一位</button>
+    <button data-context-action="delete">删除</button>
+  </div>
+  <script src="/auth.js?v=20260825-14"></script>
+  <script src="/script.js?v=20260825-15"></script>
+</body>
+</html>
