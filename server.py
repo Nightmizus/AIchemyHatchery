@@ -41,6 +41,7 @@ AI_LOCK = threading.Lock()
 AI_PROPOSALS: dict[str, dict] = {}
 AI_BACKUPS: dict[str, dict[str, str]] = {}
 AI_SOURCE_FILES = ("index.html", "styles.css", "auth.js", "script.js", "viewer.html", "viewer.js", "server.py")
+PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/auth.js", "/script.js", "/viewer.js"))
 
 
 def read_text_exact(path: Path) -> str:
@@ -350,6 +351,8 @@ def migrate_existing_site_databases() -> None:
 
 load_env()
 HOST = os.environ.get("ALCHEMY_SITES_HOST", "127.0.0.1").strip() or "127.0.0.1"
+SECURE_COOKIES = os.environ.get("ALCHEMY_SITES_SECURE_COOKIES", "false").strip().lower() in ("1", "true", "yes", "on")
+COOKIE_SECURITY_SUFFIX = "; Secure" if SECURE_COOKIES else ""
 try:
     PORT = int(os.environ.get("ALCHEMY_SITES_PORT", "4173"))
 except ValueError:
@@ -368,11 +371,26 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         static_path = urlparse(self.path).path
-        if static_path in ("/", "/index.html", "/styles.css", "/auth.js", "/script.js", "/viewer.html", "/viewer.js"):
+        if static_path == "/" or static_path in PUBLIC_STATIC_PATHS:
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
         super().end_headers()
+
+    def do_HEAD(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/":
+            self.path = "/index.html"
+            super().do_HEAD()
+            return
+        if parsed.path in PUBLIC_STATIC_PATHS:
+            self.path = parsed.path
+            super().do_HEAD()
+            return
+        self.send_error(404, "Not found")
 
     def send_json(self, value: object, status: int = 200, headers: dict[str, str | list[str]] | None = None) -> None:
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -451,7 +469,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
         return {
             "Set-Cookie": (
                 f"alchemy_sites_console_session={token}; Path=/; Max-Age={max_age}; "
-                "HttpOnly; SameSite=Strict"
+                f"HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}"
             )
         }
 
@@ -570,8 +588,8 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
         self.send_json(
             {"ok": True},
             headers={"Set-Cookie": [
-                "alchemy_sites_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
-                "miaoda_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+                f"alchemy_sites_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
+                f"miaoda_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
             ]},
         )
 
@@ -1220,7 +1238,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
                 (token_hash, user_id, iso_time(created_at), iso_time(expires_at)),
             )
         cookie_name = self.site_cookie_name(site_username)
-        return {"Set-Cookie": f"{cookie_name}={token}; Path=/; Max-Age={CONSOLE_SESSION_DAYS * 86400}; HttpOnly; SameSite=Strict"}
+        return {"Set-Cookie": f"{cookie_name}={token}; Path=/; Max-Age={CONSOLE_SESSION_DAYS * 86400}; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}"}
 
     def require_published_user(self, site_username: str) -> str | None:
         user = self.published_session_user(site_username)
@@ -1299,8 +1317,8 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
             with site_database(site_username) as connection:
                 connection.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
         self.send_json({"ok": True}, headers={"Set-Cookie": [
-            f"{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
-            f"{self.legacy_site_cookie_name(site_username)}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict",
+            f"{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
+            f"{self.legacy_site_cookie_name(site_username)}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
         ]})
 
     def handle_forum_topic(self, site_username: str) -> None:
@@ -1654,7 +1672,13 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/":
             self.path = "/index.html"
-        super().do_GET()
+            super().do_GET()
+            return
+        if parsed.path in PUBLIC_STATIC_PATHS:
+            self.path = parsed.path
+            super().do_GET()
+            return
+        self.send_error(404, "Not found")
 
     def serve_published(self, path: str, site_username: str) -> None:
         site_file = PUBLISHED / site_username / "site.json"

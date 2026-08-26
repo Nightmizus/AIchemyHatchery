@@ -5,7 +5,7 @@
 需要 Python 3.10 或更高版本；当前服务端仅使用 Python 标准库。
 
 1. 克隆私有仓库并进入仓库目录。
-2. 将 `.env.example` 复制为 `.env`，按需填写 Kimi API Key、监听地址和端口。
+2. 将 `.env.example` 复制为 `.env`，按需填写 Kimi API Key、监听地址和端口。反向代理已启用 HTTPS 时，将 `ALCHEMY_SITES_SECURE_COOKIES` 设为 `true`。
 3. 在服务器终端交互式创建管理员：
 
    ```bash
