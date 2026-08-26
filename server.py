@@ -26,8 +26,7 @@ from datetime import datetime, timedelta, timezone
 
 ROOT = Path(__file__).resolve().parent
 PUBLISHED = ROOT / "published"
-DATABASE = ROOT / "alchemy_sites.db"
-LEGACY_DATABASE = ROOT / "miaoda.db"
+DATABASE = ROOT / "alchemy_hatchery.db"
 HOST = "127.0.0.1"
 PORT = 4173
 RUNTIME_LOCK = threading.Lock()
@@ -128,9 +127,38 @@ def password_matches(password: str, salt_hex: str, expected_hex: str, iterations
 
 
 def initialize_database() -> None:
-    if not DATABASE.exists() and LEGACY_DATABASE.exists():
-        shutil.copy2(LEGACY_DATABASE, DATABASE)
-        print("已迁移旧版控制台数据库到 alchemy_sites.db")
+    if not DATABASE.exists():
+        required_tables = {"users", "console_sessions", "site_drafts"}
+        candidates = sorted(
+            (path for path in ROOT.glob("*.db") if path != DATABASE),
+            key=lambda path: (not path.name.startswith("alchemy_"), path.name),
+        )
+        for candidate in candidates:
+            source: sqlite3.Connection | None = None
+            target: sqlite3.Connection | None = None
+            try:
+                source = sqlite3.connect(candidate)
+                tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not required_tables.issubset(tables):
+                    continue
+                temporary = DATABASE.with_suffix(".db.migrating")
+                target = sqlite3.connect(temporary)
+                source.backup(target)
+                target.commit()
+                target.close()
+                target = None
+                source.close()
+                source = None
+                os.replace(temporary, DATABASE)
+                print(f"已将旧品牌控制台数据库迁移到 {DATABASE.name}")
+                break
+            except (OSError, sqlite3.Error):
+                continue
+            finally:
+                if target is not None:
+                    target.close()
+                if source is not None:
+                    source.close()
     with database() as connection:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(
@@ -350,11 +378,11 @@ def migrate_existing_site_databases() -> None:
 
 
 load_env()
-HOST = os.environ.get("ALCHEMY_SITES_HOST", "127.0.0.1").strip() or "127.0.0.1"
-SECURE_COOKIES = os.environ.get("ALCHEMY_SITES_SECURE_COOKIES", "false").strip().lower() in ("1", "true", "yes", "on")
+HOST = os.environ.get("ALCHEMY_HATCHERY_HOST", "127.0.0.1").strip() or "127.0.0.1"
+SECURE_COOKIES = os.environ.get("ALCHEMY_HATCHERY_SECURE_COOKIES", "false").strip().lower() in ("1", "true", "yes", "on")
 COOKIE_SECURITY_SUFFIX = "; Secure" if SECURE_COOKIES else ""
 try:
-    PORT = int(os.environ.get("ALCHEMY_SITES_PORT", "4173"))
+    PORT = int(os.environ.get("ALCHEMY_HATCHERY_PORT", "4173"))
 except ValueError:
     PORT = 4173
 try:
@@ -363,8 +391,8 @@ except ValueError:
     KIMI_TIMEOUT_SECONDS = 240
 
 
-class AIchemySitesHandler(SimpleHTTPRequestHandler):
-    server_version = "AIchemySitesLocal/0.1"
+class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
+    server_version = "AIchemyHatcheryLocal/0.1"
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{self.log_date_time_string()}] {fmt % args}")
@@ -416,7 +444,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
             cookie.load(self.headers.get("Cookie", ""))
         except Exception:
             return None
-        token = cookie.get("alchemy_sites_console_session") or cookie.get("miaoda_console_session")
+        token = cookie.get("alchemy_hatchery_console_session")
         return token.value if token else None
 
     def console_user(self) -> dict | None:
@@ -446,7 +474,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
     def require_console_user(self, admin: bool = False) -> dict | None:
         user = self.console_user()
         if not user:
-            self.send_json({"error": "请先登录炼丹社Sites控制台"}, 401)
+            self.send_json({"error": "请先登录炼丹社Hatchery控制台"}, 401)
             return None
         if admin and user["role"] != "admin":
             self.send_json({"error": "只有管理员可以访问此功能"}, 403)
@@ -468,7 +496,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
             )
         return {
             "Set-Cookie": (
-                f"alchemy_sites_console_session={token}; Path=/; Max-Age={max_age}; "
+                f"alchemy_hatchery_console_session={token}; Path=/; Max-Age={max_age}; "
                 f"HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}"
             )
         }
@@ -588,8 +616,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
         self.send_json(
             {"ok": True},
             headers={"Set-Cookie": [
-                f"alchemy_sites_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
-                f"miaoda_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
+                f"alchemy_hatchery_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
             ]},
         )
 
@@ -807,7 +834,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
                 source_bundle[name] = read_text_exact(ROOT / name)
         allowed_elements = ["nav", "hero", "projects", "blog", "gallery", "stats", "team", "timeline", "forum", "account", "notice", "links", "cta", "footer", "detail"]
         system = (
-            "你是炼丹社Sites（AIchemySites）项目的保守型全栈代码代理。你能看到完整站点数据和允许编辑的前后端源码。"
+            "你是炼丹社Hatchery（AIchemyHatchery）项目的保守型全栈代码代理。你能看到完整站点数据和允许编辑的前后端源码。"
             "必须遵循最小修改原则：只改用户明确要求的内容；保留未提及的页面、元素、ID、文字、样式和功能。"
             "绝不因为改标题、配色或一个模块而重建整个页面；不确定时宁可不改并在 summary 说明。"
             "只输出一个 JSON 对象，不要 Markdown、代码围栏或额外文字。结构必须是："
@@ -1087,7 +1114,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
                 creationflags=creation_flags,
             )
 
-        threading.Thread(target=restart, name="alchemy-sites-restart", daemon=False).start()
+        threading.Thread(target=restart, name="alchemy-hatchery-restart", daemon=False).start()
 
     def handle_publish(self) -> None:
         user = self.require_console_user()
@@ -1181,10 +1208,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
         return bool(features.get("account")) or any('class="account-block"' in str(page.get("html", "")) for page in data.get("pages", []))
 
     def site_cookie_name(self, site_username: str) -> str:
-        return f"alchemy_sites_{hashlib.sha256(site_username.lower().encode('utf-8')).hexdigest()[:12]}"
-
-    def legacy_site_cookie_name(self, site_username: str) -> str:
-        return f"miaoda_site_{hashlib.sha256(site_username.lower().encode('utf-8')).hexdigest()[:12]}"
+        return f"alchemy_hatchery_{hashlib.sha256(site_username.lower().encode('utf-8')).hexdigest()[:12]}"
 
     def published_session_identity(self, site_username: str) -> dict | None:
         if not self.site_account_enabled(site_username) or not site_database_path(site_username).exists():
@@ -1194,7 +1218,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
             cookie.load(self.headers.get("Cookie", ""))
         except Exception:
             return None
-        token = cookie.get(self.site_cookie_name(site_username)) or cookie.get(self.legacy_site_cookie_name(site_username))
+        token = cookie.get(self.site_cookie_name(site_username))
         if not token:
             return None
         token_hash = hashlib.sha256(token.value.encode("utf-8")).hexdigest()
@@ -1318,7 +1342,6 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
                 connection.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
         self.send_json({"ok": True}, headers={"Set-Cookie": [
             f"{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
-            f"{self.legacy_site_cookie_name(site_username)}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
         ]})
 
     def handle_forum_topic(self, site_username: str) -> None:
@@ -1705,7 +1728,7 @@ class AIchemySitesHandler(SimpleHTTPRequestHandler):
 
 
 def command_line() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="炼丹社Sites（AIchemySites）服务")
+    parser = argparse.ArgumentParser(description="炼丹社Hatchery（AIchemyHatchery）服务")
     subparsers = parser.add_subparsers(dest="command")
     serve = subparsers.add_parser("serve", help="启动网站服务（默认命令）")
     serve.add_argument("--host", default=HOST, help=f"监听地址（默认：{HOST}）")
@@ -1740,8 +1763,8 @@ def run_server(host: str, port: int) -> int:
         print("请先运行：python server.py create-admin", file=sys.stderr)
         return 2
     migrate_existing_site_databases()
-    print(f"炼丹社Sites（AIchemySites）服务：http://{host}:{port}")
-    ThreadingHTTPServer((host, port), AIchemySitesHandler).serve_forever()
+    print(f"炼丹社Hatchery（AIchemyHatchery）服务：http://{host}:{port}")
+    ThreadingHTTPServer((host, port), AIchemyHatcheryHandler).serve_forever()
     return 0
 
 

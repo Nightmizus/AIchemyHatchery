@@ -8,9 +8,9 @@ const INITIAL_STATE = {
 };
 const state = JSON.parse(JSON.stringify(INITIAL_STATE));
 let currentConsoleUser=null;
-let DRAFT_KEY='alchemysites:guest:draft:v3';
-let AI_UNDO_KEY='alchemysites:guest:ai-undo:v2';
-let AI_RELOAD_NOTICE_KEY='alchemysites:guest:ai-reload-notice:v2';
+let DRAFT_KEY='alchemyhatchery:guest:draft:v3';
+let AI_UNDO_KEY='alchemyhatchery:guest:ai-undo:v2';
+let AI_RELOAD_NOTICE_KEY='alchemyhatchery:guest:ai-reload-notice:v2';
 
 const previewDB = {
   forumPosts:[
@@ -28,8 +28,8 @@ let nextItemId=1;
 let editingElementId=null;
 let editingItemId=null;
 let contextElementId=null;
-let previewDevice=sessionStorage.getItem('alchemysites:preview-device')||sessionStorage.getItem('miaoda:preview-device')||'desktop';
-let previewZoom=Math.max(50,Math.min(125,Number(sessionStorage.getItem('alchemysites:preview-zoom')||sessionStorage.getItem('miaoda:preview-zoom'))||100));
+let previewDevice=sessionStorage.getItem('alchemyhatchery:preview-device')||'desktop';
+let previewZoom=Math.max(50,Math.min(125,Number(sessionStorage.getItem('alchemyhatchery:preview-zoom'))||100));
 let historyStack=[JSON.stringify(state)];
 let historyIndex=0;
 let historyTimer=null;
@@ -122,11 +122,11 @@ function blockContent(type,element={}){
     const detailBodyMarkup=editing?`<div class="detail-body direct-edit direct-block" contenteditable="plaintext-only" spellcheck="true" data-direct-setting="body" data-direct-multiline="true" data-placeholder="点击这里直接撰写正文">${body}</div>`:`<div class="detail-body">${body}</div>`;
     return `<article class="detail-block">${parent?`<button class="detail-back" data-preview-action="navigate" data-page-id="${parent.id}">← 返回 ${esc(parent.name)}</button>`:''}<span class="block-kicker">${direct('eyebrow',settings.detailType==='project'?'PROJECT DETAIL':'ARTICLE DETAIL',false,'详情类型')}</span><h1 style="--detail-title-size:${esc(cssSize(settings.titleSize,'clamp(48px,8vw,105px)'))}">${title(page.name)}</h1><p class="detail-lead">${direct('description','在这里填写详情摘要。',true,'点击编辑摘要')}</p>${settings.image?`<div class="detail-cover"><img src="${esc(settings.image)}" alt="${esc(settings.title||page.name)}"></div>`:''}${detailBodyMarkup}</article>`;
   }
-  return `<footer class="b-footer"><div><b>${direct('title',state.siteName||'未命名网站',false,'点击编辑页脚名称')}</b>${linkedPages()}</div><small>${direct('description','© 2026 · 由 AIchemySites 搭建',false,'点击编辑版权文字')}</small></footer>`;
+  return `<footer class="b-footer"><div><b>${direct('title',state.siteName||'未命名网站',false,'点击编辑页脚名称')}</b>${linkedPages()}</div><small>${direct('description','© 2026 · 由 AIchemyHatchery 搭建',false,'点击编辑版权文字')}</small></footer>`;
 }
 
 function editDefaults(element){
-  const defaults={nav:{title:state.siteName,description:'',button:''},hero:{title:'把想法，\n变成真正的作品。',description:state.description,button:'开始了解',titleSize:'clamp(48px,7vw,102px)'},projects:{title:'最近的作品',description:'SELECTED WORK',button:'点击卡片查看详情'},blog:{title:'最新文章',description:'JOURNAL',button:'进入文章'},gallery:{title:'活动瞬间',description:'MOMENTS',button:''},stats:{title:'86|24|12',description:'社团成员|开源项目|本学期活动',button:''},team:{title:'认识成员',description:'OUR TEAM',button:''},timeline:{title:'活动安排',description:'UPCOMING',button:''},forum:{title:'大家都在聊',description:'',button:'发布话题'},account:{title:'登录你的账号',description:'登录后即可查看成员内容与参与社区互动。',button:'登录账号'},notice:{title:'秋季招新开始啦 · 9 月 5 日活动中心见',description:'',button:'查看详情',background:'var(--page-accent)',color:'#141510'},links:{title:'加入交流群|查看 GitHub|关注公众号',description:'#group|https://github.com|#wechat',button:''},cta:{title:'一起把下一个好点子做出来。',description:'',button:'现在加入'},footer:{title:state.siteName,description:'© 2026 · 由 AIchemySites 搭建',button:''},detail:{title:activePage().name,description:'在这里填写详情摘要。',body:'在这里填写详情正文。',button:''}};
+  const defaults={nav:{title:state.siteName,description:'',button:''},hero:{title:'把想法，\n变成真正的作品。',description:state.description,button:'开始了解',titleSize:'clamp(48px,7vw,102px)'},projects:{title:'最近的作品',description:'SELECTED WORK',button:'点击卡片查看详情'},blog:{title:'最新文章',description:'JOURNAL',button:'进入文章'},gallery:{title:'活动瞬间',description:'MOMENTS',button:''},stats:{title:'86|24|12',description:'社团成员|开源项目|本学期活动',button:''},team:{title:'认识成员',description:'OUR TEAM',button:''},timeline:{title:'活动安排',description:'UPCOMING',button:''},forum:{title:'大家都在聊',description:'',button:'发布话题'},account:{title:'登录你的账号',description:'登录后即可查看成员内容与参与社区互动。',button:'登录账号'},notice:{title:'秋季招新开始啦 · 9 月 5 日活动中心见',description:'',button:'查看详情',background:'var(--page-accent)',color:'#141510'},links:{title:'加入交流群|查看 GitHub|关注公众号',description:'#group|https://github.com|#wechat',button:''},cta:{title:'一起把下一个好点子做出来。',description:'',button:'现在加入'},footer:{title:state.siteName,description:'© 2026 · 由 AIchemyHatchery 搭建',button:''},detail:{title:activePage().name,description:'在这里填写详情摘要。',body:'在这里填写详情正文。',button:''}};
   return {...defaults[element.type],...(element.settings||{})};
 }
 function inlineEditorMarkup(element){
@@ -269,8 +269,8 @@ document.querySelector('#siteName').addEventListener('input',event=>{state.siteN
 document.querySelector('#addPageBtn').addEventListener('click',()=>addPage(null));document.querySelector('#clearPageBtn').addEventListener('click',()=>{if(!activePage().elements.length){showToast('当前页面已经是空白的');return}cleanupElementDetails(activePage().elements);activePage().elements=[];editingElementId=null;renderPages();renderCanvas();showToast('当前页面已清空')});document.querySelector('#toast button').addEventListener('click',()=>document.querySelector('#toast').hidden=true);
 document.querySelectorAll('.ai-examples button').forEach(button=>button.addEventListener('click',()=>{document.querySelector('#aiPrompt').value=button.textContent}));
 document.querySelector('#undoBtn').addEventListener('click',undoState);document.querySelector('#redoBtn').addEventListener('click',redoState);
-document.querySelectorAll('[data-preview-device]').forEach(button=>button.addEventListener('click',()=>{previewDevice=button.dataset.previewDevice;sessionStorage.setItem('alchemysites:preview-device',previewDevice);renderCanvas();showToast(`已切换到${button.textContent}预览`)}));
-function setPreviewZoom(value){previewZoom=Math.max(50,Math.min(125,value));sessionStorage.setItem('alchemysites:preview-zoom',String(previewZoom));renderCanvas()}
+document.querySelectorAll('[data-preview-device]').forEach(button=>button.addEventListener('click',()=>{previewDevice=button.dataset.previewDevice;sessionStorage.setItem('alchemyhatchery:preview-device',previewDevice);renderCanvas();showToast(`已切换到${button.textContent}预览`)}));
+function setPreviewZoom(value){previewZoom=Math.max(50,Math.min(125,value));sessionStorage.setItem('alchemyhatchery:preview-zoom',String(previewZoom));renderCanvas()}
 document.querySelector('#zoomOutBtn').addEventListener('click',()=>setPreviewZoom(previewZoom-10));document.querySelector('#zoomInBtn').addEventListener('click',()=>setPreviewZoom(previewZoom+10));
 document.addEventListener('keydown',event=>{const editingText=event.target.closest?.('input,textarea,[contenteditable]');if(editingText)return;if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();if(event.shiftKey)redoState();else undoState()}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redoState()}else if(event.key==='Escape'&&editingElementId)openElementEditor(editingElementId)});
 
@@ -328,7 +328,7 @@ function renderAiProposal(proposal){
 async function loadAiStatus(){try{const response=await fetch('/api/ai/status');const status=await response.json();const badge=document.querySelector('#aiStatusBadge');badge.textContent=status.configured?'可用':'未配置';badge.className=status.configured?'ready':'error';document.querySelector('#aiModelLabel').textContent=`${status.model||'Kimi'} · 可编辑 ${(status.editableFiles||[]).length} 个源码文件`;document.querySelector('#aiAdjustBtn').disabled=!status.configured}catch{document.querySelector('#aiStatusBadge').textContent='服务异常';document.querySelector('#aiStatusBadge').className='error'}}
 function saveDraftNow(){clearTimeout(draftSaveTimer);if(!currentConsoleUser)return;try{const snapshot=JSON.stringify(state);void persistDraftSnapshot(snapshot).catch(()=>setSaveState('同步失败',false))}catch{}}
 function persistAiUndo(){try{if(lastAiUndo)sessionStorage.setItem(AI_UNDO_KEY,JSON.stringify(lastAiUndo));else sessionStorage.removeItem(AI_UNDO_KEY)}catch{}}
-function notifyPublishedReload(reason){try{const channel=new BroadcastChannel('alchemysites-live-preview');channel.postMessage({type:'reload',reason,at:Date.now()});channel.close()}catch{}try{localStorage.setItem('alchemysites:published-reload',JSON.stringify({reason,at:Date.now()}))}catch{}}
+function notifyPublishedReload(reason){try{const channel=new BroadcastChannel('alchemyhatchery-live-preview');channel.postMessage({type:'reload',reason,at:Date.now()});channel.close()}catch{}try{localStorage.setItem('alchemyhatchery:published-reload',JSON.stringify({reason,at:Date.now()}))}catch{}}
 function refreshAiChangedFiles(files=[]){
   if(files.includes('styles.css'))document.querySelectorAll('link[rel="stylesheet"]').forEach(link=>{const url=new URL(link.href,location.href);if(url.pathname.endsWith('/styles.css')){url.searchParams.set('ai',String(Date.now()));link.href=url.toString()}});
   const viewerReloaded=files.some(name=>['viewer.html','viewer.js'].includes(name));if(viewerReloaded)notifyPublishedReload('AI 已更新发布站点运行代码');
@@ -347,23 +347,23 @@ function restoreAiReloadUi(){
   if(lastAiUndo)document.querySelector('#aiUndoBtn').hidden=false;
 }
 async function consoleRequest(path,options={}){
-  if(window.AIchemySitesAuth)return window.AIchemySitesAuth.request(path,options);
+  if(window.AIchemyHatcheryAuth)return window.AIchemyHatcheryAuth.request(path,options);
   const request={method:options.method||'GET',headers:{'Accept':'application/json'}};
   if(options.body!==undefined){request.headers['Content-Type']='application/json';request.body=JSON.stringify(options.body)}
   const response=await fetch(path,request);let payload={};try{payload=await response.json()}catch{payload={error:'服务返回了无法解析的内容'}}
   if(!response.ok){const error=new Error(payload.error||`请求失败（${response.status}）`);error.status=response.status;throw error}return payload;
 }
 function showAuthGate(message=''){
-  currentConsoleUser=null;if(window.AIchemySitesAuth){window.AIchemySitesAuth.showGate(message);return}const gate=document.querySelector('#authGate');gate.hidden=false;const error=document.querySelector('#authError');error.textContent=message;error.hidden=!message;setSaveState('等待登录',false);
+  currentConsoleUser=null;if(window.AIchemyHatcheryAuth){window.AIchemyHatcheryAuth.showGate(message);return}const gate=document.querySelector('#authGate');gate.hidden=false;const error=document.querySelector('#authError');error.textContent=message;error.hidden=!message;setSaveState('等待登录',false);
 }
 function updateConsoleAccount(){
   if(!currentConsoleUser)return;const username=currentConsoleUser.username;const initial=username.slice(0,1).toUpperCase();
   document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#consoleUsername').textContent=username;document.querySelector('#menuUsername').textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPublishPath').textContent=`/${username}`;document.querySelector('#menuRole').textContent=currentConsoleUser.role==='admin'?'管理员':'用户';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
 }
 async function enterConsole(user){
-  currentConsoleUser=user;const username=user.username;DRAFT_KEY=`alchemysites:${username}:draft:v3`;AI_UNDO_KEY=`alchemysites:${username}:ai-undo:v2`;AI_RELOAD_NOTICE_KEY=`alchemysites:${username}:ai-reload-notice:v2`;
+  currentConsoleUser=user;const username=user.username;DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_UNDO_KEY=`alchemyhatchery:${username}:ai-undo:v2`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;
   let draft=null;try{draft=(await consoleRequest('/api/console/draft')).draft}catch(error){if(error.status===401){showAuthGate('登录已过期，请重新登录');return}showToast(`读取云端草稿失败：${error.message}`)}
-  if(!draft){try{draft=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null')}catch{}if(!draft){try{draft=JSON.parse(localStorage.getItem(`miaoda:${username}:draft:v3`)||'null')}catch{}}if(!draft&&username.toLowerCase()==='test'){try{draft=JSON.parse(localStorage.getItem('miaoda:test:draft:v2')||'null')}catch{}}}
+  if(!draft){try{draft=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null')}catch{}}
   const next=draft?.pages?.length?draft:INITIAL_STATE;restoreState(next);ensureForumAccounts();syncEditorAfterAI();historyStack=[JSON.stringify(state)];historyIndex=0;updateHistoryButtons();pendingAiProposal=null;lastAiUndo=null;try{const savedUndo=JSON.parse(sessionStorage.getItem(AI_UNDO_KEY)||'null');if(savedUndo?.proposalId)lastAiUndo=savedUndo}catch{}
   updateConsoleAccount();document.querySelector('#authGate').hidden=true;syncFields();setSaveState(draft?'草稿已同步':'新草稿',false);restoreAiReloadUi();void loadAiStatus();if(!draft)scheduleDraftSave();
 }
@@ -381,7 +381,7 @@ async function openInviteManager(){
   try{const [invitePayload,userPayload]=await Promise.all([consoleRequest('/api/admin/invites'),consoleRequest('/api/admin/users')]);const users=(userPayload.users||[]).map(item=>{const own=item.username.toLowerCase()===currentConsoleUser?.username?.toLowerCase();const status=item.status==='active'?'正常':'已停用';return `<div class="admin-user-row"><span class="console-avatar">${esc(item.username.slice(0,1).toUpperCase())}</span><div><b>${esc(item.username)}</b><small>${item.role==='admin'?'管理员':'用户'} · ${item.published?'已发布':'未发布'} · ${item.sessionCount} 个会话</small></div><em class="${item.status}">${status}</em>${own?'<i>当前账号</i>':`<button data-user-status="${item.status==='active'?'disabled':'active'}" data-user-name="${esc(item.username)}">${item.status==='active'?'停用':'启用'}</button>`}</div>`}).join('')||'<div class="invite-empty">暂无用户</div>';openModal('账号与注册管理',`<div class="admin-console"><section><header><div><small>USERS</small><h3>控制台用户</h3></div><b>${userPayload.total||0}</b></header><div class="admin-user-list">${users}</div></section><section class="invite-manager"><header><div><small>INVITATIONS</small><h3>注册邀请码</h3></div></header><p>随机 16 位 hex，每个只能注册一次。可生成、复制或撤销尚未使用的邀请码。</p><form class="invite-generator" data-console-form="invite-generate"><label>本次生成数量<input name="count" type="number" min="1" max="20" value="5" required></label><button>生成邀请码</button></form><div class="invite-list">${inviteRows(invitePayload.invites||[])}</div></section></div>`)}catch(error){showToast(error.message)}
 }
 async function logoutConsole(){
-  try{await persistDraftSnapshot(JSON.stringify(state))}catch{}document.querySelector('#consoleAccountMenu').hidden=true;if(window.AIchemySitesAuth)await window.AIchemySitesAuth.logout();else showAuthGate();showToast('已退出控制台账号');
+  try{await persistDraftSnapshot(JSON.stringify(state))}catch{}document.querySelector('#consoleAccountMenu').hidden=true;if(window.AIchemyHatcheryAuth)await window.AIchemyHatcheryAuth.logout();else showAuthGate();showToast('已退出控制台账号');
 }
 document.querySelector('#aiAdjustBtn').addEventListener('click',async()=>{const prompt=document.querySelector('#aiPrompt').value.trim();if(!prompt){showToast('先准确描述要修改的内容');return}const button=document.querySelector('#aiAdjustBtn');const result=document.querySelector('#aiResult');button.disabled=true;button.querySelector('b').textContent='Kimi 正在阅读项目…';result.hidden=true;result.classList.remove('error');document.querySelector('#aiProposal').hidden=true;try{const response=await fetch('/api/ai/propose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,context:aiSafeSnapshot(),includeSite:document.querySelector('#aiScopeSite').checked,includeSource:document.querySelector('#aiScopeCode').checked})});const payload=await response.json();if(!response.ok)throw new Error(payload.error||'AI 请求失败');renderAiProposal(payload.proposal||{})}catch(error){showAiError(`生成失败：${error.message}`)}finally{button.disabled=false;button.querySelector('b').textContent='生成变更方案'}});
 document.querySelector('#aiCancelBtn').addEventListener('click',()=>{pendingAiProposal=null;document.querySelector('#aiProposal').hidden=true;showToast('已放弃这次 AI 方案')});
@@ -413,7 +413,7 @@ function buildPublishPayload(){
   const pages=state.pages.map(page=>{state.activePageId=page.id;return {id:page.id,name:page.name,path:pageFullPath(page),parentId:page.parentId,kind:page.kind,html:page.elements.map(element=>blockContent(element.type,element)).join('')}});
   state.activePageId=previousPage;editingElementId=previousEditing;previewDB.accountLoggedIn=previousAccountState;return {username:currentConsoleUser?.username||'',siteName:state.siteName,description:state.description,theme:state.theme,background:state.background,contentWidth:state.contentWidth,sectionGap:state.sectionGap,pages,forumPosts:previewDB.forumPosts};
 }
-function siteAdminCredentialMarkup(admin){return `<div class="site-admin-credential"><small>本站独立管理员 · 仅显示这一次</small><b>${esc(admin.username)}</b><code>${esc(admin.password)}</code><button data-modal-action="copy" data-copy="用户名：${esc(admin.username)}\n密码：${esc(admin.password)}">复制管理员凭据</button><p>请登录发布网站后妥善保管。它不等于炼丹社Sites控制台账号，也不能登录其他网站。</p></div>`}
+function siteAdminCredentialMarkup(admin){return `<div class="site-admin-credential"><small>本站独立管理员 · 仅显示这一次</small><b>${esc(admin.username)}</b><code>${esc(admin.password)}</code><button data-modal-action="copy" data-copy="用户名：${esc(admin.username)}\n密码：${esc(admin.password)}">复制管理员凭据</button><p>请登录发布网站后妥善保管。它不等于炼丹社Hatchery控制台账号，也不能登录其他网站。</p></div>`}
 document.querySelector('#publishBtn').onclick=async()=>{const button=document.querySelector('#publishBtn');button.disabled=true;button.firstChild.textContent='发布中 ';try{const response=await fetch('/api/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPublishPayload())});const payload=await response.json();if(response.status===401){showAuthGate('登录已过期，请重新登录');throw new Error('登录已过期')}if(!response.ok)throw new Error(payload.error||'发布失败');notifyPublishedReload('站点已重新发布');const credential=payload.siteAdmin?siteAdminCredentialMarkup(payload.siteAdmin):payload.accountEnabled?'<div class="site-account-existing"><p>本站独立账号数据库已保留，重新发布不会覆盖用户和登录密码。</p><button data-site-account-reset>忘记站长密码？重置密码</button></div>':'';openModal('发布成功',`<p>网站及页面树已经发布到 <b>${esc(payload.url)}</b>，已经打开的发布预览会自动刷新。</p>${credential}<a class="modal-action" href="${payload.url}" target="_blank">打开 ${esc(payload.url)} ↗</a>`)}catch(error){showToast(`发布失败：${error.message}`)}finally{button.disabled=false;button.firstChild.textContent='发布 '}};
 document.querySelector('.preview-button').addEventListener('click',()=>window.open(`/${encodeURIComponent(currentConsoleUser?.username||'test')}`,'_blank'));
 document.querySelector('#consoleAccountBtn').addEventListener('click',event=>{event.stopPropagation();const menu=document.querySelector('#consoleAccountMenu');menu.hidden=!menu.hidden;document.querySelector('#consoleAccountBtn').setAttribute('aria-expanded',String(!menu.hidden))});
@@ -427,6 +427,6 @@ document.querySelectorAll('[data-context-action]').forEach(button=>button.addEve
 document.addEventListener('click',()=>{const menu=document.querySelector('#consoleAccountMenu');menu.hidden=true;document.querySelector('#consoleAccountBtn').setAttribute('aria-expanded','false')});
 
 renderPages();syncFields();renderCanvas();
-window.addEventListener('alchemysites:authenticated',event=>void enterConsole(event.detail.user));
-window.addEventListener('alchemysites:logged-out',()=>{currentConsoleUser=null;setSaveState('等待登录',false)});
-window.addEventListener('alchemysites:toast',event=>showToast(event.detail.message));
+window.addEventListener('alchemyhatchery:authenticated',event=>void enterConsole(event.detail.user));
+window.addEventListener('alchemyhatchery:logged-out',()=>{currentConsoleUser=null;setSaveState('等待登录',false)});
+window.addEventListener('alchemyhatchery:toast',event=>showToast(event.detail.message));

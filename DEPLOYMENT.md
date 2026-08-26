@@ -1,11 +1,11 @@
-# AIchemySites 部署说明
+# AIchemyHatchery 部署说明
 
 ## 首次启动
 
 需要 Python 3.10 或更高版本；当前服务端仅使用 Python 标准库。
 
 1. 克隆私有仓库并进入仓库目录。
-2. 将 `.env.example` 复制为 `.env`，按需填写 Kimi API Key、监听地址和端口。反向代理已启用 HTTPS 时，将 `ALCHEMY_SITES_SECURE_COOKIES` 设为 `true`。
+2. 将 `.env.example` 复制为 `.env`，按需填写 Kimi API Key、监听地址和端口。反向代理已启用 HTTPS 时，将 `ALCHEMY_HATCHERY_SECURE_COOKIES` 设为 `true`。
 3. 在服务器终端交互式创建管理员：
 
    ```bash
@@ -30,6 +30,6 @@
 
 ## 更新代码
 
-停止旧进程，保留 `.env`、`alchemy_sites.db` 和 `published/`，执行 `git pull --ff-only` 后重新启动。数据库表会在启动时自动补齐，不会覆盖已有账号。
+停止旧进程，保留 `.env`、`alchemy_hatchery.db` 和 `published/`，执行 `git pull --ff-only` 后重新启动。数据库表会在启动时自动补齐，不会覆盖已有账号；旧品牌版本的控制台数据库会在首次启动时自动迁移。
 
 生产环境建议使用独立的低权限系统用户运行服务，并在 Caddy、Nginx 等反向代理后启用 HTTPS。不要直接公开数据库文件或项目目录的静态文件访问。

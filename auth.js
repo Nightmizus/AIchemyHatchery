@@ -173,7 +173,7 @@
     const gate = document.querySelector('#authGate');
     if (gate) gate.hidden = false;
     if (message) authError(message);
-    window.dispatchEvent(new CustomEvent('alchemysites:logged-out', { detail: { reason: message } }));
+    window.dispatchEvent(new CustomEvent('alchemyhatchery:logged-out', { detail: { reason: message } }));
   }
 
   function authenticated(user) {
@@ -182,7 +182,7 @@
     const gate = document.querySelector('#authGate');
     if (gate) gate.hidden = true;
     authError();
-    window.dispatchEvent(new CustomEvent('alchemysites:authenticated', { detail: { user } }));
+    window.dispatchEvent(new CustomEvent('alchemyhatchery:authenticated', { detail: { user } }));
   }
 
   async function submit(form) {
@@ -204,7 +204,7 @@
       });
       form.reset();
       authenticated(payload.user);
-      window.dispatchEvent(new CustomEvent('alchemysites:toast', { detail: { message: mode === 'register' ? '账号创建成功' : '登录成功' } }));
+      window.dispatchEvent(new CustomEvent('alchemyhatchery:toast', { detail: { message: mode === 'register' ? '账号创建成功' : '登录成功' } }));
     } catch (error) {
       authError(error.message);
       form.querySelector('input[type="password"]')?.focus();
@@ -274,7 +274,7 @@
     if (input.name === 'invite') input.value = input.value.replace(/[^0-9a-f]/gi, '').slice(0, 16).toLowerCase();
   });
 
-  window.AIchemySitesAuth = {
+  window.AIchemyHatcheryAuth = {
     request,
     showGate,
     logout,

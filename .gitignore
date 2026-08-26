@@ -5,6 +5,7 @@
 *.db
 *.db-wal
 *.db-shm
+*.db.*
 published/
 .ai-backups/
 
@@ -14,7 +15,7 @@ __pycache__/
 venv/
 node_modules/
 
-# 本项目明确不使用 Sites；避免误提交其本地元数据
+# 避免误提交第三方托管平台的本地元数据
 .openai/
 
 .idea/
