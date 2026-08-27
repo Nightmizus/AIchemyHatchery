@@ -961,6 +961,70 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             ]},
         )
 
+    def handle_sso_callback(self) -> None:
+        """Handle SSO callback from sdsz: verify code, create local session."""
+        parsed = urlparse(self.path)
+        params = {}
+        if parsed.query:
+            for pair in parsed.query.split("&"):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    params[k] = v
+        code = params.get("code", "")
+        state = params.get("state", "")
+        error = params.get("error", "")
+
+        if error:
+            self.send_error_page(f"SSO 登录失败：{error}")
+            return
+        if not code:
+            self.send_error_page("缺少授权码")
+            return
+
+        # Verify code with sdsz
+        sdsz_verify_url = f"https://sdsz.groovin.cn/api/auth/sso?code={code}"
+        try:
+            import urllib.request
+            req = urllib.request.Request(sdsz_verify_url, method="GET")
+            req.add_header("Accept", "application/json")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            self.send_error_page(f"验证失败：{exc}")
+            return
+
+        if not data.get("ok") or not data.get("user"):
+            self.send_error_page(data.get("error", "验证失败"))
+            return
+
+        user_data = data["user"]
+        user_id = user_data.get("id")
+        if not user_id:
+            self.send_error_page("用户数据不完整")
+            return
+
+        # Create local session
+        headers = self.issue_console_session(user_id, remember=True)
+        # Redirect to home
+        self.send_response(302)
+        self.send_header("Location", "/")
+        for key, value in headers.items():
+            self.send_header(key, value)
+        self.end_headers()
+
+    def send_error_page(self, message: str) -> None:
+        body = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录失败</title>
+<style>body{{font:16px sans-serif;padding:40px;background:#eceee7;color:#171814;display:grid;place-items:center;min-height:100vh;margin:0}}
+.card{{max-width:400px;padding:30px;border:1px solid #bfc1b8;border-radius:14px;background:#fff;box-shadow:0 25px 80px #25271f1c}}
+h1{{font-size:24px;margin:0 0 12px}}p{{color:#696b64;line-height:1.6;margin:0 0 20px}}
+a{{display:inline-block;padding:10px 20px;background:#171814;color:#fff;text-decoration:none;border-radius:7px;font-size:14px}}</style></head>
+<body><div class="card"><h1>登录失败</h1><p>{message}</p><a href="/">返回首页</a></div></body></html>""".encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def handle_change_password(self) -> None:
         user = self.require_console_user()
         if not user:
@@ -1876,6 +1940,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             for header in ("If-Modified-Since", "If-None-Match"):
                 if header in self.headers:
                     del self.headers[header]
+        if parsed.path == "/auth/callback":
+            self.handle_sso_callback()
+            return
         if parsed.path == "/api/auth/me":
             user = self.console_user()
             if not user:
