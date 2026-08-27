@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import shutil
+import smtplib
 import socket
 import sqlite3
 import subprocess
@@ -18,11 +19,14 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from email.mime.text import MIMEText
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
+
+import bcrypt
 
 ROOT = Path(__file__).resolve().parent
 PUBLISHED = ROOT / "published"
@@ -111,17 +115,18 @@ def database() -> sqlite3.Connection:
     connection.execute("PRAGMA busy_timeout = 10000")
     return connection
 
+def password_digest(password: str, salt: bytes | None = None, iterations: int = 0) -> tuple[str, str]:
+    """bcrypt hash. Salt/iterations args kept for signature compat but unused."""
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12))
+    return "", hashed.decode("ascii")
 
-def password_digest(password: str, salt: bytes | None = None, iterations: int = PASSWORD_ITERATIONS) -> tuple[str, str]:
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return salt.hex(), digest.hex()
 
-
-def password_matches(password: str, salt_hex: str, expected_hex: str, iterations: int) -> bool:
+def password_matches(password: str, salt_hex: str, expected_hex: str, iterations: int = 0) -> bool:
+    """Verify password against stored bcrypt hash."""
     try:
-        _, actual = password_digest(password, bytes.fromhex(salt_hex), iterations)
+        return bcrypt.checkpw(password.encode("utf-8"), expected_hex.encode("ascii"))
     except (ValueError, TypeError):
+        return False
         return False
     return hmac.compare_digest(actual, expected_hex)
 
@@ -167,14 +172,41 @@ def initialize_database() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 password_hash TEXT NOT NULL,
-                password_salt TEXT NOT NULL,
-                password_iterations INTEGER NOT NULL,
+                password_salt TEXT NOT NULL DEFAULT '',
+                password_iterations INTEGER NOT NULL DEFAULT 0,
                 role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
                 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
                 created_at TEXT NOT NULL,
                 last_login_at TEXT,
-                password_changed_at TEXT
+                password_changed_at TEXT,
+                email TEXT COLLATE NOCASE UNIQUE,
+                campus_id TEXT UNIQUE,
+                real_name TEXT,
+                name_en TEXT,
+                grade TEXT DEFAULT '',
+                class_group TEXT DEFAULT '',
+                initials TEXT DEFAULT '',
+                avatar_color TEXT DEFAULT '#E8622A',
+                avatar_url TEXT,
+                bio TEXT DEFAULT '',
+                gender TEXT,
+                identity_type TEXT,
+                current_grade TEXT,
+                current_class TEXT,
+                graduation_year INTEGER
             );
+            CREATE TABLE IF NOT EXISTS campus_users (
+                campus_id TEXT PRIMARY KEY,
+                registered INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS email_verifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL COLLATE NOCASE,
+                code TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications(email);
             CREATE TABLE IF NOT EXISTS invite_codes (
                 code TEXT PRIMARY KEY COLLATE NOCASE,
                 created_by INTEGER NOT NULL REFERENCES users(id),
@@ -214,6 +246,23 @@ def initialize_database() -> None:
             ("status", "TEXT NOT NULL DEFAULT 'active'"),
             ("last_login_at", "TEXT"),
             ("password_changed_at", "TEXT"),
+            ("email", "TEXT COLLATE NOCASE"),
+            ("campus_id", "TEXT"),
+            ("real_name", "TEXT"),
+            ("name_en", "TEXT"),
+            ("grade", "TEXT DEFAULT ''"),
+            ("class_group", "TEXT DEFAULT ''"),
+            ("initials", "TEXT DEFAULT ''"),
+            ("avatar_color", "TEXT DEFAULT '#E8622A'"),
+            ("avatar_url", "TEXT"),
+            ("bio", "TEXT DEFAULT ''"),
+            ("gender", "TEXT"),
+            ("identity_type", "TEXT"),
+            ("current_grade", "TEXT"),
+            ("current_class", "TEXT"),
+            ("graduation_year", "INTEGER"),
+            ("password_salt", "TEXT NOT NULL DEFAULT ''"),
+            ("password_iterations", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in user_columns:
                 connection.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
@@ -234,12 +283,12 @@ def create_console_admin(username: str, password: str) -> None:
         raise ValueError("用户名必须为 3–32 位字母、数字、下划线或连字符")
     if len(password) < 8 or len(password) > 128:
         raise ValueError("密码长度必须为 8–128 位")
-    salt, digest = password_digest(password)
+    _, digest = password_digest(password)
     with database() as connection:
         try:
             cursor = connection.execute(
-                "INSERT INTO users(username,password_hash,password_salt,password_iterations,role,status,created_at,password_changed_at) VALUES(?,?,?,?,?,?,?,?)",
-                (username, digest, salt, PASSWORD_ITERATIONS, "admin", "active", iso_time(), iso_time()),
+                "INSERT INTO users(username,password_hash,password_salt,password_iterations,role,status,created_at,password_changed_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (username, digest, "", 0, "admin", "active", iso_time(), iso_time(), iso_time()),
             )
         except sqlite3.IntegrityError as error:
             raise ValueError(f"用户 {username} 已存在") from error
@@ -502,13 +551,31 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         }
 
     def public_user(self, user: dict | sqlite3.Row) -> dict:
+        keys = user.keys() if hasattr(user, 'keys') else []
+        def col(name, default=None):
+            return user[name] if name in keys else default
         return {
             "id": int(user["id"]),
             "username": str(user["username"]),
             "role": str(user["role"]),
-            "status": str(user["status"] if "status" in user.keys() else "active"),
+            "status": str(col("status", "active")),
             "createdAt": str(user["created_at"]),
-            "lastLoginAt": user["last_login_at"] if "last_login_at" in user.keys() else None,
+            "lastLoginAt": col("last_login_at"),
+            "email": col("email"),
+            "campusId": col("campus_id"),
+            "realName": col("real_name"),
+            "nameEn": col("name_en"),
+            "grade": col("grade", ""),
+            "classGroup": col("class_group", ""),
+            "initials": col("initials", ""),
+            "avatarColor": col("avatar_color", "#E8622A"),
+            "avatarUrl": col("avatar_url"),
+            "bio": col("bio", ""),
+            "gender": col("gender"),
+            "identityType": col("identity_type"),
+            "currentGrade": col("current_grade"),
+            "currentClass": col("current_class"),
+            "graduationYear": col("graduation_year"),
         }
 
     def validate_credentials(self, username: object, password: object) -> tuple[str, str]:
@@ -543,12 +610,23 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "登录尝试过于频繁，请 5 分钟后再试"}, 429)
             return
         data = self.read_json()
-        username = str(data.get("username", "")).strip()
+        identifier = str(data.get("identifier", "") or data.get("username", "")).strip()
         password = str(data.get("password", ""))
         remember = bool(data.get("remember", True))
         with database() as connection:
-            row = connection.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-        if not row or not password_matches(password, row["password_salt"], row["password_hash"], row["password_iterations"]):
+            # Support login by username, email, or campus_id
+            row = connection.execute(
+                "SELECT * FROM users WHERE username = ? OR email = ? OR campus_id = ?",
+                (identifier, identifier, identifier),
+            ).fetchone()
+        # Always verify against bcrypt even when user doesn't exist (timing safety)
+        _dummy_hash = "$2a$12$za1.vQf.3iQH5HltnMbzqOfFBZdLmew8nOKJWJaq7IhqcjZzSyXhy"
+        stored_hash = row["password_hash"] if row else _dummy_hash
+        if not password_matches(password, "", stored_hash, 0):
+            self.record_login_failure()
+            self.send_json({"error": "用户名或密码错误"}, 401)
+            return
+        if not row:
             self.record_login_failure()
             self.send_json({"error": "用户名或密码错误"}, 401)
             return
@@ -569,36 +647,84 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return
         data = self.read_json()
         username, password = self.validate_credentials(data.get("username"), data.get("password"))
-        invite = str(data.get("invite", "")).strip().lower()
-        if not INVITE_PATTERN.fullmatch(invite):
-            raise ValueError("邀请码必须是 16 位 hex 字符")
-        salt, digest = password_digest(password)
+        campus_id = str(data.get("campusId", "")).strip()
+        email = str(data.get("email", "")).strip().lower()
+        code = str(data.get("code", "")).strip()
+        grade = str(data.get("grade", "")).strip()
+        class_group = str(data.get("classGroup", "")).strip()
+        real_name = str(data.get("realName", "")).strip()
+
+        if not campus_id:
+            raise ValueError("请输入数字校园号")
+        if not email:
+            raise ValueError("请输入邮箱")
+        if not code:
+            raise ValueError("请输入邮箱验证码")
+
+        with database() as connection:
+            # Validate campus ID
+            campus = connection.execute(
+                "SELECT * FROM campus_users WHERE campus_id = ?", (campus_id,)
+            ).fetchone()
+            if not campus:
+                raise ValueError("数字校园号无效")
+            if campus["registered"]:
+                raise ValueError("该校园号已注册，请直接登录")
+
+            # Validate email verification code
+            verification = connection.execute(
+                "SELECT * FROM email_verifications WHERE email = ? AND code = ? ORDER BY created_at DESC LIMIT 1",
+                (email, code),
+            ).fetchone()
+            if not verification:
+                raise ValueError("验证码错误")
+            if verification["expires_at"] < iso_time():
+                raise ValueError("验证码已过期，请重新发送")
+
+            # Check email not already used
+            existing = connection.execute(
+                "SELECT id FROM users WHERE email = ?", (email,)
+            ).fetchone()
+            if existing:
+                raise ValueError("该邮箱已注册")
+
+        _, hashed = password_digest(password)
+        initials = username[:2].upper() if len(username) >= 2 else username.upper()
+        colors = ["#E8622A", "#3B82F6", "#22C55E", "#A855F7", "#EC4899", "#F59E0B", "#06B6D4"]
+        avatar_color = colors[hash(username) % len(colors)]
+
         try:
             connection = database()
             with connection:
                 connection.execute("BEGIN IMMEDIATE")
-                invite_row = connection.execute(
-                    "SELECT code FROM invite_codes WHERE code = ? AND used_by IS NULL AND revoked_at IS NULL",
-                    (invite,),
-                ).fetchone()
-                if not invite_row:
-                    raise ValueError("邀请码无效、已使用或已撤销")
                 cursor = connection.execute(
-                    "INSERT INTO users(username,password_hash,password_salt,password_iterations,role,status,created_at,password_changed_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (username, digest, salt, PASSWORD_ITERATIONS, "user", "active", iso_time(), iso_time(), iso_time()),
+                    """INSERT INTO users(
+                        username, password_hash, password_salt, password_iterations,
+                        role, status, created_at, password_changed_at, last_login_at,
+                        email, campus_id, real_name, grade, class_group, initials, avatar_color
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (username, hashed, "", 0, "user", "active", iso_time(), iso_time(), iso_time(),
+                     email, campus_id, real_name, grade, class_group, initials, avatar_color),
                 )
                 user_id = int(cursor.lastrowid)
                 changed = connection.execute(
-                    "UPDATE invite_codes SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL AND revoked_at IS NULL",
-                    (user_id, iso_time(), invite),
+                    "UPDATE campus_users SET registered = 1 WHERE campus_id = ? AND registered = 0",
+                    (campus_id,),
                 ).rowcount
                 if changed != 1:
-                    raise ValueError("邀请码已被使用，请换一个邀请码")
+                    raise ValueError("该校园号已被注册")
+                connection.execute(
+                    "DELETE FROM email_verifications WHERE email = ?", (email,)
+                )
                 row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-                audit_event(connection, user_id, "auth.register", {"invite": invite})
+                audit_event(connection, user_id, "auth.register", {"campusId": campus_id, "email": email})
         except sqlite3.IntegrityError as exc:
             if "users.username" in str(exc):
                 raise ValueError("用户名已存在") from exc
+            if "users.email" in str(exc):
+                raise ValueError("该邮箱已注册") from exc
+            if "users.campus_id" in str(exc):
+                raise ValueError("该校园号已注册") from exc
             raise ValueError("注册数据冲突，请重试") from exc
         finally:
             if "connection" in locals():
@@ -606,6 +732,59 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.clear_login_failures()
         headers = self.issue_console_session(int(row["id"]), bool(data.get("remember", True)))
         self.send_json({"ok": True, "user": self.public_user(row)}, 201, headers)
+
+    def handle_send_otp(self) -> None:
+        if self.login_is_limited():
+            self.send_json({"error": "操作过于频繁，请 5 分钟后再试"}, 429)
+            return
+        data = self.read_json()
+        email = str(data.get("email", "")).strip().lower()
+        if not email or "@" not in email:
+            raise ValueError("请输入有效邮箱地址")
+
+        # Generate 6-digit code
+        code = "".join(secrets.choice("0123456789") for _ in range(6))
+        expires = iso_time(datetime.now(timezone.utc) + timedelta(minutes=10))
+
+        with database() as connection:
+            # Remove old codes for this email
+            connection.execute("DELETE FROM email_verifications WHERE email = ?", (email,))
+            connection.execute(
+                "INSERT INTO email_verifications(email, code, expires_at, created_at) VALUES(?,?,?,?)",
+                (email, code, expires, iso_time()),
+            )
+
+        # Send via SMTP
+        smtp_host = os.environ.get("EMAIL_HOST", "")
+        smtp_port = int(os.environ.get("EMAIL_PORT", "465"))
+        smtp_user = os.environ.get("EMAIL_USER", "")
+        smtp_pass = os.environ.get("EMAIL_PASS", "")
+        smtp_from = os.environ.get("EMAIL_FROM", smtp_user)
+
+        if not smtp_host:
+            self.send_json({"error": "邮件服务未配置"}, 500)
+            return
+
+        try:
+            msg = MIMEText(f"你的验证码是：{code}\n\n10 分钟内有效。", "plain", "utf-8")
+            msg["Subject"] = "AIchemy Hatchery 注册验证码"
+            msg["From"] = smtp_from
+            msg["To"] = email
+
+            if smtp_port == 465:
+                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as server:
+                    server.login(smtp_user, smtp_pass)
+                    server.sendmail(smtp_from, [email], msg.as_string())
+            else:
+                with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                    server.starttls()
+                    server.login(smtp_user, smtp_pass)
+                    server.sendmail(smtp_from, [email], msg.as_string())
+        except Exception as exc:
+            self.send_json({"error": f"发送邮件失败：{exc}"}, 500)
+            return
+
+        self.send_json({"ok": True, "message": "验证码已发送，10 分钟内有效"})
 
     def handle_auth_logout(self) -> None:
         token = self.console_token()
@@ -631,13 +810,13 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             raise ValueError("新密码长度需为 8–128 位")
         with database() as connection:
             row = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
-            if not row or not password_matches(old_password, row["password_salt"], row["password_hash"], row["password_iterations"]):
+            if not row or not password_matches(old_password, "", row["password_hash"], 0):
                 self.send_json({"error": "当前密码错误"}, 401)
                 return
-            salt, digest = password_digest(new_password)
+            _, digest = password_digest(new_password)
             connection.execute(
-                "UPDATE users SET password_hash = ?, password_salt = ?, password_iterations = ?, password_changed_at = ? WHERE id = ?",
-                (digest, salt, PASSWORD_ITERATIONS, iso_time(), user["id"]),
+                "UPDATE users SET password_hash = ?, password_salt = '', password_iterations = 0, password_changed_at = ? WHERE id = ?",
+                (digest, iso_time(), user["id"]),
             )
             connection.execute("DELETE FROM console_sessions WHERE user_id = ?", (user["id"],))
             audit_event(connection, int(user["id"]), "auth.password_changed")
@@ -752,6 +931,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_auth_login()
             elif path == "/api/auth/register":
                 self.handle_auth_register()
+            elif path == "/api/auth/send-otp":
+                self.handle_send_otp()
             elif path == "/api/auth/logout":
                 self.handle_auth_logout()
             elif path == "/api/auth/change-password":
