@@ -11,28 +11,14 @@
   <section class="auth-gate" id="authGate" aria-label="炼丹社Hatchery账号登录">
     <div class="auth-card">
       <header><span class="auth-mark">炼</span><div><b>炼丹社Hatchery控制台</b><small>AIchemyHatchery</small></div></header>
-      <div class="auth-copy"><span>ACCOUNT SYSTEM</span><h1 id="authTitle">欢迎回来</h1><p id="authDescription">登录后继续编辑、保存并发布你的网站。</p></div>
-      <div class="auth-tabs" role="tablist"><button class="active" role="tab" aria-selected="true" data-auth-tab="login">登录</button><button role="tab" aria-selected="false" data-auth-tab="register">注册</button></div>
-      <form class="auth-form" id="loginForm" data-auth-form="login" method="post" action="/api/auth/login" autocomplete="on" novalidate>
-        <label class="auth-field"><span>用户名 / 邮箱 / 校园号</span><input id="loginUsername" name="username" autocomplete="username" required placeholder="用户名、邮箱或数字校园号"><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>密码</span><div class="password-input"><input id="loginPassword" name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="128" placeholder="至少 8 位"><button type="button" data-password-toggle="loginPassword" aria-pressed="false">显示</button></div><small class="field-error" hidden></small></label>
-        <div class="auth-options"><label><input name="remember" type="checkbox" checked><span>在这台设备保持登录 7 天</span></label><button type="button" data-auth-help>忘记密码？</button></div>
-        <button class="auth-submit" type="submit"><b>登录控制台</b><span>→</span></button>
-      </form>
-      <form class="auth-form" id="registerForm" data-auth-form="register" method="post" action="/api/auth/register" autocomplete="on" novalidate hidden>
-        <label class="auth-field"><span>用户名</span><input id="registerUsername" name="username" autocomplete="username" required pattern="[A-Za-z0-9_-]{3,32}" maxlength="32" placeholder="3–32 位字母、数字、_ 或 -"><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>密码</span><div class="password-input"><input id="registerPassword" name="password" type="password" autocomplete="new-password" data-password-strength required minlength="8" maxlength="128" placeholder="至少 8 位，建议混合字母、数字和符号"><button type="button" data-password-toggle="registerPassword" aria-pressed="false">显示</button></div><div class="password-strength empty"><i></i><i></i><i></i><span>至少 8 位</span></div><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>确认密码</span><div class="password-input"><input id="registerPasswordConfirm" name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入密码"><button type="button" data-password-toggle="registerPasswordConfirm" aria-pressed="false">显示</button></div><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>数字校园号</span><input id="registerCampusId" name="campusId" autocomplete="off" required placeholder="你的数字校园号"><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>邮箱</span><div class="email-input"><input id="registerEmail" name="email" type="email" autocomplete="email" required placeholder="you@example.com"><button type="button" id="sendOtpBtn">发送验证码</button></div><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>邮箱验证码</span><input id="registerCode" name="code" autocomplete="one-time-code" required minlength="6" maxlength="6" placeholder="6 位数字验证码"><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>真实姓名</span><input id="registerRealName" name="realName" autocomplete="name" placeholder="你的真实姓名（不会公开）"><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>年级</span><input id="registerGrade" name="grade" placeholder="如：10"><small class="field-error" hidden></small></label>
-        <label class="auth-field"><span>班级</span><input id="registerClassGroup" name="classGroup" placeholder="如：1班"><small class="field-error" hidden></small></label>
-        <button class="auth-submit" type="submit"><b>创建账号</b><span>→</span></button>
-      </form>
+      <div class="auth-copy"><span>ACCOUNT SYSTEM</span><h1 id="authTitle">统一登录</h1><p id="authDescription">使用 SDSZ 账号登录后继续编辑、保存并发布你的网站。</p></div>
+      <div class="auth-sso">
+        <p>炼丹社Hatchery 使用 SDSZ 统一账号系统</p>
+        <a class="auth-submit sso-login" href="https://sdsz.groovin.cn/login?redirect=https%3A%2F%2Fhatchery.groovin.cn%2Fauth%2Fcallback" id="ssoLoginBtn"><b>前往 SDSZ 登录</b><span>→</span></a>
+        <a class="auth-submit sso-register" href="https://sdsz.groovin.cn/register?redirect=https%3A%2F%2Fhatchery.groovin.cn%2Fauth%2Fcallback" id="ssoRegisterBtn"><b>前往 SDSZ 注册</b><span>→</span></a>
+      </div>
       <p class="auth-error" id="authError" role="alert" hidden></p>
-      <footer><i></i><span>安全加密存储 · HttpOnly 会话 · 数字校园号注册</span></footer>
+      <footer><i></i><span>SDSZ 统一认证 · 安全加密存储 · 数字校园号注册</span></footer>
     </div>
   </section>
   <main class="app-shell">
