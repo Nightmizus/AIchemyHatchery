@@ -52,8 +52,8 @@
     const description = document.querySelector('#authDescription');
     if (title) title.textContent = authState.mode === 'login' ? '欢迎回来' : '创建你的账号';
     if (description) description.textContent = authState.mode === 'login'
-      ? '使用控制台账号继续编辑、同步并发布网站。'
-      : '用户名、密码和 16 位邀请码缺一不可；邀请码注册成功后立即失效。';
+      ? '使用账号继续编辑、同步并发布网站。'
+      : '用户名、密码和数字校园号缺一不可；校园号注册成功后即被占用。';
     authError();
     document.querySelector(`#${authState.mode}Form input`)?.focus();
   }
@@ -83,8 +83,10 @@
     const username = form.elements.username;
     const password = form.elements.password;
     const confirm = form.elements.confirmPassword;
-    const invite = form.elements.invite;
-    [username, password, confirm, invite].forEach(input => fieldError(input));
+    const campusId = form.elements.campusId;
+    const email = form.elements.email;
+    const code = form.elements.code;
+    [username, password, confirm, campusId, email, code].forEach(input => fieldError(input));
     let valid = true;
     if (!/^[A-Za-z0-9_-]{3,32}$/.test(username.value.trim())) {
       fieldError(username, '请输入 3–32 位字母、数字、下划线或短横线');
@@ -98,8 +100,16 @@
       fieldError(confirm, '两次输入的密码不一致');
       valid = false;
     }
-    if (!/^[0-9a-fA-F]{16}$/.test(invite.value.trim())) {
-      fieldError(invite, '邀请码必须是 16 位 hex');
+    if (!campusId.value.trim()) {
+      fieldError(campusId, '请输入数字校园号');
+      valid = false;
+    }
+    if (!email.value.trim() || !email.value.includes('@')) {
+      fieldError(email, '请输入有效邮箱');
+      valid = false;
+    }
+    if (!/^\d{6}$/.test(code.value.trim())) {
+      fieldError(code, '请输入 6 位数字验证码');
       valid = false;
     }
     return valid;
@@ -110,8 +120,8 @@
     const password = form.elements.password;
     [username, password].forEach(input => fieldError(input));
     let valid = true;
-    if (!/^[A-Za-z0-9_-]{3,32}$/.test(username.value.trim())) {
-      fieldError(username, '请输入有效用户名');
+    if (!username.value.trim()) {
+      fieldError(username, '请输入用户名、邮箱或校园号');
       valid = false;
     }
     if (password.value.length < 8 || password.value.length > 128) {
@@ -159,7 +169,7 @@
 
   function removeSensitiveQuery() {
     const url = new URL(location.href);
-    const sensitiveKeys = ['password', 'confirmPassword', 'invite'];
+    const sensitiveKeys = ['password', 'confirmPassword', 'code'];
     const hadSensitive = sensitiveKeys.some(key => url.searchParams.has(key));
     if (!hadSensitive && !url.searchParams.has('username')) return;
     sensitiveKeys.forEach(key => url.searchParams.delete(key));
@@ -198,7 +208,13 @@
         body: {
           username: String(data.get('username') || '').trim(),
           password: String(data.get('password') || ''),
-          invite: String(data.get('invite') || '').trim().toLowerCase(),
+          identifier: String(data.get('username') || '').trim(),
+          campusId: String(data.get('campusId') || '').trim(),
+          email: String(data.get('email') || '').trim(),
+          code: String(data.get('code') || '').trim(),
+          realName: String(data.get('realName') || '').trim(),
+          grade: String(data.get('grade') || '').trim(),
+          classGroup: String(data.get('classGroup') || '').trim(),
           remember: Boolean(data.get('remember')),
         },
       });
@@ -249,6 +265,35 @@
       setMode(tab.dataset.authTab);
       return;
     }
+    const otpBtn = event.target.closest?.('#sendOtpBtn');
+    if (otpBtn) {
+      event.preventDefault();
+      const emailInput = document.querySelector('#registerEmail');
+      const email = emailInput?.value?.trim();
+      if (!email || !email.includes('@')) {
+        fieldError(emailInput, '请先输入有效邮箱');
+        return;
+      }
+      fieldError(emailInput);
+      otpBtn.disabled = true;
+      otpBtn.textContent = '发送中…';
+      request('/api/auth/send-otp', { method: 'POST', body: { email } })
+        .then(() => {
+          otpBtn.textContent = '已发送';
+          let countdown = 60;
+          const timer = setInterval(() => {
+            countdown -= 1;
+            otpBtn.textContent = `${countdown}s`;
+            if (countdown <= 0) { clearInterval(timer); otpBtn.textContent = '发送验证码'; otpBtn.disabled = false; }
+          }, 1000);
+        })
+        .catch(err => {
+          authError(err.message);
+          otpBtn.textContent = '发送验证码';
+          otpBtn.disabled = false;
+        });
+      return;
+    }
     const toggle = event.target.closest?.('[data-password-toggle]');
     if (toggle) {
       const input = document.querySelector(`#${toggle.dataset.passwordToggle}`);
@@ -262,7 +307,7 @@
     }
     const help = event.target.closest?.('[data-auth-help]');
     if (help) {
-      authError('这是邀请码制平台。忘记密码请联系管理员核验身份后处理；不要通过聊天发送原密码。');
+      authError('忘记密码请联系管理员核验身份后处理；不要通过聊天发送原密码。');
     }
   });
 
@@ -271,7 +316,6 @@
     if (!(input instanceof HTMLInputElement)) return;
     fieldError(input);
     if (input.dataset.passwordStrength !== undefined) updatePasswordStrength(input);
-    if (input.name === 'invite') input.value = input.value.replace(/[^0-9a-f]/gi, '').slice(0, 16).toLowerCase();
   });
 
   window.AIchemyHatcheryAuth = {
