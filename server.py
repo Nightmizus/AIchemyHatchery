@@ -29,12 +29,39 @@ from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
+import psycopg2
+import psycopg2.extras
 
 ROOT = Path(__file__).resolve().parent
 PUBLISHED = ROOT / "published"
 DATABASE = ROOT / "alchemy_hatchery.db"
 HOST = "127.0.0.1"
 PORT = 4173
+
+# Neon PostgreSQL connection (shared with sdszwebsite)
+NEON_DATABASE_URL = os.environ.get("NEON_DATABASE_URL", "")
+if not NEON_DATABASE_URL:
+    # Try reading from sdszwebsite .env
+    sdsz_env = Path.home() / "Project" / "sdszwebsite" / ".env"
+    if sdsz_env.exists():
+        for line in sdsz_env.read_text().splitlines():
+            if line.startswith("DATABASE_URL="):
+                NEON_DATABASE_URL = line.split("=", 1)[1].strip().strip('"')
+                break
+
+@contextmanager
+def neon_db():
+    """Yield a Neon PostgreSQL connection with RealDictCursor."""
+    conn = psycopg2.connect(NEON_DATABASE_URL)
+    conn.autocommit = False
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 RUNTIME_LOCK = threading.Lock()
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_ATTEMPTS_LOCK = threading.Lock()
@@ -301,6 +328,11 @@ def initialize_database() -> None:
 
 
 def console_user_count() -> int:
+    if NEON_DATABASE_URL:
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT COUNT(*) FROM "User"')
+                return int(cur.fetchone()[0])
     with database() as connection:
         return int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
@@ -312,6 +344,17 @@ def create_console_admin(username: str, password: str) -> None:
     if len(password) < 8 or len(password) > 128:
         raise ValueError("密码长度必须为 8–128 位")
     _, digest = password_digest(password)
+    if NEON_DATABASE_URL:
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        'INSERT INTO "User"(id,email,name,password,grade,classGroup,initials,avatarColor,"isAdmin","isOwner","createdAt") VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+                        (f"local_{secrets.token_hex(8)}", f"{username}@local", username, digest, "", "", "", "#E8622A", True, False, datetime.now(timezone.utc).replace(tzinfo=None)),
+                    )
+                except psycopg2.IntegrityError as error:
+                    raise ValueError(f"用户 {username} 已存在") from error
+        return
     with database() as connection:
         try:
             cursor = connection.execute(
@@ -530,6 +573,37 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return None
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         now = iso_time()
+        if NEON_DATABASE_URL:
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("DELETE FROM console_sessions WHERE expires_at <= %s", (now,))
+                    cur.execute(
+                        """
+                        SELECT u.id, u.name AS username, u."isAdmin" AS is_admin, u."bannedUntil" IS NOT NULL AS is_banned,
+                               u."createdAt" AS created_at, cs.expires_at, cs.token_hash
+                        FROM console_sessions cs JOIN "User" u ON u.id = cs.user_id
+                        WHERE cs.token_hash = %s AND cs.expires_at > %s
+                        """,
+                        (token_hash, now),
+                    )
+                    row = cur.fetchone()
+                    if row and row["is_banned"]:
+                        cur.execute("DELETE FROM console_sessions WHERE token_hash = %s", (token_hash,))
+                        row = None
+                    elif row:
+                        cur.execute("UPDATE console_sessions SET last_seen_at = %s WHERE token_hash = %s", (now, token_hash))
+                        # Normalize to match SQLite shape
+                        row = {
+                            "id": row["id"],
+                            "username": row["username"],
+                            "role": "admin" if row["is_admin"] else "user",
+                            "status": "active",
+                            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                            "last_login_at": None,
+                            "expires_at": row["expires_at"],
+                            "token_hash": row["token_hash"],
+                        }
+                    return row
         with database() as connection:
             connection.execute("DELETE FROM console_sessions WHERE expires_at <= ?", (now,))
             row = connection.execute(
@@ -558,7 +632,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return None
         return user
 
-    def issue_console_session(self, user_id: int, remember: bool = True) -> dict[str, str]:
+    def issue_console_session(self, user_id: str | int, remember: bool = True) -> dict[str, str]:
         token = secrets.token_urlsafe(36)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         created_at = utc_now()
@@ -566,11 +640,19 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         expires_at = created_at + (timedelta(days=CONSOLE_SESSION_DAYS) if remember else timedelta(hours=12))
         ip_address = self.client_address[0] if self.client_address else "unknown"
         user_agent = self.headers.get("User-Agent", "")[:300]
-        with database() as connection:
-            connection.execute(
-                "INSERT INTO console_sessions(token_hash,user_id,created_at,expires_at,last_seen_at,ip_address,user_agent) VALUES(?,?,?,?,?,?,?)",
-                (token_hash, user_id, iso_time(created_at), iso_time(expires_at), iso_time(created_at), ip_address, user_agent),
-            )
+        if NEON_DATABASE_URL:
+            with neon_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO console_sessions(token_hash,user_id,created_at,expires_at,last_seen_at,ip_address,user_agent) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                        (token_hash, str(user_id), iso_time(created_at), iso_time(expires_at), iso_time(created_at), ip_address, user_agent),
+                    )
+        else:
+            with database() as connection:
+                connection.execute(
+                    "INSERT INTO console_sessions(token_hash,user_id,created_at,expires_at,last_seen_at,ip_address,user_agent) VALUES(?,?,?,?,?,?,?)",
+                    (token_hash, user_id, iso_time(created_at), iso_time(expires_at), iso_time(created_at), ip_address, user_agent),
+                )
         return {
             "Set-Cookie": (
                 f"alchemy_hatchery_console_session={token}; Path=/; Max-Age={max_age}; "
@@ -582,29 +664,35 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         keys = user.keys() if hasattr(user, 'keys') else []
         def col(name, default=None):
             return user[name] if name in keys else default
+        # Handle both SQLite (snake_case) and Neon (camelCase) column names
+        def get(*names, default=None):
+            for n in names:
+                if n in keys:
+                    return user[n]
+            return default
         return {
-            "id": int(user["id"]),
-            "username": str(user["username"]),
-            "role": str(user["role"]),
-            "status": str(col("status", "active")),
-            "createdAt": str(user["created_at"]),
-            "lastLoginAt": col("last_login_at"),
-            "email": col("email"),
-            "campusId": col("campus_id"),
-            "realName": col("real_name"),
-            "nameEn": col("name_en"),
-            "grade": col("grade", ""),
-            "classGroup": col("class_group", ""),
-            "initials": col("initials", ""),
-            "avatarColor": col("avatar_color", "#E8622A"),
-            "avatarUrl": col("avatar_url"),
-            "bio": col("bio", ""),
-            "gender": col("gender"),
-            "identityType": col("identity_type"),
-            "currentGrade": col("current_grade"),
-            "currentClass": col("current_class"),
-            "graduationYear": col("graduation_year"),
-            "previewId": col("preview_id"),
+            "id": get("id", "id"),
+            "username": get("username", "name"),
+            "role": get("role", "isAdmin") and "admin" or "user",
+            "status": get("status", "bannedUntil") and "disabled" or "active",
+            "createdAt": str(get("created_at", "createdAt", "")),
+            "lastLoginAt": get("last_login_at"),
+            "email": get("email"),
+            "campusId": get("campus_id", "campusId"),
+            "realName": get("real_name", "realName"),
+            "nameEn": get("name_en", "nameEn"),
+            "grade": get("grade", ""),
+            "classGroup": get("class_group", "classGroup", ""),
+            "initials": get("initials", ""),
+            "avatarColor": get("avatar_color", "avatarColor", "#E8622A"),
+            "avatarUrl": get("avatar_url", "avatarUrl"),
+            "bio": get("bio", ""),
+            "gender": get("gender"),
+            "identityType": get("identity_type", "identityType"),
+            "currentGrade": get("current_grade", "currentGrade"),
+            "currentClass": get("current_class", "currentClass"),
+            "graduationYear": get("graduation_year", "graduationYear"),
+            "previewId": get("preview_id", "previewId"),
         }
 
     def validate_credentials(self, username: object, password: object) -> tuple[str, str]:
@@ -642,15 +730,24 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         identifier = str(data.get("identifier", "") or data.get("username", "")).strip()
         password = str(data.get("password", ""))
         remember = bool(data.get("remember", True))
-        with database() as connection:
-            # Support login by username, email, or campus_id
-            row = connection.execute(
-                "SELECT * FROM users WHERE username = ? OR email = ? OR campus_id = ?",
-                (identifier, identifier, identifier),
-            ).fetchone()
+        row = None
+        if NEON_DATABASE_URL:
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        'SELECT * FROM "User" WHERE name = %s OR email = %s OR "campusId" = %s',
+                        (identifier, identifier, identifier),
+                    )
+                    row = cur.fetchone()
+        else:
+            with database() as connection:
+                row = connection.execute(
+                    "SELECT * FROM users WHERE username = ? OR email = ? OR campus_id = ?",
+                    (identifier, identifier, identifier),
+                ).fetchone()
         # Always verify against bcrypt even when user doesn't exist (timing safety)
         _dummy_hash = "$2a$12$za1.vQf.3iQH5HltnMbzqOfFBZdLmew8nOKJWJaq7IhqcjZzSyXhy"
-        stored_hash = row["password_hash"] if row else _dummy_hash
+        stored_hash = (row["password"] if NEON_DATABASE_URL and row else row["password_hash"] if row else _dummy_hash)
         if not password_matches(password, "", stored_hash, 0):
             self.record_login_failure()
             self.send_json({"error": "用户名或密码错误"}, 401)
@@ -663,11 +760,19 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "此账号已被管理员停用"}, 403)
             return
         self.clear_login_failures()
-        with database() as connection:
-            connection.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (iso_time(), row["id"]))
-            audit_event(connection, int(row["id"]), "auth.login", {"remember": remember})
-            row = connection.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
-        headers = self.issue_console_session(int(row["id"]), remember)
+        if NEON_DATABASE_URL:
+            with neon_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute('UPDATE "User" SET "lastLoginAt" = %s WHERE id = %s', (iso_time(), row["id"]))
+                    # Fetch updated user for public_user
+                    cur.execute('SELECT * FROM "User" WHERE id = %s', (row["id"],))
+                    row = cur.fetchone()
+        else:
+            with database() as connection:
+                connection.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (iso_time(), row["id"]))
+                audit_event(connection, int(row["id"]), "auth.login", {"remember": remember})
+                row = connection.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
+        headers = self.issue_console_session(row["id"], remember)
         self.send_json({"ok": True, "user": self.public_user(row)}, headers=headers)
 
     def handle_auth_register(self) -> None:
@@ -690,78 +795,127 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if not code:
             raise ValueError("请输入邮箱验证码")
 
-        with database() as connection:
-            # Validate campus ID
-            campus = connection.execute(
-                "SELECT * FROM campus_users WHERE campus_id = ?", (campus_id,)
-            ).fetchone()
-            if not campus:
-                raise ValueError("数字校园号无效")
-            if campus["registered"]:
-                raise ValueError("该校园号已注册，请直接登录")
+        # Validate campus ID & email verification
+        if NEON_DATABASE_URL:
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute('SELECT * FROM "CampusUser" WHERE "campusId" = %s', (campus_id,))
+                    campus = cur.fetchone()
+                    if not campus:
+                        raise ValueError("数字校园号无效")
+                    if campus["registered"]:
+                        raise ValueError("该校园号已注册，请直接登录")
 
-            # Validate email verification code
-            verification = connection.execute(
-                "SELECT * FROM email_verifications WHERE email = ? AND code = ? ORDER BY created_at DESC LIMIT 1",
-                (email, code),
-            ).fetchone()
-            if not verification:
-                raise ValueError("验证码错误")
-            if verification["expires_at"] < iso_time():
-                raise ValueError("验证码已过期，请重新发送")
+                    cur.execute(
+                        "SELECT * FROM email_verifications WHERE email = %s AND code = %s ORDER BY created_at DESC LIMIT 1",
+                        (email, code),
+                    )
+                    verification = cur.fetchone()
+                    if not verification:
+                        raise ValueError("验证码错误")
+                    if verification["expires_at"] < iso_time():
+                        raise ValueError("验证码已过期，请重新发送")
 
-            # Check email not already used
-            existing = connection.execute(
-                "SELECT id FROM users WHERE email = ?", (email,)
-            ).fetchone()
-            if existing:
-                raise ValueError("该邮箱已注册")
+                    cur.execute('SELECT id FROM "User" WHERE email = %s', (email,))
+                    if cur.fetchone():
+                        raise ValueError("该邮箱已注册")
+        else:
+            with database() as connection:
+                campus = connection.execute(
+                    "SELECT * FROM campus_users WHERE campus_id = ?", (campus_id,)
+                ).fetchone()
+                if not campus:
+                    raise ValueError("数字校园号无效")
+                if campus["registered"]:
+                    raise ValueError("该校园号已注册，请直接登录")
+
+                verification = connection.execute(
+                    "SELECT * FROM email_verifications WHERE email = ? AND code = ? ORDER BY created_at DESC LIMIT 1",
+                    (email, code),
+                ).fetchone()
+                if not verification:
+                    raise ValueError("验证码错误")
+                if verification["expires_at"] < iso_time():
+                    raise ValueError("验证码已过期，请重新发送")
+
+                existing = connection.execute(
+                    "SELECT id FROM users WHERE email = ?", (email,)
+                ).fetchone()
+                if existing:
+                    raise ValueError("该邮箱已注册")
 
         _, hashed = password_digest(password)
         initials = username[:2].upper() if len(username) >= 2 else username.upper()
         colors = ["#E8622A", "#3B82F6", "#22C55E", "#A855F7", "#EC4899", "#F59E0B", "#06B6D4"]
         avatar_color = colors[hash(username) % len(colors)]
 
-        try:
-            connection = database()
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
-                cursor = connection.execute(
-                    """INSERT INTO users(
-                        username, password_hash, password_salt, password_iterations,
-                        role, status, created_at, password_changed_at, last_login_at,
-                        email, campus_id, real_name, grade, class_group, initials, avatar_color,
-                        preview_id
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (username, hashed, "", 0, "user", "active", iso_time(), iso_time(), iso_time(),
-                     email, campus_id, real_name, grade, class_group, initials, avatar_color,
-                     new_preview_id(connection)),
-                )
-                user_id = int(cursor.lastrowid)
-                changed = connection.execute(
-                    "UPDATE campus_users SET registered = 1 WHERE campus_id = ? AND registered = 0",
-                    (campus_id,),
-                ).rowcount
-                if changed != 1:
-                    raise ValueError("该校园号已被注册")
-                connection.execute(
-                    "DELETE FROM email_verifications WHERE email = ?", (email,)
-                )
-                row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-                audit_event(connection, user_id, "auth.register", {"campusId": campus_id, "email": email})
-        except sqlite3.IntegrityError as exc:
-            if "users.username" in str(exc):
-                raise ValueError("用户名已存在") from exc
-            if "users.email" in str(exc):
-                raise ValueError("该邮箱已注册") from exc
-            if "users.campus_id" in str(exc):
-                raise ValueError("该校园号已注册") from exc
-            raise ValueError("注册数据冲突，请重试") from exc
-        finally:
-            if "connection" in locals():
-                connection.close()
+        if NEON_DATABASE_URL:
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    try:
+                        cur.execute(
+                            '''INSERT INTO "User"(id,email,"campusId",name,password,grade,classGroup,initials,avatarColor,"isAdmin","isOwner","createdAt")
+                               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                            (f"local_{secrets.token_hex(8)}", email, campus_id, username, hashed, grade, class_group, initials, avatar_color, False, False, datetime.now(timezone.utc).replace(tzinfo=None)),
+                        )
+                        cur.execute(
+                            'UPDATE "CampusUser" SET registered = TRUE WHERE "campusId" = %s AND registered = FALSE',
+                            (campus_id,),
+                        )
+                        if cur.rowcount != 1:
+                            raise ValueError("该校园号已被注册")
+                        cur.execute("DELETE FROM email_verifications WHERE email = %s", (email,))
+                        cur.execute('SELECT * FROM "User" WHERE email = %s', (email,))
+                        row = cur.fetchone()
+                    except psycopg2.IntegrityError as exc:
+                        if "User_name_key" in str(exc) or "name" in str(exc):
+                            raise ValueError("用户名已存在") from exc
+                        if "User_email_key" in str(exc) or "email" in str(exc):
+                            raise ValueError("该邮箱已注册") from exc
+                        if "User_campusId_key" in str(exc) or "campusId" in str(exc):
+                            raise ValueError("该校园号已注册") from exc
+                        raise ValueError("注册数据冲突，请重试") from exc
+        else:
+            try:
+                connection = database()
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    cursor = connection.execute(
+                        """INSERT INTO users(
+                            username, password_hash, password_salt, password_iterations,
+                            role, status, created_at, password_changed_at, last_login_at,
+                            email, campus_id, real_name, grade, class_group, initials, avatar_color,
+                            preview_id
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (username, hashed, "", 0, "user", "active", iso_time(), iso_time(), iso_time(),
+                         email, campus_id, real_name, grade, class_group, initials, avatar_color,
+                         new_preview_id(connection)),
+                    )
+                    user_id = int(cursor.lastrowid)
+                    changed = connection.execute(
+                        "UPDATE campus_users SET registered = 1 WHERE campus_id = ? AND registered = 0",
+                        (campus_id,),
+                    ).rowcount
+                    if changed != 1:
+                        raise ValueError("该校园号已被注册")
+                    connection.execute(
+                        "DELETE FROM email_verifications WHERE email = ?", (email,)
+                    )
+                    row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+                    audit_event(connection, user_id, "auth.register", {"campusId": campus_id, "email": email})
+            except sqlite3.IntegrityError as exc:
+                if "users.username" in str(exc):
+                    raise ValueError("用户名已存在") from exc
+                if "users.email" in str(exc):
+                    raise ValueError("该邮箱已注册") from exc
+                if "users.campus_id" in str(exc):
+                    raise ValueError("该校园号已注册") from exc
+                raise ValueError("注册数据冲突，请重试") from exc
+            finally:
+                if "connection" in locals():
+                    connection.close()
         self.clear_login_failures()
-        headers = self.issue_console_session(int(row["id"]), bool(data.get("remember", True)))
+        headers = self.issue_console_session(row["id"], bool(data.get("remember", True)))
         self.send_json({"ok": True, "user": self.public_user(row)}, 201, headers)
 
     def handle_send_otp(self) -> None:
@@ -777,13 +931,21 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         code = "".join(secrets.choice("0123456789") for _ in range(6))
         expires = iso_time(datetime.now(timezone.utc) + timedelta(minutes=10))
 
-        with database() as connection:
-            # Remove old codes for this email
-            connection.execute("DELETE FROM email_verifications WHERE email = ?", (email,))
-            connection.execute(
-                "INSERT INTO email_verifications(email, code, expires_at, created_at) VALUES(?,?,?,?)",
-                (email, code, expires, iso_time()),
-            )
+        if NEON_DATABASE_URL:
+            with neon_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM email_verifications WHERE email = %s", (email,))
+                    cur.execute(
+                        "INSERT INTO email_verifications(email, code, expires_at, created_at) VALUES(%s,%s,%s,%s)",
+                        (email, code, expires, iso_time()),
+                    )
+        else:
+            with database() as connection:
+                connection.execute("DELETE FROM email_verifications WHERE email = ?", (email,))
+                connection.execute(
+                    "INSERT INTO email_verifications(email, code, expires_at, created_at) VALUES(?,?,?,?)",
+                    (email, code, expires, iso_time()),
+                )
 
         # Send via SMTP
         smtp_host = os.environ.get("EMAIL_HOST", "")
@@ -839,19 +1001,34 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         new_password = str(data.get("newPassword", ""))
         if len(new_password) < 8 or len(new_password) > 128:
             raise ValueError("新密码长度需为 8–128 位")
-        with database() as connection:
-            row = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
-            if not row or not password_matches(old_password, "", row["password_hash"], 0):
-                self.send_json({"error": "当前密码错误"}, 401)
-                return
-            _, digest = password_digest(new_password)
-            connection.execute(
-                "UPDATE users SET password_hash = ?, password_salt = '', password_iterations = 0, password_changed_at = ? WHERE id = ?",
-                (digest, iso_time(), user["id"]),
-            )
-            connection.execute("DELETE FROM console_sessions WHERE user_id = ?", (user["id"],))
-            audit_event(connection, int(user["id"]), "auth.password_changed")
-        headers = self.issue_console_session(int(user["id"]), True)
+        if NEON_DATABASE_URL:
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute('SELECT * FROM "User" WHERE id = %s', (user["id"],))
+                    row = cur.fetchone()
+                    if not row or not password_matches(old_password, "", row["password"], 0):
+                        self.send_json({"error": "当前密码错误"}, 401)
+                        return
+                    _, digest = password_digest(new_password)
+                    cur.execute(
+                        'UPDATE "User" SET password = %s, "passwordChangedAt" = %s WHERE id = %s',
+                        (digest, iso_time(), user["id"]),
+                    )
+                    cur.execute("DELETE FROM console_sessions WHERE user_id = %s", (user["id"],))
+        else:
+            with database() as connection:
+                row = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+                if not row or not password_matches(old_password, "", row["password_hash"], 0):
+                    self.send_json({"error": "当前密码错误"}, 401)
+                    return
+                _, digest = password_digest(new_password)
+                connection.execute(
+                    "UPDATE users SET password_hash = ?, password_salt = '', password_iterations = 0, password_changed_at = ? WHERE id = ?",
+                    (digest, iso_time(), user["id"]),
+                )
+                connection.execute("DELETE FROM console_sessions WHERE user_id = ?", (user["id"],))
+                audit_event(connection, int(user["id"]), "auth.password_changed")
+        headers = self.issue_console_session(user["id"], True)
         self.send_json({"ok": True}, headers=headers)
 
     def handle_generate_invites(self) -> None:
