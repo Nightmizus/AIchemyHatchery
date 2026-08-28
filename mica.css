@@ -1,0 +1,485 @@
+:root {
+  --ink:#e6edf3;
+  --muted:#7d8590;
+  --line:#30363d;
+  --soft-line:#21262d;
+  --paper:#0d1117;
+  --accent:#e6edf3;
+  --mica-panel:rgba(22,27,34,.88);
+  --mica-card:rgba(33,38,45,.8);
+  --mica-card-strong:rgba(48,54,61,.88);
+  --mica-stroke:rgba(240,246,252,.14);
+  --mica-shadow:0 8px 24px rgba(1,4,9,.5);
+  --mica-hover-line:rgba(240,246,252,.32);
+  --mica-focus:0 0 0 3px rgba(240,246,252,.12);
+  --mica-danger:#f85149;
+}
+
+body {
+  background:#0d1117;
+  color:var(--ink);
+}
+.app-shell { height:100vh;padding:12px;gap:12px;position:relative;z-index:1 }
+
+/* Sidebar: fixed glass chrome floating over a full-height scroll area. */
+.sidebar {
+  height:calc(100vh - 24px);
+  position:relative;
+  border:0;
+  background:transparent;
+  box-shadow:none;
+}
+.sidebar-header {
+  position:absolute;
+  top:0;
+  left:0;
+  right:0;
+  height:52px;
+  z-index:3;
+  padding:0 6px;
+  border:0;
+  background:transparent;
+  box-shadow:none;
+}
+.brand span { background:#e6edf3;color:#0d1117;box-shadow:none;border-radius:6px }
+.brand b { color:#e6edf3 }
+
+/* Four page tabs: floating frosted capsule in the upper-left. */
+.sidebar-tabs {
+  position:absolute;
+  top:62px;
+  left:0;
+  right:0;
+  z-index:3;
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  gap:3px;
+  padding:4px;
+  border:1px solid var(--mica-stroke);
+  border-radius:999px;
+  background:var(--mica-panel);
+  box-shadow:var(--mica-shadow);
+  backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+}
+.sidebar-tabs button {
+  min-width:0;
+  height:40px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:3px;
+  border:0;
+  border-radius:999px;
+  background:transparent;
+  color:#7d8590;
+  transition:background .16s,color .16s;
+}
+.sidebar-tabs button span { font-size:12px;line-height:1 }
+.sidebar-tabs button:hover { background:rgba(240,246,252,.07);color:#e6edf3 }
+.sidebar-tabs button.active {
+  background:#e6edf3;
+  color:#0d1117;
+  box-shadow:0 2px 8px rgba(1,4,9,.4);
+}
+.sidebar-tabs button.active::after { display:none }
+
+/* Tool panels: full-height scroll area sliding under the glass chrome.
+   Content fades out beneath the capsule (top) and the buttons (bottom)
+   via a gradient mask, so the frosted glass hides the clip line. */
+.sidebar-body {
+  position:absolute;
+  top:62px;
+  bottom:0;
+  left:0;
+  right:0;
+  z-index:1;
+  overflow-y:auto;
+  scrollbar-color:#30363d transparent;
+  mask-image:linear-gradient(to bottom,transparent 0,#000 34px,#000 calc(100% - 32px),transparent 100%);
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 34px,#000 calc(100% - 32px),transparent 100%);
+}
+.tool-panel { padding-top:64px;padding-bottom:120px }
+.tool-panel { color:#e6edf3 }
+.panel-heading>span,.control-label small,.element-group-title span { color:#6e7681 }
+.panel-heading p,.theme-option>div small,.element-card>small,.switch-row span small,.range-field small { color:#7d8590 }
+.field input,.field textarea,.path-input,.theme-option,.element-card,.meta-preview p {
+  border-color:var(--mica-stroke);
+  border-radius:6px;
+  background:rgba(1,4,9,.32);
+  color:#e6edf3;
+  box-shadow:none;
+}
+.field input:focus,.field textarea:focus,.path-input:focus-within { border-color:var(--mica-hover-line);box-shadow:var(--mica-focus) }
+.path-input i,.meta-preview p { color:#7d8590 }
+.theme-option:hover,.element-card:hover { border-color:var(--mica-hover-line);background:rgba(240,246,252,.06) }
+.theme-option.active { border-color:rgba(240,246,252,.5);box-shadow:inset 0 0 0 1px rgba(240,246,252,.25) }
+.theme-option.active>em { color:#e6edf3 }
+.element-visual { border-color:var(--soft-line);background:rgba(1,4,9,.5) }
+.element-visual span { background:#6e7681 }
+.switch-row { border-color:var(--soft-line) }
+.switch-row>i { background:#30363d }
+.switch-row input:checked+i { background:rgba(240,246,252,.38) }
+.color-row button.active { box-shadow:0 0 0 2px #0d1117,0 0 0 4px rgba(240,246,252,.65) }
+
+/* Dark Mica page tree panel. */
+.page-tree-panel { background:transparent;color:#e6edf3;padding:64px 14px 120px;box-sizing:border-box }
+.page-tree-panel>header { border-color:var(--soft-line) }
+.page-tree-panel>header span { color:#6e7681 }
+.page-tree-panel>header b { color:#e6edf3 }
+.page-tree-panel>header small { color:#7d8590 }
+.page-tree-panel>header button {
+  border-color:var(--mica-stroke);
+  border-radius:6px;
+  background:var(--mica-card);
+  color:#e6edf3;
+  box-shadow:none;
+}
+.page-tree-panel>header button:hover { border-color:var(--mica-hover-line);background:var(--mica-card-strong) }
+.page-tree-node { border-radius:6px }
+.page-tree-node:hover { background:rgba(240,246,252,.06) }
+.page-tree-node.active {
+  background:rgba(240,246,252,.1);
+  color:#e6edf3;
+  box-shadow:inset 0 0 0 1px rgba(240,246,252,.14);
+}
+.page-tree-select span { color:#6e7681 }
+.page-tree-node.active .page-tree-select span { color:#b1bac4 }
+.tree-delete { color:var(--mica-danger) }
+
+/* Three independent floating controls in the lower-left corner, one row,
+   overlaying the panel scroll area. */
+.sidebar-footer {
+  position:absolute;
+  bottom:0;
+  left:0;
+  right:0;
+  z-index:3;
+  padding:0;
+  display:grid;
+  grid-template-columns:1fr 1fr 1fr;
+  align-items:stretch;
+  gap:9px;
+  border:0;
+  background:transparent;
+}
+.console-account-wrap { width:100%;min-width:0;flex:none }
+.sidebar-footer .console-account {
+  width:100%;
+  height:48px;
+  min-width:0;
+  padding:7px 10px;
+  display:grid;
+  grid-template-columns:32px minmax(0,1fr) 18px;
+  align-items:center;
+  gap:9px;
+  border:1px solid var(--mica-stroke);
+  border-radius:8px;
+  background:var(--mica-card);
+  color:#e6edf3;
+  box-shadow:var(--mica-shadow);
+  backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+}
+.sidebar-footer .console-account:hover,.sidebar-footer .console-account[aria-expanded="true"] { border-color:var(--mica-hover-line);background:var(--mica-card-strong) }
+.console-avatar { width:32px;height:32px;background:#e6edf3;color:#0d1117;box-shadow:none }
+.console-account-copy { min-width:0;display:block;text-align:left }
+.console-account-copy b { max-width:none!important;margin:0;color:#e6edf3;font-size:10px!important;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis }
+.console-account-copy small { margin:3px 0 0!important;color:#7d8590!important;font-size:7px!important;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis }
+.console-account em { justify-self:end;color:#7d8590 }
+.deploy-actions { display:contents }
+.sidebar-footer .deploy-actions button {
+  height:48px;
+  min-width:0;
+  padding:7px 12px;
+  display:flex;
+  place-items:unset;
+  align-items:center;
+  justify-content:space-between;
+  border:1px solid var(--mica-stroke);
+  border-radius:8px;
+  background:var(--mica-card);
+  color:#e6edf3;
+  box-shadow:var(--mica-shadow);
+  backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+}
+.sidebar-footer .deploy-actions .preview-site-button { border-color:var(--mica-stroke);background:var(--mica-card);color:#e6edf3 }
+.sidebar-footer .deploy-actions .preview-site-button span { color:#b1bac4 }
+.sidebar-footer .deploy-actions button:hover { border-color:var(--mica-hover-line);background:var(--mica-card-strong) }
+.sidebar-footer .deploy-actions #publishBtn:disabled { border-color:rgba(240,246,252,.08);background:rgba(33,38,45,.5);color:#6e7681;box-shadow:none }
+.sidebar-footer .deploy-actions #publishBtn small { color:#6e7681 }
+.console-account-menu {
+  left:0;
+  right:auto;
+  bottom:58px;
+  width:min(260px,calc(100vw - 32px));
+  border-color:var(--mica-stroke);
+  border-radius:10px;
+  background:var(--mica-panel);
+  color:#e6edf3;
+  box-shadow:0 16px 48px rgba(1,4,9,.6);
+  backdrop-filter:blur(28px);
+  -webkit-backdrop-filter:blur(28px);
+}
+.console-account-menu header { border-color:var(--soft-line) }
+.console-account-menu dt { color:#6e7681 }
+.console-account-menu dd { color:#b1bac4 }
+.sidebar-footer .console-account-menu>button { background:rgba(240,246,252,.08);color:#b1bac4 }
+.sidebar-footer .console-account-menu>#inviteManagerBtn { background:rgba(240,246,252,.12);color:#e6edf3 }
+.sidebar-footer .console-account-menu>#consoleAccountAction { color:#b1bac4 }
+.sidebar-footer .console-account-menu>.account-logout { background:rgba(248,81,73,.12);color:var(--mica-danger) }
+
+/* Three floating groups in the upper-right corner. */
+.workspace {
+  height:calc(100vh - 24px);
+  border:0;
+  background:transparent;
+  box-shadow:none;
+}
+.page-control { padding:8px 14px 4px 18px;border:0;background:transparent;color:#e6edf3 }
+.workspace-page-title>span { color:#6e7681 }
+.workspace-page-title>b { color:#e6edf3 }
+.workspace-page-title small { border-color:var(--soft-line);color:#7d8590 }
+.page-actions { gap:9px }
+.history-actions,.device-switch,.page-actions>#clearPageBtn {
+  height:34px;
+  border:1px solid var(--mica-stroke);
+  border-radius:8px;
+  background:var(--mica-card);
+  color:#e6edf3;
+  box-shadow:var(--mica-shadow);
+  backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+}
+.history-actions button,.device-switch button { border-color:var(--soft-line);background:transparent;color:#b1bac4 }
+.history-actions button:hover,.device-switch button:hover { background:rgba(240,246,252,.08);color:#e6edf3 }
+.history-actions button:disabled { color:#484f58 }
+.device-switch button.active { background:rgba(240,246,252,.14);color:#e6edf3;box-shadow:inset 0 0 0 1px rgba(240,246,252,.08) }
+.page-actions>#clearPageBtn { height:34px;padding:0 13px;color:#b1bac4 }
+.page-actions>#clearPageBtn:hover { border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.1);color:var(--mica-danger) }
+.canvas-scroll {
+  margin:0 10px 10px;
+  border:1px solid var(--soft-line);
+  border-radius:10px;
+  background:rgba(1,4,9,.5);
+  box-shadow:inset 0 0 32px rgba(1,4,9,.35);
+}
+.site-canvas { max-width:calc(100% - 24px);min-height:calc(100% - 24px);margin:12px auto;border-radius:8px;overflow:hidden;box-shadow:0 12px 40px rgba(1,4,9,.5),0 0 0 1px rgba(240,246,252,.1) }
+.word-toolbar {
+  margin:0;
+  width:auto;
+  height:68px;
+  padding:7px;
+  border:1px solid var(--mica-stroke);
+  border-radius:10px;
+  background:var(--mica-panel);
+  color:#e6edf3;
+  box-shadow:var(--mica-shadow);
+  backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+}
+.toolbar-brand,.toolbar-group { border-color:var(--soft-line) }
+.toolbar-brand>span { background:#e6edf3;color:#0d1117 }
+.toolbar-brand small,.toolbar-group::after,.toolbar-status small { color:#6e7681 }
+.toolbar-group button { color:#b1bac4 }
+.toolbar-group button:hover,.toolbar-group button.active { border-color:var(--mica-stroke);background:rgba(240,246,252,.1);color:#e6edf3 }
+.toolbar-group button.active { box-shadow:none }
+.toolbar-font select,.toolbar-paragraph select,.toolbar-image select,.toolbar-font label { border-color:var(--mica-stroke);background:rgba(1,4,9,.3);color:#e6edf3 }
+.toolbar-image .insert-image { border-color:transparent;background:#e6edf3;color:#0d1117 }
+.toolbar-image .insert-image:hover { background:#ffffff;color:#0d1117 }
+
+/* Dark Mica AI panel. The conversation scrolls under the floating composer;
+   both long edges fade out via a gradient mask, like the main panel scroll. */
+.ai-chat-panel { margin-top:58px;height:calc(100% - 116px);padding:0 }
+.ai-chat-panel { background:rgba(22,27,34,.6);color:#e6edf3 }
+.ai-conversation {
+  position:absolute;
+  inset:0;
+  min-height:0;
+  padding:18px 13px 122px;
+  overflow-y:auto;
+  scrollbar-color:#30363d transparent;
+  mask-image:linear-gradient(to bottom,transparent 0,#000 26px,#000 calc(100% - 92px),transparent 100%);
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 26px,#000 calc(100% - 92px),transparent 100%);
+}
+.ai-message>div,.ai-chat-panel .ai-examples button,.ai-typing {
+  border-color:var(--mica-stroke);background:rgba(240,246,252,.06);color:#e6edf3;
+}
+.ai-message.user>div { border-color:rgba(240,246,252,.2);background:rgba(240,246,252,.1);color:#e6edf3 }
+
+/* ChatGPT-style composer: one rounded box holding attachments, textarea
+   and the round send button, floating over the conversation. */
+.ai-composer {
+  position:absolute;
+  left:13px;
+  right:13px;
+  bottom:12px;
+  z-index:2;
+  padding:8px;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  border:1px solid var(--mica-stroke);
+  border-radius:18px;
+  background:rgba(48,54,61,.92);
+  box-shadow:0 12px 32px rgba(1,4,9,.45);
+  backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+}
+.ai-composer-main { display:flex;align-items:flex-end;gap:8px;min-width:0 }
+.ai-attachment-strip { display:flex;flex-wrap:wrap;gap:6px;padding:2px 4px 0 }
+.ai-attachment-chip { display:flex;align-items:center;gap:7px;padding:5px 7px;border:1px solid var(--mica-stroke);border-radius:9px;background:rgba(1,4,9,.35);color:#b1bac4;font-size:8px }
+.ai-attachment-chip img { width:26px;height:26px;border-radius:6px;object-fit:cover }
+.ai-attachment-chip i { min-width:26px;height:26px;display:grid;place-items:center;border-radius:6px;background:rgba(240,246,252,.1);color:#e6edf3;font-style:normal;font-size:6px }
+.ai-attachment-chip span { display:grid;min-width:0 }
+.ai-attachment-chip b { max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600 }
+.ai-attachment-chip small { color:#6e7681 }
+.ai-attachment-chip button { border:0;background:transparent;color:#6e7681;font-size:11px;cursor:pointer }
+.ai-attachment-chip button:hover { color:#e6edf3 }
+.ai-attach-button {
+  width:34px;
+  height:34px;
+  flex:0 0 auto;
+  display:grid;
+  place-items:center;
+  border:1px solid var(--mica-stroke);
+  border-radius:50%;
+  background:transparent;
+  color:#b1bac4;
+  font-size:15px;
+  cursor:pointer;
+}
+.ai-attach-button:hover { border-color:var(--mica-hover-line);color:#e6edf3 }
+.ai-composer textarea {
+  flex:1;
+  min-width:0;
+  min-height:24px;
+  max-height:140px;
+  padding:7px 2px;
+  border:0;
+  background:transparent;
+  box-shadow:none;
+  color:#e6edf3;
+  font-size:10px;
+  line-height:1.5;
+}
+.ai-composer textarea:focus { border:0;box-shadow:none }
+.ai-chat-panel .ai-run {
+  width:34px;
+  height:34px;
+  flex:0 0 auto;
+  display:grid;
+  place-items:center;
+  border:0;
+  border-radius:50%;
+  background:#e6edf3;
+  color:#0d1117;
+}
+.ai-chat-panel .ai-run em { color:#0d1117 }
+.ai-composer-meta { display:flex;justify-content:space-between;padding:0 8px 2px;color:#6e7681;font-size:6px }
+
+/* Dark Mica authentication surface. */
+.auth-gate { background:#0d1117;color:#e6edf3 }
+.auth-gate::before { background-image:linear-gradient(rgba(240,246,252,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(240,246,252,.025) 1px,transparent 1px) }
+.auth-card { border-color:var(--mica-stroke);border-radius:10px;background:rgba(22,27,34,.92);box-shadow:0 24px 64px rgba(1,4,9,.55);backdrop-filter:blur(28px) }
+.auth-mark { background:#e6edf3;color:#0d1117 }
+.auth-copy p,.auth-card>header small { color:#7d8590 }
+.auth-tabs { background:rgba(1,4,9,.4) }
+.auth-tabs button { color:#7d8590 }
+.auth-tabs button.active { background:rgba(240,246,252,.12);color:#e6edf3;box-shadow:none }
+.auth-form input { border-color:var(--mica-stroke);background:rgba(1,4,9,.35);color:#e6edf3 }
+.auth-form input:focus { border-color:var(--mica-hover-line);box-shadow:var(--mica-focus) }
+.password-input>button,.email-input button { border-color:var(--mica-stroke);background:rgba(240,246,252,.08);color:#b1bac4 }
+.password-input>button:hover,.email-input button:hover { background:rgba(240,246,252,.14);color:#e6edf3 }
+.auth-options label,.auth-options>button { color:#7d8590 }
+.auth-options input { accent-color:#e6edf3 }
+.auth-submit { background:#e6edf3;color:#0d1117 }
+.auth-submit:hover { background:#ffffff;color:#0d1117 }
+.auth-submit span { color:#0d1117 }
+
+@media(max-width:900px) {
+  .app-shell { padding:8px;gap:8px }
+  .sidebar,.workspace { height:calc(100vh - 16px) }
+  .site-canvas { max-width:calc(100% - 16px);margin:8px auto }
+}
+@media(max-width:680px) {
+  body { overflow:auto }
+  .app-shell { height:auto }
+  .sidebar { height:auto;min-height:calc(100vh - 16px);display:flex;flex-direction:column;gap:10px }
+  .sidebar-header,.sidebar-tabs,.sidebar-footer { position:static }
+  .sidebar-header { height:auto;min-height:52px }
+  .sidebar-body { position:static;flex:0 0 auto;overflow:visible;mask-image:none;-webkit-mask-image:none }
+  .tool-panel,.page-tree-panel { padding-top:23px;padding-bottom:35px }
+  .ai-chat-panel { margin-top:0;height:100% }
+  .workspace { height:100vh }
+  .word-toolbar { left:8px;right:8px;top:68px;height:62px }
+  .page-control { border-radius:16px 16px 0 0 }
+  .sidebar-footer { position:sticky;bottom:8px }
+}
+
+/* Editor chrome text scale: the stock sizes were unreadably small. */
+.brand b { font-size:14px }
+.sidebar-tabs button { font-size:11px }
+.sidebar-tabs button span { font-size:13px }
+.page-tree-panel>header button { font-size:10px }
+.page-tree-select b { font-size:11px }
+.page-tree-select span { font-size:9px }
+.field>span,.control-label b { font-size:11px }
+.field input,.field textarea,.path-input { font-size:12px }
+.control-label small,.element-group-title span { font-size:8px }
+.element-group-title>b { font-size:11px }
+.element-card>b { font-size:11px }
+.element-card>small { font-size:9px }
+.theme-option>div>b { font-size:11px }
+.theme-option>div small { font-size:9px }
+.theme-option>em { font-size:9px }
+.switch-row span b { font-size:11px }
+.switch-row span small,.range-field small { font-size:9px }
+.meta-preview p { font-size:10px }
+.sidebar-footer .deploy-actions button,.sidebar-footer .console-account { font-size:11px }
+.sidebar-footer .deploy-actions #publishBtn small { font-size:8px }
+.console-account-menu header b { font-size:11px }
+.console-account-menu dt,.console-account-menu dd { font-size:10px }
+.sidebar-footer .console-account-menu>button { font-size:10px }
+.workspace-page-title span { font-size:9px }
+.workspace-page-title>b { font-size:11px }
+.workspace-page-title small { font-size:9px }
+.history-actions button,.device-switch button,.page-actions>#clearPageBtn { font-size:10px }
+.toolbar-font select,.toolbar-paragraph select,.toolbar-image select,.toolbar-font label { font-size:10px }
+.toolbar-font input { font-size:11px }
+.toolbar-group button { font-size:11px }
+.toolbar-status b { font-size:10px }
+.toolbar-status small:empty { display:none }
+.ai-message p { font-size:11px }
+.ai-chat-panel .ai-examples button { font-size:9px }
+.ai-typing b { font-size:9px }
+.ai-chat-panel .ai-result { font-size:10px }
+.ai-proposal>p,.ai-proposal .ai-change { font-size:10px }
+.ai-composer textarea { font-size:12px }
+.ai-composer-meta { font-size:8px }
+.ai-attachment-chip { font-size:9px }
+.auth-field>span { font-size:11px }
+.auth-form input { font-size:12px }
+.auth-tabs button { font-size:11px }
+.auth-options label,.auth-options>button { font-size:10px }
+.password-input>button,.email-input button { font-size:9px }
+.auth-submit { font-size:12px }
+.auth-copy p { font-size:11px }
+
+/* AI panel text scale-up: chat is the primary reading surface. */
+.ai-message p { font-size:13px }
+.ai-chat-panel .ai-examples button { font-size:11px }
+.ai-typing b { font-size:11px }
+.ai-chat-panel .ai-result { font-size:12px }
+.ai-proposal>header b { font-size:13px }
+.ai-proposal>header small { font-size:9px }
+.ai-proposal>header span { font-size:9px }
+.ai-proposal>p { font-size:12px }
+.ai-change { font-size:11px }
+.ai-composer textarea { font-size:13px }
+.ai-composer-meta { font-size:9px }
+.ai-attachment-chip { font-size:10px }
+.ai-message-files span { font-size:10px }
+.ai-chat-panel .ai-undo { font-size:11px }

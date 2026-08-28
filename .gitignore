@@ -23,3 +23,6 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# UI screenshot tooling (dev only)
+.shots-venv/

@@ -3,6 +3,18 @@
 
   const authState = { user: null, ready: false, mode: 'login' };
 
+  function safeReturnTarget() {
+    const value = new URL(location.href).searchParams.get('returnTo');
+    if (!value) return '';
+    try {
+      const target = new URL(value, location.origin);
+      if (target.origin !== location.origin) return '';
+      return `${target.pathname}${target.search}${target.hash}`;
+    } catch {
+      return '';
+    }
+  }
+
   async function request(path, options = {}) {
     const requestOptions = {
       method: options.method || 'GET',
@@ -153,11 +165,9 @@
     const values = {
       '#consoleAvatar': initial,
       '#menuAvatar': initial,
-      '#consoleUsername': username,
       '#menuUsername': username,
       '#accountUsername': username,
-      '#accountPublishPath': `/${username}`,
-      '#menuRole': user.role === 'admin' ? '管理员' : '用户',
+      '#accountPreviewPath': user.previewId ? `/preview/${user.previewId}` : '首次预览后生成',
     };
     Object.entries(values).forEach(([selector, value]) => {
       const node = document.querySelector(selector);
@@ -192,6 +202,11 @@
     const gate = document.querySelector('#authGate');
     if (gate) gate.hidden = true;
     authError();
+    const returnTarget = safeReturnTarget();
+    if (returnTarget) {
+      location.replace(returnTarget);
+      return;
+    }
     window.dispatchEvent(new CustomEvent('alchemyhatchery:authenticated', { detail: { user } }));
   }
 
