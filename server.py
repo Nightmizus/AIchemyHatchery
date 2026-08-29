@@ -200,14 +200,6 @@ def initialize_database() -> None:
         data_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS hatchery_invite_codes(
-        code TEXT PRIMARY KEY,
-        created_by TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        used_by TEXT,
-        used_at TEXT,
-        revoked_at TEXT
-    );
     CREATE TABLE IF NOT EXISTS hatchery_audit_events(
         id BIGSERIAL PRIMARY KEY,
         user_id TEXT,
@@ -876,51 +868,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         headers = self.issue_console_session(user["id"], True)
         self.send_json({"ok": True}, headers=headers)
 
-    def handle_generate_invites(self) -> None:
-        user = self.require_console_user(admin=True)
-        if not user:
-            return
-        data = self.read_json()
-        try:
-            count = int(data.get("count", 1))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("邀请码数量无效") from exc
-        if count < 1 or count > 20:
-            raise ValueError("每次可生成 1–20 个邀请码")
-        codes: list[str] = []
-        with neon_db() as conn:
-            with conn.cursor() as cur:
-                while len(codes) < count:
-                    code = secrets.token_hex(8)
-                    cur.execute(
-                        "INSERT INTO hatchery_invite_codes(code,created_by,created_at) VALUES(%s,%s,%s) ON CONFLICT (code) DO NOTHING",
-                        (code, str(user["id"]), iso_time()),
-                    )
-                    if cur.rowcount:
-                        codes.append(code)
-                audit_event(cur, str(user["id"]), "invite.generated", {"count": len(codes)})
-        self.send_json({"ok": True, "codes": codes}, 201)
-
-    def handle_revoke_invite(self) -> None:
-        user = self.require_console_user(admin=True)
-        if not user:
-            return
-        code = str(self.read_json().get("code", "")).strip().lower()
-        if not INVITE_PATTERN.fullmatch(code):
-            raise ValueError("邀请码格式无效")
-        with neon_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE hatchery_invite_codes SET revoked_at = %s WHERE code = %s AND used_by IS NULL AND revoked_at IS NULL",
-                    (iso_time(), code),
-                )
-                changed = cur.rowcount
-                if changed:
-                    audit_event(cur, str(user["id"]), "invite.revoked", {"code": code})
-        if not changed:
-            raise ValueError("邀请码不存在、已使用或已撤销")
-        self.send_json({"ok": True})
-
     def handle_revoke_other_sessions(self) -> None:
         user = self.require_console_user()
         if not user:
@@ -1003,10 +950,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_auth_logout()
             elif path == "/api/auth/change-password":
                 self.handle_change_password()
-            elif path == "/api/admin/invites":
-                self.handle_generate_invites()
-            elif path == "/api/admin/invites/revoke":
-                self.handle_revoke_invite()
             elif path == "/api/admin/users/status":
                 self.handle_admin_user_status()
             elif path == "/api/auth/sessions/revoke-others":
@@ -1954,38 +1897,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 for row in rows
             ]
             self.send_json({"sessions": sessions})
-            return
-        if parsed.path == "/api/admin/invites":
-            user = self.require_console_user(admin=True)
-            if not user:
-                return
-            with neon_db() as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute(
-                        """
-                        SELECT ic.code, ic.created_at, ic.used_at, ic.revoked_at,
-                               creator.name AS created_by, consumer.name AS used_by
-                        FROM hatchery_invite_codes ic
-                        JOIN "User" creator ON creator.id = ic.created_by
-                        LEFT JOIN "User" consumer ON consumer.id = ic.used_by
-                        ORDER BY ic.created_at DESC
-                        LIMIT 200
-                        """
-                    )
-                    rows = cur.fetchall()
-            invites = [
-                {
-                    "code": row["code"],
-                    "createdAt": row["created_at"],
-                    "createdBy": row["created_by"],
-                    "usedAt": row["used_at"],
-                    "usedBy": row["used_by"],
-                    "revokedAt": row["revoked_at"],
-                    "status": "used" if row["used_at"] else ("revoked" if row["revoked_at"] else "available"),
-                }
-                for row in rows
-            ]
-            self.send_json({"invites": invites})
             return
         if parsed.path == "/api/admin/users":
             admin = self.require_console_user(admin=True)
