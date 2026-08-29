@@ -565,7 +565,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.clear_login_failures()
         with neon_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute('UPDATE "User" SET "lastLoginAt" = %s WHERE id = %s', (iso_time(), row["id"]))
+                pass  # User table has no lastLoginAt/updatedAt column in shared Neon DB
                 # Fetch updated user for public_user
                 cur.execute('SELECT * FROM "User" WHERE id = %s', (row["id"],))
                 row = cur.fetchone()
