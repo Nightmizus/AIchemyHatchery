@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="炼丹社Hatchery——面向校园个人与社团的模块化 AI 建站控制台。">
   <title>炼丹社Hatchery｜页面编辑器</title>
-  <link rel="stylesheet" href="/styles.css?v=20260828-19">
+  <link rel="stylesheet" href="/styles.css?v=20260829-2">
   <link rel="stylesheet" href="/mica.css?v=20260829-1">
   <link rel="stylesheet" href="/ai-chat.css?v=20260828-7">
 </head>
@@ -35,14 +35,14 @@
       </header>
 
       <nav class="sidebar-tabs" role="tablist" aria-label="编辑器工具">
-        <button role="tab" data-panel="pages" aria-selected="true" class="active"><span>▤</span>页面</button>
+        <button role="tab" data-panel="ai" aria-selected="true" class="active"><span>✦</span>AI</button>
+        <button role="tab" data-panel="pages" aria-selected="false"><span>▤</span>页面</button>
         <button role="tab" data-panel="basic" aria-selected="false"><span>⌘</span>基本信息</button>
-        <button role="tab" data-panel="elements" aria-selected="false"><span>＋</span>元素</button>
-        <button role="tab" data-panel="ai" aria-selected="false"><span>✦</span>AI 调整</button>
+        <button role="tab" data-panel="elements" aria-selected="false"><span>＋</span>预设</button>
       </nav>
 
       <div class="sidebar-body">
-        <section class="tool-panel page-tree-panel active" data-panel-content="pages" aria-label="页面管理">
+        <section class="tool-panel page-tree-panel" data-panel-content="pages" hidden aria-label="页面管理">
           <header><div><b>页面树</b></div><button id="addPageBtn" title="添加一级页面">＋ 页面</button></header>
           <div class="page-tree" id="pageTree" role="tree" aria-label="网站页面树"></div>
         </section>
@@ -50,14 +50,12 @@
         <section class="tool-panel" data-panel-content="basic" hidden>
           <div class="panel-heading"><h1>基本信息</h1></div>
           <label class="field"><span>站点名称</span><input id="siteName" value="未命名网站" autocomplete="off"></label>
-          <label class="field"><span>当前页面名称</span><input id="pageName" value="首页" autocomplete="off"></label>
-          <label class="field"><span>页面路径</span><div class="path-input"><i id="pathPrefix">/…/</i><input id="pagePath" value="home" autocomplete="off"></div></label>
           <label class="field"><span>一句话介绍</span><textarea id="siteDescription" rows="3">在这里写下网站的一句话介绍。</textarea></label>
           <div class="field meta-preview"><span>页面标题预览</span><p id="titlePreview">首页｜未命名网站</p></div>
         </section>
 
         <section class="tool-panel" data-panel-content="elements" hidden>
-          <div class="panel-heading"><h1>元素</h1></div>
+          <div class="panel-heading"><h1>预设</h1></div>
           <div class="element-group">
             <div class="element-group-title"><b>页面结构</b><span>STRUCTURE</span></div>
             <div class="element-grid">
@@ -90,7 +88,7 @@
             </div>
           </div>
         </section>
-        <section class="tool-panel ai-chat-panel" data-panel-content="ai" hidden>
+        <section class="tool-panel ai-chat-panel active" data-panel-content="ai">
           <div class="ai-conversation" id="aiConversation">
             <div class="ai-chat-messages" id="aiChatMessages">
               <article class="ai-message assistant"><div><p>告诉我网站要怎么改。我会自主查看源码、修改并用浏览器验证，完成后直接汇报执行结果。</p></div></article>
@@ -131,7 +129,7 @@
           <div class="console-account-menu" id="consoleAccountMenu" hidden>
             <header><span class="console-avatar" id="menuAvatar">?</span><div><b id="menuUsername">未登录</b></div></header>
             <dl><div><dt>控制台账号</dt><dd id="accountUsername">—</dd></div><div><dt>预览地址</dt><dd id="accountPreviewPath">—</dd></div></dl>
-            <button id="inviteManagerBtn" hidden>管理注册邀请码</button>
+            <button id="inviteManagerBtn" hidden>管理后台</button>
             <button id="consoleAccountAction">修改密码</button>
             <button class="account-logout" id="consoleLogoutBtn">退出登录</button>
           </div>
@@ -209,6 +207,6 @@
     <button data-context-action="delete">删除</button>
   </div>
   <script src="/auth.js?v=20260827-5"></script>
-  <script src="/script.js?v=20260829-1"></script>
+  <script src="/script.js?v=20260829-2"></script>
 </body>
 </html>

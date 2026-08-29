@@ -393,6 +393,38 @@ def _finish_reason(events: list[dict]) -> str | None:
     return None
 
 
+def _token_usage(events: list[dict]) -> dict:
+    """Sum token usage across all LLM turns of a run.
+
+    Primary source: StreamChunk 'usage' forwarded as assistant/chunk events.
+    Fallback: a usage object attached to turn/end. Input tokens include
+    cache-read tokens so the number reflects the real prompt size.
+    """
+    input_tokens = 0
+    output_tokens = 0
+    turn_usage: dict | None = None
+    for event in events:
+        event_type = event.get("type")
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if event_type == "assistant/chunk":
+            chunk = data.get("chunk") if isinstance(data.get("chunk"), dict) else {}
+            if chunk.get("type") != "usage":
+                continue
+            usage = chunk.get("usage") if isinstance(chunk.get("usage"), dict) else {}
+            input_tokens += int(usage.get("inputTokens") or 0) + int(usage.get("cacheReadTokens") or 0)
+            output_tokens += int(usage.get("outputTokens") or 0)
+        elif event_type == "turn/end":
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+            if usage:
+                turn_usage = {
+                    "inputTokens": int(usage.get("inputTokens") or 0) + int(usage.get("cacheReadTokens") or 0),
+                    "outputTokens": int(usage.get("outputTokens") or 0),
+                }
+    if input_tokens or output_tokens:
+        return {"inputTokens": input_tokens, "outputTokens": output_tokens}
+    return turn_usage or {"inputTokens": 0, "outputTokens": 0}
+
+
 def _content_blocks(prompt: str, context: dict, attachments: list[dict]) -> list[dict]:
     text_attachments = "\n\n".join(
         f"附件 {item['name']}（{item['type']}）：\n---\n{item['content']}\n---"
@@ -523,4 +555,7 @@ def run_deepseek_harness(
         else [],
         "trace": projector.trace,
         "finishReason": finish_reason,
+        "usage": _token_usage(events),
+        "provider": provider_name,
+        "model": model,
     }

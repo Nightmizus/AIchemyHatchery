@@ -28,7 +28,7 @@ import bcrypt
 import psycopg2
 import psycopg2.extras
 
-from deepseek_harness_adapter import harness_status, run_deepseek_harness
+from deepseek_harness_adapter import harness_status, resolve_llm_provider, run_deepseek_harness
 
 ROOT = Path(__file__).resolve().parent
 PUBLISHED = ROOT / "published"
@@ -76,6 +76,49 @@ AI_RUN_JOBS: dict[str, dict] = {}
 AI_SOURCE_FILES = ("index.html", "styles.css", "mica.css", "ai-chat.css", "auth.js", "script.js", "viewer.html", "viewer.js", "server.py")
 AI_EDITABLE_SOURCE_FILES = tuple(name for name in AI_SOURCE_FILES if name not in {"server.py", "auth.js"})
 PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/auth.js", "/script.js", "/viewer.js"))
+
+# 写死的站长账号：数字校园号为 20264689 的用户始终是站长（管理员），
+# 不依赖数据库里的 isAdmin 标记，也不能被停用。
+SITE_OWNER_CAMPUS_ID = "20264689"
+
+
+def is_site_owner_campus_id(campus_id) -> bool:
+    return str(campus_id or "").strip() == SITE_OWNER_CAMPUS_ID
+
+
+# 共享 "User" 表属于 sdszwebsite，禁止 CREATE/ALTER；不同环境的列可能不同
+# （例如生产库没有 lastLoginAt）。所有可选列读写前先按真实列名探测。
+USER_COLUMNS: frozenset | None = None
+
+
+def user_columns() -> frozenset:
+    global USER_COLUMNS
+    if USER_COLUMNS is None:
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'User'")
+                USER_COLUMNS = frozenset(str(row[0]) for row in cur.fetchall())
+    return USER_COLUMNS
+
+
+def user_column_name(name: str) -> str | None:
+    """返回 "User" 表中与 name 匹配（忽略大小写）的真实列名；不存在返回 None。"""
+    lowered = name.lower()
+    for column in user_columns():
+        if column.lower() == lowered:
+            return column
+    return None
+
+
+def row_value(row: dict, name: str, default=None):
+    """按忽略大小写的方式从 RealDict 行里取可选列的值。"""
+    if name in row:
+        return row[name]
+    lowered = name.lower()
+    for key in row:
+        if key.lower() == lowered:
+            return row[key]
+    return default
 
 
 def read_text_exact(path: Path) -> str:
@@ -238,6 +281,21 @@ def initialize_database() -> None:
         expires_at TEXT NOT NULL,
         created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS hatchery_ai_usage(
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        job_id TEXT,
+        prompt TEXT NOT NULL,
+        attachments_json TEXT NOT NULL DEFAULT '[]',
+        provider TEXT,
+        model TEXT,
+        input_tokens BIGINT NOT NULL DEFAULT 0,
+        output_tokens BIGINT NOT NULL DEFAULT 0,
+        total_tokens BIGINT NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'completed',
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS hatchery_ai_usage_user_idx ON hatchery_ai_usage(user_id, created_at);
     """
     with neon_db() as conn:
         with conn.cursor() as cur:
@@ -276,6 +334,49 @@ def audit_event(cur, user_id: str | None, event: str, detail: dict | None = None
         "INSERT INTO hatchery_audit_events(user_id,event,detail_json,created_at) VALUES(%s,%s,%s,%s)",
         (user_id, event, json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")), iso_time()),
     )
+
+
+def record_ai_usage(user_id: str, job_id: str | None, prompt: str, attachments: list[dict], provider: str, model: str, usage: dict | None, status: str) -> None:
+    """归档一次 AI 输入及其 token 用量；统计写库失败不影响主流程。"""
+    try:
+        input_tokens = max(0, int((usage or {}).get("inputTokens") or 0))
+        output_tokens = max(0, int((usage or {}).get("outputTokens") or 0))
+        attachment_meta = [
+            {"name": str(item.get("name", "附件"))[:180], "kind": str(item.get("kind", "text")), "size": len(str(item.get("content", "")))}
+            for item in (attachments or [])
+            if isinstance(item, dict)
+        ]
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO hatchery_ai_usage(user_id,job_id,prompt,attachments_json,provider,model,input_tokens,output_tokens,total_tokens,status,created_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        str(user_id),
+                        job_id,
+                        prompt[:20000],
+                        json.dumps(attachment_meta, ensure_ascii=False, separators=(",", ":")),
+                        provider or None,
+                        model or None,
+                        input_tokens,
+                        output_tokens,
+                        input_tokens + output_tokens,
+                        status,
+                        iso_time(),
+                    ),
+                )
+    except Exception as error:
+        print(f"[ai-usage] 归档失败：{error}", file=sys.stderr)
+
+
+def current_ai_provider_model() -> tuple[str, str]:
+    try:
+        provider_name, provider = resolve_llm_provider()
+        return provider_name, os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
+    except Exception:
+        return "", ""
 
 
 def initialize_site_account(site_username: str, owner_username: str) -> dict | None:
@@ -427,13 +528,15 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     (token_hash, now),
                 )
                 row = cur.fetchone()
-                if row and row.get("bannedUntil") is not None:
+                if row and row_value(row, "bannedUntil") is not None and not is_site_owner_campus_id(row.get("campusId")):
                     cur.execute("DELETE FROM console_sessions WHERE token_hash = %s", (token_hash,))
                     row = None
                 elif row:
                     cur.execute("UPDATE console_sessions SET last_seen_at = %s WHERE token_hash = %s", (now, token_hash))
                     row = dict(row)
                     row["username"] = row.get("name")
+                    if is_site_owner_campus_id(row.get("campusId")):
+                        row["isAdmin"] = True
                     row["role"] = "admin" if row.get("isAdmin") else "user"
                     row["status"] = "active"
                 return row
@@ -470,13 +573,14 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         }
 
     def public_user(self, user: dict) -> dict:
-        # user 必须来自 SELECT * FROM "User"（camelCase 真实列名）
+        # user 必须来自 SELECT * FROM "User"（列名以数据库实际为准）
         def get(name, default=None):
-            return user[name] if name in user else default
+            return row_value(user, name, default)
+        is_admin = bool(get("isAdmin")) or is_site_owner_campus_id(get("campusId"))
         return {
             "id": get("id"),
             "username": get("name"),
-            "role": get("isAdmin") and "admin" or "user",
+            "role": is_admin and "admin" or "user",
             "status": get("bannedUntil") and "disabled" or "active",
             "createdAt": json_time(get("createdAt", "")),
             "lastLoginAt": json_time(get("lastLoginAt")),
@@ -559,13 +663,15 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.record_login_failure()
             self.send_json({"error": "用户名或密码错误"}, 401)
             return
-        if row["bannedUntil"] is not None:
+        if row_value(row, "bannedUntil") is not None:
             self.send_json({"error": "此账号已被管理员停用"}, 403)
             return
         self.clear_login_failures()
         with neon_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute('UPDATE "User" SET "lastLoginAt" = %s WHERE id = %s', (iso_time(), row["id"]))
+                last_login_col = user_column_name("lastLoginAt")
+                if last_login_col:
+                    cur.execute(f'UPDATE "User" SET "{last_login_col}" = %s WHERE id = %s', (iso_time(), row["id"]))
                 # Fetch updated user for public_user
                 cur.execute('SELECT * FROM "User" WHERE id = %s', (row["id"],))
                 row = cur.fetchone()
@@ -624,11 +730,31 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         with neon_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 try:
-                    cur.execute(
-                        '''INSERT INTO "User"(id,email,"campusId",name,password,grade,classGroup,initials,avatarColor,"isAdmin","isOwner","createdAt")
-                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
-                        (f"local_{secrets.token_hex(8)}", email, campus_id, username, hashed, grade, class_group, initials, avatar_color, False, False, datetime.now(timezone.utc).replace(tzinfo=None)),
-                    )
+                    candidate_fields = {
+                        "id": f"local_{secrets.token_hex(8)}",
+                        "email": email,
+                        "campusId": campus_id,
+                        "name": username,
+                        "password": hashed,
+                        "grade": grade,
+                        "classGroup": class_group,
+                        "initials": initials,
+                        "avatarColor": avatar_color,
+                        "isAdmin": False,
+                        "isOwner": False,
+                        "createdAt": datetime.now(timezone.utc).replace(tzinfo=None),
+                    }
+                    fields = {}
+                    for field_name, field_value in candidate_fields.items():
+                        actual = user_column_name(field_name)
+                        if actual:
+                            fields[actual] = field_value
+                    missing = [field_name for field_name in ("id", "email", "campusId", "name", "password") if not user_column_name(field_name)]
+                    if missing:
+                        raise ValueError(f"数据库 User 表缺少必要列：{', '.join(missing)}")
+                    columns_sql = ",".join(f'"{name}"' for name in fields)
+                    placeholders = ",".join(["%s"] * len(fields))
+                    cur.execute(f'INSERT INTO "User"({columns_sql}) VALUES({placeholders})', tuple(fields.values()))
                     cur.execute(
                         'UPDATE "CampusUser" SET registered = TRUE WHERE "campusId" = %s AND registered = FALSE',
                         (campus_id,),
@@ -738,10 +864,14 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     self.send_json({"error": "当前密码错误"}, 401)
                     return
                 _, digest = password_digest(new_password)
-                cur.execute(
-                    'UPDATE "User" SET password = %s, "passwordChangedAt" = %s WHERE id = %s',
-                    (digest, iso_time(), user["id"]),
-                )
+                changed_col = user_column_name("passwordChangedAt")
+                if changed_col:
+                    cur.execute(
+                        f'UPDATE "User" SET password = %s, "{changed_col}" = %s WHERE id = %s',
+                        (digest, iso_time(), user["id"]),
+                    )
+                else:
+                    cur.execute('UPDATE "User" SET password = %s WHERE id = %s', (digest, user["id"]))
                 cur.execute("DELETE FROM console_sessions WHERE user_id = %s", (user["id"],))
         headers = self.issue_console_session(user["id"], True)
         self.send_json({"ok": True}, headers=headers)
@@ -822,14 +952,19 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 target = cur.fetchone()
                 if not target:
                     raise ValueError("用户不存在")
+                if is_site_owner_campus_id(target.get("campusId")) and status == "disabled":
+                    raise ValueError("站长账号（数字校园号 20264689）不能被停用")
                 if str(target["id"]) == str(admin["id"]):
                     raise ValueError("不能停用当前登录的管理员账号")
-                if target["isAdmin"] and status == "disabled":
-                    cur.execute('SELECT COUNT(*) AS n FROM "User" WHERE "isAdmin" = TRUE AND "bannedUntil" IS NULL')
+                ban_col = user_column_name("bannedUntil")
+                if not ban_col:
+                    raise ValueError("当前数据库的 User 表缺少 bannedUntil 列，不支持停用/启用账号")
+                if row_value(target, "isAdmin") and status == "disabled":
+                    cur.execute(f'SELECT COUNT(*) AS n FROM "User" WHERE "isAdmin" = TRUE AND "{ban_col}" IS NULL')
                     if int(cur.fetchone()["n"]) <= 1:
                         raise ValueError("系统必须至少保留一个可用管理员")
                 cur.execute(
-                    'UPDATE "User" SET "bannedUntil" = CASE WHEN %s = \'disabled\' THEN \'9999-12-31T00:00:00\' ELSE NULL END WHERE id = %s',
+                    f'UPDATE "User" SET "{ban_col}" = CASE WHEN %s = \'disabled\' THEN \'9999-12-31T00:00:00\' ELSE NULL END WHERE id = %s',
                     (status, target["id"]),
                 )
                 if status == "disabled":
@@ -890,7 +1025,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     if (parse_qs(parsed.query).get("async") or [""])[0] == "1":
                         self.handle_ai_run_start(user)
                     else:
-                        self.handle_ai_run()
+                        self.handle_ai_run(user)
             elif path == "/api/ai/apply":
                 if self.require_console_user():
                     self.handle_ai_apply()
@@ -1000,6 +1135,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 "undoAvailable": bool(changed_files),
                 "engine": "deepseek-harness",
                 "finishReason": result.get("finishReason"),
+                "usage": result.get("usage"),
             }
         except Exception:
             restore_sources()
@@ -1131,12 +1267,17 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             attachments.append({"name": name, "kind": kind, "type": mime_type, "content": content})
         return prompt, context, include_site, include_source, attachments
 
-    def handle_ai_run(self) -> None:
+    def handle_ai_run(self, user: dict) -> None:
         prompt, context, include_site, include_source, attachments = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
+        provider_name, model = current_ai_provider_model()
         try:
             result = self.run_ai_harness(prompt, context, include_site, include_source, attachments)
+            record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
+        except Exception:
+            record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, None, "failed")
+            raise
         finally:
             AI_RUN_LOCK.release()
         self.send_json(result)
@@ -1167,13 +1308,16 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     job["events"].append(event)
 
         def worker() -> None:
+            provider_name, model = current_ai_provider_model()
             try:
                 result = self.run_ai_harness(prompt, context, include_site, include_source, attachments, progress=progress)
+                record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
                     if job:
                         job.update({"status": "completed", "result": result})
             except Exception as error:
+                record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, None, "failed")
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
                     if job:
@@ -1867,10 +2011,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             users = [
                 {
                     "username": row["name"],
-                    "role": "admin" if row["isAdmin"] else "user",
-                    "status": "disabled" if row["bannedUntil"] else "active",
-                    "createdAt": json_time(row["createdAt"]),
-                    "lastLoginAt": json_time(row["lastLoginAt"]),
+                    "role": "admin" if (row_value(row, "isAdmin") or is_site_owner_campus_id(row.get("campusId"))) else "user",
+                    "status": "disabled" if row_value(row, "bannedUntil") else "active",
+                    "createdAt": json_time(row_value(row, "createdAt")),
+                    "lastLoginAt": json_time(row_value(row, "lastLoginAt")),
                     "sessionCount": row["session_count"],
                     "draftUpdatedAt": row["draft_updated_at"],
                     "published": (PUBLISHED / row["name"] / "site.json").exists(),
@@ -1878,6 +2022,100 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 for row in rows
             ]
             self.send_json({"users": users, "total": len(users)})
+            return
+        if parsed.path == "/api/admin/ai-usage":
+            admin = self.require_console_user(admin=True)
+            if not admin:
+                return
+            day_cutoff = iso_time(utc_now() - timedelta(hours=24))
+            week_cutoff = iso_time(utc_now() - timedelta(days=7))
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        SELECT u.id AS user_id, u.name AS username, u."campusId",
+                               COUNT(g.id) AS runs,
+                               COALESCE(SUM(g.total_tokens), 0) AS total_tokens,
+                               COALESCE(SUM(CASE WHEN g.created_at >= %s THEN g.total_tokens ELSE 0 END), 0) AS day_tokens,
+                               COALESCE(SUM(CASE WHEN g.created_at >= %s THEN g.total_tokens ELSE 0 END), 0) AS week_tokens,
+                               MAX(g.created_at) AS last_used_at
+                        FROM hatchery_ai_usage g
+                        JOIN "User" u ON u.id = g.user_id
+                        GROUP BY u.id, u.name, u."campusId"
+                        ORDER BY total_tokens DESC
+                        LIMIT 500
+                        """,
+                        (day_cutoff, week_cutoff),
+                    )
+                    rows = cur.fetchall()
+            usage = [
+                {
+                    "userId": row["user_id"],
+                    "username": row["username"],
+                    "campusId": row["campusId"],
+                    "runs": int(row["runs"]),
+                    "dayTokens": int(row["day_tokens"]),
+                    "weekTokens": int(row["week_tokens"]),
+                    "totalTokens": int(row["total_tokens"]),
+                    "lastUsedAt": row["last_used_at"],
+                }
+                for row in rows
+            ]
+            totals = {
+                "dayTokens": sum(item["dayTokens"] for item in usage),
+                "weekTokens": sum(item["weekTokens"] for item in usage),
+                "totalTokens": sum(item["totalTokens"] for item in usage),
+                "runs": sum(item["runs"] for item in usage),
+            }
+            self.send_json({"usage": usage, "totals": totals})
+            return
+        if parsed.path == "/api/admin/ai-chats":
+            admin = self.require_console_user(admin=True)
+            if not admin:
+                return
+            user_id = str((parse_qs(parsed.query).get("userId") or [""])[0]).strip()
+            where = "WHERE g.user_id = %s" if user_id else ""
+            params: list = [user_id] if user_id else []
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        f"""
+                        SELECT g.id, g.user_id, g.job_id, g.prompt, g.attachments_json,
+                               g.provider, g.model, g.input_tokens, g.output_tokens, g.total_tokens,
+                               g.status, g.created_at, u.name AS username
+                        FROM hatchery_ai_usage g
+                        LEFT JOIN "User" u ON u.id = g.user_id
+                        {where}
+                        ORDER BY g.created_at DESC
+                        LIMIT 200
+                        """,
+                        params,
+                    )
+                    rows = cur.fetchall()
+            chats = []
+            for row in rows:
+                try:
+                    attachments = json.loads(row["attachments_json"] or "[]")
+                except (TypeError, json.JSONDecodeError):
+                    attachments = []
+                chats.append(
+                    {
+                        "id": row["id"],
+                        "userId": row["user_id"],
+                        "username": row["username"] or row["user_id"],
+                        "jobId": row["job_id"],
+                        "prompt": row["prompt"],
+                        "attachments": attachments,
+                        "provider": row["provider"],
+                        "model": row["model"],
+                        "inputTokens": int(row["input_tokens"]),
+                        "outputTokens": int(row["output_tokens"]),
+                        "totalTokens": int(row["total_tokens"]),
+                        "status": row["status"],
+                        "createdAt": row["created_at"],
+                    }
+                )
+            self.send_json({"chats": chats})
             return
         if parsed.path == "/api/console/draft":
             user = self.require_console_user()
@@ -1911,15 +2149,17 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         preview_match = re.match(r"^/preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
         if preview_match:
             preview_id = preview_match.group(1)
+            ban_col = user_column_name("bannedUntil")
+            ban_filter = f'AND u."{ban_col}" IS NULL' if ban_col else ""
             with neon_db() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """
+                        f"""
                         SELECT sp.data_json
                         FROM hatchery_user_extras ue
                         JOIN hatchery_site_previews sp ON sp.user_id = ue.user_id
                         JOIN "User" u ON u.id = ue.user_id
-                        WHERE ue.preview_id = %s AND u."bannedUntil" IS NULL
+                        WHERE ue.preview_id = %s {ban_filter}
                         """,
                         (preview_id,),
                     )
