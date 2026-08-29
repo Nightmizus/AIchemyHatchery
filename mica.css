@@ -467,6 +467,7 @@ body {
 .password-input>button,.email-input button { font-size:9px }
 .auth-submit { font-size:12px }
 .auth-copy p { font-size:11px }
+.auth-sso-note { margin:0;color:#7d8590;font-size:11px;line-height:1.6 }
 
 /* AI panel text scale-up: chat is the primary reading surface. */
 .ai-message p { font-size:13px }
