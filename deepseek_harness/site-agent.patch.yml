@@ -1,0 +1,50 @@
+# Miaoda's constrained DeepSeek Harness profile. This overlays sdk-minimal and
+# deliberately removes every shipped model-facing capability before mounting
+# the local website-only tool plugin.
+
+- id: sandbox-policy
+  config:
+    mode: workspace-write
+    workspaceRoot: !!js process.cwd()
+
+- id: sandbox
+  disabled: true
+
+- id: subprocess
+  disabled: true
+
+- id: pty
+  disabled: true
+
+- id: terminal-bash
+  disabled: true
+
+- id: terminal-pwsh
+  disabled: true
+
+- id: persistent-bash
+  disabled: true
+
+- id: persistent-pwsh
+  disabled: true
+
+- id: fs-local
+  disabled: true
+
+- id: str-replace-editor
+  disabled: true
+
+- id: sessions
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: none
+
+- insert:
+    - id: attachments
+      name: '@deepseek-ai/dsh-attachment-local'
+
+    - id: miaoda-site-tools
+      name: './site-tools.mjs'
+
+    - id: miaoda-llm-kimi
+      name: './llm-kimi.mjs'
