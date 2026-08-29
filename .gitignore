@@ -14,6 +14,9 @@ __pycache__/
 .venv/
 venv/
 node_modules/
+.deepseek-harness/
+.tmp-deepseek-harness-review/
+.vite/
 
 # 避免误提交第三方托管平台的本地元数据
 .openai/
@@ -26,3 +29,7 @@ Thumbs.db
 
 # UI screenshot tooling (dev only)
 .shots-venv/
+
+# 本地开发数据库（PGlite）：只提交 serve.mjs 与依赖清单
+.pgsrv/node_modules/
+.pgsrv/data/
