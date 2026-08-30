@@ -892,7 +892,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         cookie_header = self.headers.get("Cookie", "")
         cookies = SimpleCookie(cookie_header)
         stored_state = cookies.get("sso_state")
-        if stored_state and state and stored_state.value != state:
+        if not stored_state or not state or stored_state.value != state:
             self.send_json({"error": "Invalid state (CSRF)"}, 403)
             return
 
@@ -924,7 +924,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "用户不存在"}, 404)
             return
 
-        if row["bannedUntil"] is not None:
+        if row_value(row, "bannedUntil") is not None:
             self.send_json({"error": "此账号已被管理员停用"}, 403)
             return
 
