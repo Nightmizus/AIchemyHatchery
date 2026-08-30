@@ -27,9 +27,6 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import psycopg2
 import psycopg2.extras
-import urllib.request
-import urllib.error
-import urllib.parse as urlparse_mod
 
 from deepseek_harness_adapter import harness_status, resolve_llm_provider, run_deepseek_harness
 
@@ -122,10 +119,6 @@ def row_value(row: dict, name: str, default=None):
         if key.lower() == lowered:
             return row[key]
     return default
-
-# SSO (shared with sdszwebsite)
-SSO_SECRET = os.environ.get("SSO_SECRET", "")
-SDSZ_BASE_URL = os.environ.get("SDSZ_BASE_URL", "https://sdsz.groovin.cn")
 
 
 def read_text_exact(path: Path) -> str:
@@ -845,116 +838,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 f"alchemy_hatchery_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
             ]},
         )
-
-    # ── SSO (via sdsz) ──────────────────────────────────────────────
-
-    def handle_sso_authorize(self) -> None:
-        """Redirect user to sdsz login page. After login, sdsz redirects back with a code."""
-        if not SSO_SECRET:
-            self.send_json({"error": "SSO 未配置"}, 503)
-            return
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
-        return_to = params.get("returnTo", ["/"])[0]
-        # Sanitize: only allow relative paths
-        if not return_to.startswith("/"):
-            return_to = "/"
-        state = secrets.token_urlsafe(16)
-        # Store state in a short-lived cookie for CSRF protection
-        callback_url = f"{self._base_url()}/api/auth/sso/callback"
-        sdsz_login = (
-            f"{SDSZ_BASE_URL}/login"
-            f"?intent=sso"
-            f"&redirect={urlparse_mod.quote(callback_url)}"
-            f"&state={state}"
-        )
-        self.send_response(302)
-        self.send_header("Location", sdsz_login)
-        self.send_header("Set-Cookie",
-            f"sso_state={state}; Path=/api/auth/sso; Max-Age=300; HttpOnly; SameSite=Lax{COOKIE_SECURITY_SUFFIX}")
-        # Also store returnTo
-        self.send_header("Set-Cookie",
-            f"sso_return_to={urlparse_mod.quote(return_to)}; Path=/api/auth/sso; Max-Age=300; HttpOnly; SameSite=Lax{COOKIE_SECURITY_SUFFIX}")
-        self.end_headers()
-
-    def handle_sso_callback(self) -> None:
-        """Receive code from sdsz, verify it, create local session, redirect to console."""
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
-        code = params.get("code", [None])[0]
-        state = params.get("state", [None])[0]
-
-        if not code:
-            self.send_json({"error": "Missing code"}, 400)
-            return
-
-        # Verify state (CSRF protection)
-        cookie_header = self.headers.get("Cookie", "")
-        cookies = SimpleCookie(cookie_header)
-        stored_state = cookies.get("sso_state")
-        if stored_state and state and stored_state.value != state:
-            self.send_json({"error": "Invalid state (CSRF)"}, 403)
-            return
-
-        # Verify code with sdsz
-        verify_url = f"{SDSZ_BASE_URL}/api/auth/sso/verify?code={urlparse_mod.quote(code)}"
-        try:
-            req = urllib.request.Request(verify_url, method="GET")
-            req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:
-            self.send_json({"error": f"SSO 验证失败：{exc}"}, 502)
-            return
-
-        if not data.get("ok") or not data.get("user"):
-            self.send_json({"error": "SSO 验证失败"}, 401)
-            return
-
-        sso_user = data["user"]
-        sdsz_user_id = sso_user["id"]
-
-        # Look up user in shared Neon DB by sdsz user id
-        with neon_db() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute('SELECT * FROM "User" WHERE id = %s', (sdsz_user_id,))
-                row = cur.fetchone()
-
-        if not row:
-            self.send_json({"error": "用户不存在"}, 404)
-            return
-
-        if row["bannedUntil"] is not None:
-            self.send_json({"error": "此账号已被管理员停用"}, 403)
-            return
-
-        # Create session
-        headers = self.issue_console_session(row["id"], remember=True)
-
-        # Determine redirect target
-        return_to = "/"
-        return_to_cookie = cookies.get("sso_return_to")
-        if return_to_cookie:
-            decoded = urlparse_mod.unquote(return_to_cookie.value)
-            if decoded.startswith("/"):
-                return_to = decoded
-
-        # Clear SSO cookies, set session cookie, redirect
-        self.send_response(302)
-        self.send_header("Location", return_to)
-        for key, value in headers.items():
-            self.send_header(key, value)
-        self.send_header("Set-Cookie",
-            f"sso_state=; Path=/api/auth/sso; Max-Age=0; HttpOnly{COOKIE_SECURITY_SUFFIX}")
-        self.send_header("Set-Cookie",
-            f"sso_return_to=; Path=/api/auth/sso; Max-Age=0; HttpOnly{COOKIE_SECURITY_SUFFIX}")
-        self.end_headers()
-
-    def _base_url(self) -> str:
-        """Best-effort base URL from request headers."""
-        proto = self.headers.get("X-Forwarded-Proto", "http")
-        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host", f"localhost:{PORT}")
-        return f"{proto}://{host}"
 
     def handle_change_password(self) -> None:
         user = self.require_console_user()
@@ -1988,12 +1871,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.send_json({"authenticated": False}, 401)
             else:
                 self.send_json({"authenticated": True, "user": self.attach_preview_id(self.public_user(user), user["id"])})
-            return
-        if parsed.path == "/api/auth/sso/authorize":
-            self.handle_sso_authorize()
-            return
-        if parsed.path == "/api/auth/sso/callback":
-            self.handle_sso_callback()
             return
         if parsed.path == "/api/auth/sessions":
             user = self.require_console_user()
