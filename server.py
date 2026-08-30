@@ -70,6 +70,12 @@ CONSOLE_SESSION_DAYS = 7
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 INVITE_PATTERN = re.compile(r"^[0-9a-fA-F]{16}$")
 PREVIEW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32}$")
+# 发布路径会作为 xxx.hatchery.mizusumi.com 的子域名，必须是 DNS label 安全的小写形式（不允许连续短横线）
+SITE_SLUG_PATTERN = re.compile(r"^(?=.{3,32}$)[a-z0-9]+(?:-[a-z0-9]+)*$")
+RESERVED_SITE_SLUGS = frozenset({
+    "www", "api", "app", "mail", "smtp", "admin", "console", "pages", "preview",
+    "static", "assets", "hatchery", "mizusumi", "localhost", "ftp", "ns1", "ns2",
+})
 AI_LOCK = threading.Lock()
 AI_RUN_LOCK = threading.Lock()
 AI_RUN_JOBS_LOCK = threading.Lock()
@@ -205,6 +211,12 @@ def initialize_database() -> None:
     CREATE TABLE IF NOT EXISTS hatchery_site_previews(
         user_id TEXT PRIMARY KEY,
         data_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS hatchery_published_sites(
+        slug TEXT PRIMARY KEY,
+        user_id TEXT UNIQUE NOT NULL,
+        created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS hatchery_audit_events(
@@ -434,6 +446,20 @@ def record_site_deployment(site_username: str, site_data: dict, published_by: st
             )
 
 
+def delete_site_records(cur, site_username: str) -> None:
+    """删除某个发布路径下的全部动态数据与占用记录（更改发布路径时清理旧站点）。"""
+    for table in (
+        "hatchery_site_users",
+        "hatchery_site_sessions",
+        "hatchery_site_settings",
+        "hatchery_site_invitations",
+        "hatchery_site_audit_log",
+        "hatchery_site_deployments",
+    ):
+        cur.execute(f"DELETE FROM {table} WHERE site_username = %s", (site_username,))
+    cur.execute("DELETE FROM hatchery_published_sites WHERE slug = %s", (site_username,))
+
+
 def migrate_existing_site_accounts() -> None:
     if not PUBLISHED.exists():
         return
@@ -605,7 +631,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             with conn.cursor() as cur:
                 cur.execute("SELECT preview_id FROM hatchery_user_extras WHERE user_id = %s", (str(user_id),))
                 row = cur.fetchone()
+                cur.execute("SELECT slug FROM hatchery_published_sites WHERE user_id = %s", (str(user_id),))
+                site = cur.fetchone()
         payload["previewId"] = row[0] if row else None
+        payload["publishSlug"] = site[0] if site else None
         return payload
 
     def validate_credentials(self, username: object, password: object) -> tuple[str, str]:
@@ -1074,8 +1103,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             elif path == "/api/console/draft":
                 self.handle_save_draft()
             elif path == "/api/site-account/reset-owner":
-                if self.require_console_user():
-                    self.send_json({"error": "正式发布功能暂未开放"}, 501)
+                self.handle_site_owner_reset()
             elif path in ("/api/ai", "/api/ai/propose"):
                 if self.require_console_user():
                     self.handle_ai_propose()
@@ -1100,7 +1128,40 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             elif path == "/api/publish":
                 self.handle_publish()
             elif path.startswith("/api/runtime/"):
-                self.send_json({"error": "正式发布功能暂未开放"}, 404)
+                runtime_match = re.fullmatch(
+                    r"/api/runtime/([A-Za-z0-9_-]{3,32})/(login|register|logout|forum/topics|forum/replies|registrations|join|admin/settings|admin/users/status|admin/invites/generate|admin/invites/revoke|admin/forum/moderate)",
+                    path,
+                )
+                if not runtime_match:
+                    self.send_json({"error": "接口不存在"}, 404)
+                    return
+                site_username, operation = runtime_match.groups()
+                if not (PUBLISHED / site_username / "site.json").exists():
+                    self.send_json({"error": "站点不存在"}, 404)
+                elif operation == "login":
+                    self.handle_runtime_login(site_username)
+                elif operation == "logout":
+                    self.handle_runtime_logout(site_username)
+                elif operation == "register":
+                    self.handle_runtime_register(site_username)
+                elif operation == "forum/topics":
+                    self.handle_forum_topic(site_username)
+                elif operation == "forum/replies":
+                    self.handle_forum_reply(site_username)
+                elif operation == "registrations":
+                    self.handle_registration(site_username)
+                elif operation == "join":
+                    self.handle_join(site_username)
+                elif operation == "admin/settings":
+                    self.handle_site_admin_settings(site_username)
+                elif operation == "admin/users/status":
+                    self.handle_site_admin_user_status(site_username)
+                elif operation == "admin/invites/generate":
+                    self.handle_site_admin_generate_invites(site_username)
+                elif operation == "admin/invites/revoke":
+                    self.handle_site_admin_revoke_invite(site_username)
+                elif operation == "admin/forum/moderate":
+                    self.handle_site_admin_forum_moderate(site_username)
             else:
                 self.send_json({"error": "接口不存在"}, 404)
         except ValueError as exc:
@@ -1556,15 +1617,80 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "url": f"/preview/{preview_id}", "previewId": preview_id, "accountEnabled": has_account})
 
     def handle_publish(self) -> None:
-        if not self.require_console_user():
+        user = self.require_console_user()
+        if not user:
             return
-        self.send_json({"error": "正式发布功能暂未开放"}, 501)
+        data = self.read_json()
+        slug = str(data.pop("slug", "") or "").strip().lower()
+        if not SITE_SLUG_PATTERN.fullmatch(slug):
+            raise ValueError("发布路径需为 3–32 位小写字母、数字或短横线，且不能以短横线开头或结尾")
+        if slug in RESERVED_SITE_SLUGS:
+            raise ValueError("这个发布路径是系统保留字，请换一个")
+        data, has_account = self.prepare_site_payload(data)
+        user_id = str(user["id"])
+        username = str(user["username"])
+        old_slug: str | None = None
+        try:
+            with neon_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT user_id FROM hatchery_published_sites WHERE slug = %s", (slug,))
+                    taken = cur.fetchone()
+                    if taken and str(taken[0]) != user_id:
+                        self.send_json({"error": f"发布路径 “{slug}” 已被占用，请换一个"}, 409)
+                        return
+                    cur.execute("SELECT slug FROM hatchery_published_sites WHERE user_id = %s", (user_id,))
+                    mine = cur.fetchone()
+                    old_slug = str(mine[0]) if mine else None
+                    if old_slug and old_slug != slug:
+                        delete_site_records(cur, old_slug)
+                    now = iso_time()
+                    if old_slug == slug:
+                        cur.execute("UPDATE hatchery_published_sites SET updated_at = %s WHERE slug = %s", (now, slug))
+                    else:
+                        cur.execute(
+                            "INSERT INTO hatchery_published_sites(slug,user_id,created_at,updated_at) VALUES(%s,%s,%s,%s)",
+                            (slug, user_id, now, now),
+                        )
+                    audit_event(cur, user_id, "site.published", {"slug": slug, "replaced": old_slug if old_slug != slug else None})
+        except psycopg2.IntegrityError:
+            self.send_json({"error": f"发布路径 “{slug}” 已被占用，请换一个"}, 409)
+            return
+        # 改名换路径：旧页面（目录、论坛等运行数据）整体删除
+        if old_slug and old_slug != slug:
+            shutil.rmtree(PUBLISHED / old_slug, ignore_errors=True)
+        data["username"] = slug
+        data["basePath"] = f"/pages/{slug}"
+        data["previewMode"] = False
+        site_dir = PUBLISHED / slug
+        site_dir.mkdir(parents=True, exist_ok=True)
+        (site_dir / "site.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        site_admin = initialize_site_account(slug, username) if has_account else None
+        if has_account:
+            record_site_deployment(slug, data, username)
+            record_site_audit(slug, username, "site.publish", f"/pages/{slug}", f"{len(data['pages'])} pages")
+        with RUNTIME_LOCK:
+            self.load_runtime(slug)
+        self.send_json({
+            "ok": True,
+            "url": f"/pages/{slug}",
+            "slug": slug,
+            "publicUrl": f"https://{slug}.hatchery.mizusumi.com",
+            "accountEnabled": has_account,
+            "siteAdmin": site_admin,
+            "replacedSlug": old_slug if old_slug and old_slug != slug else None,
+        })
 
     def handle_site_owner_reset(self) -> None:
         user = self.require_console_user()
         if not user:
             return
-        site_username = str(user["username"])
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT slug FROM hatchery_published_sites WHERE user_id = %s", (str(user["id"]),))
+                slug_row = cur.fetchone()
+        site_username = str(slug_row[0]) if slug_row else ""
+        if not site_username:
+            raise ValueError("你还没有发布网站，没有可重置的站点账号")
         if not self.site_account_enabled(site_username) or not site_account_initialized(site_username):
             raise ValueError("当前发布站点没有启用账号系统")
         new_password = secrets.token_urlsafe(12)
@@ -2042,6 +2168,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                         (iso_time(),),
                     )
                     rows = cur.fetchall()
+                    cur.execute("SELECT user_id, slug FROM hatchery_published_sites")
+                    publish_slugs = {str(item["user_id"]): str(item["slug"]) for item in cur.fetchall()}
             users = [
                 {
                     "username": row["name"],
@@ -2051,7 +2179,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     "lastLoginAt": json_time(row_value(row, "lastLoginAt")),
                     "sessionCount": row["session_count"],
                     "draftUpdatedAt": row["draft_updated_at"],
-                    "published": (PUBLISHED / row["name"] / "site.json").exists(),
+                    "published": str(row["id"]) in publish_slugs,
+                    "publishSlug": publish_slugs.get(str(row["id"])),
                 }
                 for row in rows
             ]
@@ -2177,9 +2306,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             status.update({"readableFiles": list(AI_SOURCE_FILES), "editableFiles": list(AI_EDITABLE_SOURCE_FILES)})
             self.send_json(status)
             return
-        if parsed.path.startswith("/api/runtime/") or parsed.path.startswith("/api/site/"):
-            self.send_json({"error": "正式发布功能暂未开放"}, 404)
-            return
         preview_match = re.match(r"^/preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
         if preview_match:
             preview_id = preview_match.group(1)
@@ -2277,6 +2403,19 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             registration_mode = self.site_registration_mode(site_username) if self.site_account_enabled(site_username) and site_account_initialized(site_username) else "closed"
             self.send_json({"user": user, "role": identity["role"] if identity else None, "registrationMode": registration_mode, "accountEnabled": self.site_account_enabled(site_username), "forumPosts": runtime["forumPosts"], "registrations": runtime["registrations"].get(user, []) if user else [], "joined": user in runtime["joinedUsers"] if user else False})
             return
+        site_match = re.fullmatch(r"/api/site/([A-Za-z0-9_-]{3,32})", parsed.path)
+        if site_match:
+            site_username = site_match.group(1)
+            site_file = PUBLISHED / site_username / "site.json"
+            if not site_file.exists():
+                self.send_json({"error": "尚未发布"}, 404)
+            else:
+                self.send_json(json.loads(site_file.read_text(encoding="utf-8")))
+            return
+        pages_match = re.match(r"^/pages/([A-Za-z0-9_-]{3,32})(?:/|$)", parsed.path)
+        if pages_match:
+            self.serve_published(parsed.path, pages_match.group(1))
+            return
         if parsed.path == "/":
             self.path = "/index.html"
             super().do_GET()
@@ -2312,7 +2451,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     def serve_published(self, path: str, site_username: str) -> None:
         site_file = PUBLISHED / site_username / "site.json"
         if not site_file.exists():
-            body = f"<meta charset='utf-8'><title>尚未发布</title><p style='font:16px sans-serif;padding:40px'>{site_username} 目录尚未发布网站。</p>".encode("utf-8")
+            body = f"<meta charset='utf-8'><title>尚未发布</title><p style='font:16px sans-serif;padding:40px'>{site_username}.hatchery.mizusumi.com 尚未发布网站。</p>".encode("utf-8")
             self.send_response(404)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -2320,8 +2459,12 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
         template = (ROOT / "viewer.html").read_text(encoding="utf-8")
-        site_data = site_file.read_text(encoding="utf-8").replace("</", "<\\/")
-        prefix = f"/{site_username}"
+        site = json.loads(site_file.read_text(encoding="utf-8"))
+        site["username"] = site_username
+        site["previewMode"] = False
+        site["basePath"] = f"/pages/{site_username}"
+        site_data = json.dumps(site, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+        prefix = f"/pages/{site_username}"
         page_path = path.removeprefix(prefix).strip("/") if path not in (prefix, f"{prefix}/") else ""
         html = template.replace("__SITE_DATA_JSON__", site_data).replace("__PAGE_PATH_JSON__", json.dumps(page_path, ensure_ascii=False))
         body = html.encode("utf-8")

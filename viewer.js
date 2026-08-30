@@ -1,7 +1,7 @@
 const site=window.__SITE_DATA__;
 const siteUsername=String(site.username||'test');
 const isPreviewMode=Boolean(site.previewMode&&site.previewId);
-const siteBase=isPreviewMode?String(site.basePath||`/preview/${site.previewId}`):`/${encodeURIComponent(siteUsername)}`;
+const siteBase=isPreviewMode?String(site.basePath||`/preview/${site.previewId}`):String(site.basePath||`/${encodeURIComponent(siteUsername)}`);
 const runtimeBase=isPreviewMode?'/api/preview-runtime':`/api/runtime/${encodeURIComponent(siteUsername)}`;
 const routePath=String(window.__PAGE_PATH__||'').replace(/^\/+|\/+$/g,'');
 const isAdminRoute=routePath==='admin';
