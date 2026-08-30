@@ -122,25 +122,6 @@
         </section>
       </div>
 
-      <footer class="sidebar-footer">
-        <div class="console-account-wrap">
-          <button class="console-account" id="consoleAccountBtn" aria-expanded="false">
-            <span class="console-avatar" id="consoleAvatar">?</span>
-            <em>⌃</em>
-          </button>
-          <div class="console-account-menu" id="consoleAccountMenu" hidden>
-            <header><span class="console-avatar" id="menuAvatar">?</span><div><b id="menuUsername">未登录</b></div></header>
-            <dl><div><dt>控制台账号</dt><dd id="accountUsername">—</dd></div><div><dt>预览地址</dt><dd id="accountPreviewPath">—</dd></div><div><dt>发布地址</dt><dd id="accountPublishPath">—</dd></div></dl>
-            <button id="inviteManagerBtn" hidden>管理后台</button>
-            <button id="consoleAccountAction">修改密码</button>
-            <button class="account-logout" id="consoleLogoutBtn">退出登录</button>
-          </div>
-        </div>
-        <div class="deploy-actions">
-          <button class="preview-site-button" id="previewSiteBtn">预览 <span>↗</span></button>
-          <button id="publishBtn" title="发布到独立的 hatchery.mizusumi.com 子域名">发布</button>
-        </div>
-      </footer>
     </aside>
 
     <section class="workspace">
@@ -150,6 +131,22 @@
           <div class="history-actions" aria-label="编辑历史"><button id="undoBtn" title="撤销（Ctrl+Z）" disabled>↶</button><button id="redoBtn" title="重做（Ctrl+Shift+Z）" disabled>↷</button></div>
           <div class="device-switch" role="group" aria-label="预览设备"><button class="active" data-preview-device="desktop" title="桌面预览">桌面</button><button data-preview-device="mobile" title="手机预览">手机</button></div>
           <button id="clearPageBtn" title="清空当前页面">清空</button>
+        </div>
+        <div class="deploy-actions">
+          <button class="preview-site-button" id="previewSiteBtn">预览 <span>↗</span></button>
+          <button id="publishBtn" title="发布到独立的 hatchery.mizusumi.com 子域名">发布</button>
+        </div>
+        <div class="console-account-wrap">
+          <button class="console-account" id="consoleAccountBtn" aria-expanded="false" title="控制台账号">
+            <span class="console-avatar" id="consoleAvatar">?</span>
+          </button>
+          <div class="console-account-menu" id="consoleAccountMenu" hidden>
+            <header><span class="console-avatar" id="menuAvatar">?</span><div><b id="menuUsername">未登录</b></div></header>
+            <dl><div><dt>控制台账号</dt><dd id="accountUsername">—</dd></div><div><dt>预览地址</dt><dd id="accountPreviewPath">—</dd></div><div><dt>发布地址</dt><dd id="accountPublishPath">—</dd></div></dl>
+            <button id="inviteManagerBtn" hidden>管理后台</button>
+            <button id="consoleAccountAction">修改密码</button>
+            <button class="account-logout" id="consoleLogoutBtn">退出登录</button>
+          </div>
         </div>
       </header>
 

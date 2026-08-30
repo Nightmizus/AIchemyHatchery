@@ -164,7 +164,7 @@ body {
   border:0;
   background:transparent;
 }
-.console-account-wrap { width:100%;min-width:0;flex:none }
+.console-account-wrap { min-width:0;flex:none }
 .sidebar-footer .console-account {
   width:100%;
   height:48px;
@@ -211,9 +211,10 @@ body {
 .sidebar-footer .deploy-actions #publishBtn:disabled { border-color:rgba(240,246,252,.08);background:rgba(33,38,45,.5);color:#6e7681;box-shadow:none }
 .sidebar-footer .deploy-actions #publishBtn small { color:#6e7681 }
 .console-account-menu {
-  left:0;
-  right:auto;
-  bottom:58px;
+  left:auto;
+  right:0;
+  top:calc(100% + 10px);
+  bottom:auto;
   width:min(260px,calc(100vw - 32px));
   border-color:var(--mica-stroke);
   border-radius:10px;
@@ -226,10 +227,10 @@ body {
 .console-account-menu header { border-color:var(--soft-line) }
 .console-account-menu dt { color:#6e7681 }
 .console-account-menu dd { color:#b1bac4 }
-.sidebar-footer .console-account-menu>button { background:rgba(240,246,252,.08);color:#b1bac4 }
-.sidebar-footer .console-account-menu>#inviteManagerBtn { background:rgba(240,246,252,.12);color:#e6edf3 }
-.sidebar-footer .console-account-menu>#consoleAccountAction { color:#b1bac4 }
-.sidebar-footer .console-account-menu>.account-logout { background:rgba(248,81,73,.12);color:var(--mica-danger) }
+.console-account-menu>button { background:rgba(240,246,252,.08);color:#b1bac4 }
+.console-account-menu>#inviteManagerBtn { background:rgba(240,246,252,.12);color:#e6edf3 }
+.console-account-menu>#consoleAccountAction { color:#b1bac4 }
+.console-account-menu>.account-logout { background:rgba(248,81,73,.12);color:var(--mica-danger) }
 
 /* Three floating groups in the upper-right corner. */
 .workspace {
@@ -259,6 +260,23 @@ body {
 .device-switch button.active { background:rgba(240,246,252,.14);color:#e6edf3;box-shadow:inset 0 0 0 1px rgba(240,246,252,.08) }
 .page-actions>#clearPageBtn { height:34px;padding:0 13px;color:#b1bac4 }
 .page-actions>#clearPageBtn:hover { border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.1);color:var(--mica-danger) }
+.page-control .deploy-actions button {
+  height:34px;
+  border:1px solid var(--mica-stroke);
+  border-radius:8px;
+  background:var(--mica-card);
+  color:#e6edf3;
+  box-shadow:var(--mica-shadow);
+  backdrop-filter:blur(24px);
+  -webkit-backdrop-filter:blur(24px);
+}
+.page-control .deploy-actions button:hover { border-color:var(--mica-hover-line);background:var(--mica-card-strong) }
+.page-control .deploy-actions .preview-site-button { border-color:var(--mica-stroke);background:var(--mica-card);color:#e6edf3 }
+.page-control .deploy-actions .preview-site-button:hover { border-color:var(--mica-hover-line);background:var(--mica-card-strong) }
+.page-control .deploy-actions .preview-site-button span { color:#b1bac4 }
+.page-control .deploy-actions #publishBtn { border-color:transparent;background:#2563eb;color:#fff;box-shadow:0 4px 14px rgba(37,99,235,.35) }
+.page-control .deploy-actions #publishBtn:hover { background:#1d4ed8 }
+.page-control .console-account:hover .console-avatar,.page-control .console-account[aria-expanded="true"] .console-avatar { box-shadow:0 0 0 2px var(--mica-hover-line) }
 .canvas-scroll {
   margin:0 10px 10px;
   border:1px solid var(--soft-line);
@@ -442,11 +460,11 @@ body {
 .sidebar-footer .deploy-actions #publishBtn small { font-size:8px }
 .console-account-menu header b { font-size:11px }
 .console-account-menu dt,.console-account-menu dd { font-size:10px }
-.sidebar-footer .console-account-menu>button { font-size:10px }
+.console-account-menu>button { font-size:10px }
 .workspace-page-title span { font-size:9px }
 .workspace-page-title>b { font-size:11px }
 .workspace-page-title small { font-size:9px }
-.history-actions button,.device-switch button,.page-actions>#clearPageBtn { font-size:10px }
+.history-actions button,.device-switch button,.page-actions>#clearPageBtn,.page-control .deploy-actions button { font-size:10px }
 .toolbar-font select,.toolbar-paragraph select,.toolbar-image select,.toolbar-font label { font-size:10px }
 .toolbar-font input { font-size:11px }
 .toolbar-group button { font-size:11px }
