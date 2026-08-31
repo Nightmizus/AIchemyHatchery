@@ -33,3 +33,40 @@
 停止旧进程，保留 `.env`、`alchemy_hatchery.db` 和 `published/`，执行 `git pull --ff-only` 后重新启动。数据库表会在启动时自动补齐，不会覆盖已有账号；旧品牌版本的控制台数据库会在首次启动时自动迁移。
 
 生产环境建议使用独立的低权限系统用户运行服务，并在 Caddy、Nginx 等反向代理后启用 HTTPS。不要直接公开数据库文件或项目目录的静态文件访问。
+
+## 开放发布（泛域名）
+
+用户发布的站点同时有两个入口：`https://hatchery.mizusumi.com/pages/<slug>` 和 `https://<slug>.hatchery.mizusumi.com`。子域名路由由服务端按 Host 头自动完成（见 `server.py` 的 `site_slug_from_host`），反向代理只需把 `*.hatchery.mizusumi.com` 原样转发到本服务，不要改写路径。保留子域名（www、api、admin 等，见 `RESERVED_SITE_SLUGS`）不会被当作站点。
+
+1. DNS：为 `*.hatchery.mizusumi.com` 添加 A/AAAA 记录指向服务器（保留 `hatchery.mizusumi.com` 本身指向同一服务）。
+2. 证书：需要覆盖 `*.hatchery.mizusumi.com` 的泛域名证书（如 Let's Encrypt DNS-01 挑战）。
+3. 反向代理示例：
+
+   Caddy（自动签发泛域名证书需配置 DNS 插件）：
+
+   ```
+   hatchery.mizusumi.com, *.hatchery.mizusumi.com {
+       tls {
+           dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+       }
+       reverse_proxy 127.0.0.1:4173
+   }
+   ```
+
+   Nginx：
+
+   ```nginx
+   server {
+       listen 443 ssl;
+       server_name hatchery.mizusumi.com *.hatchery.mizusumi.com;
+       ssl_certificate     /etc/letsencrypt/live/hatchery.mizusumi.com/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/hatchery.mizusumi.com/privkey.pem;
+       location / {
+           proxy_pass http://127.0.0.1:4173;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
+   }
+   ```
+
+未配置泛域名时，发布功能不受影响，只是 `xxx.hatchery.mizusumi.com` 无法解析，`/pages/<slug>` 入口始终可用。

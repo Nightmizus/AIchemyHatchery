@@ -76,6 +76,15 @@ RESERVED_SITE_SLUGS = frozenset({
     "www", "api", "app", "mail", "smtp", "admin", "console", "pages", "preview",
     "static", "assets", "hatchery", "mizusumi", "localhost", "ftp", "ns1", "ns2",
 })
+SITE_HOST_PATTERN = re.compile(r"^(?=.{3,32}\.hatchery\.mizusumi\.com$)([a-z0-9]+(?:-[a-z0-9]+)*)\.hatchery\.mizusumi\.com$")
+
+
+def site_slug_from_host(host: str) -> str | None:
+    """从 Host 头解析发布站点子域名，如 campus-news.hatchery.mizusumi.com → campus-news。"""
+    match = SITE_HOST_PATTERN.fullmatch(host.split(":", 1)[0].strip().lower())
+    if match and match.group(1) not in RESERVED_SITE_SLUGS:
+        return match.group(1)
+    return None
 AI_LOCK = threading.Lock()
 AI_RUN_LOCK = threading.Lock()
 AI_RUN_JOBS_LOCK = threading.Lock()
@@ -2108,6 +2117,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             for header in ("If-Modified-Since", "If-None-Match"):
                 if header in self.headers:
                     del self.headers[header]
+        site_host_slug = site_slug_from_host(self.headers.get("Host", ""))
+        if site_host_slug and parsed.path not in PUBLIC_STATIC_PATHS and not parsed.path.startswith("/api/"):
+            sub_path = "" if parsed.path in ("", "/") else parsed.path
+            self.serve_published(f"/pages/{site_host_slug}{sub_path}", site_host_slug)
+            return
         if parsed.path == "/api/auth/me":
             user = self.console_user()
             if not user:
