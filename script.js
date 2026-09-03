@@ -1,5 +1,5 @@
 const elementCatalog = {
-  nav:{name:'导航栏'}, hero:{name:'首页大字'}, projects:{name:'作品展示卡片栏'}, blog:{name:'文章列表'}, gallery:{name:'图片画廊'}, stats:{name:'数据栏'}, team:{name:'成员展示'}, timeline:{name:'活动时间线'}, forum:{name:'论坛板块'}, account:{name:'账号登录'}, notice:{name:'公告栏'}, links:{name:'链接集合'}, cta:{name:'行动区域'}, footer:{name:'页脚'}, detail:{name:'详情正文'}
+  nav:{name:'导航栏'}, hero:{name:'首页大字'}, game:{name:'方块沙盒'}, projects:{name:'作品展示卡片栏'}, blog:{name:'文章列表'}, gallery:{name:'图片画廊'}, stats:{name:'数据栏'}, team:{name:'成员展示'}, timeline:{name:'活动时间线'}, forum:{name:'论坛板块'}, account:{name:'账号登录'}, notice:{name:'公告栏'}, links:{name:'链接集合'}, cta:{name:'行动区域'}, footer:{name:'页脚'}, detail:{name:'详情正文'}
 };
 
 const INITIAL_STATE = {
@@ -11,6 +11,7 @@ let currentConsoleUser=null;
 let DRAFT_KEY='alchemyhatchery:guest:draft:v3';
 let AI_UNDO_KEY='alchemyhatchery:guest:ai-undo:v2';
 let AI_RELOAD_NOTICE_KEY='alchemyhatchery:guest:ai-reload-notice:v2';
+let AI_RUN_KEY='alchemyhatchery:guest:ai-run:v1';
 
 const previewDB = {
   forumPosts:[
@@ -126,7 +127,7 @@ function objectCss(element,key,kind='text'){
   return declarations.join(';');
 }
 function objectDataAttrs(element,key,kind,editing){const css=objectCss(element,key,kind);return `${editing?` data-editor-object data-object-key="${esc(key)}" data-object-kind="${kind}"`:''}${css?` style="${esc(css)}"`:''}`}
-function imageMarkup(item,index,element,editing=true){const key=`item:${item.id}:image`;if(!item.image)return `<span>${String(index+1).padStart(2,'0')}</span>`;return `<img class="${editing?'editor-object image-object':'published-object'}" src="${esc(item.image)}" alt="${esc(item.title)}"${objectDataAttrs(element,key,'image',editing)}>`}
+function imageMarkup(item,index,element,editing=true){const key=`item:${item.id}:image`;if(!item.image)return `<span>${String(index+1).padStart(2,'0')}</span>${!editing&&buildingPreviewHtml?'<small class="image-hint">请使用AI助手编辑图片</small>':''}`;return `<img class="${editing?'editor-object image-object':'published-object'}" src="${esc(item.image)}" alt="${esc(item.title)}"${objectDataAttrs(element,key,'image',editing)}>`}
 function floatingObjectMarkup(object,editing=true){const css=objectCss(object,'image','image');const classes=editing?'floating-page-image editor-object image-object':'floating-page-image published-image';return `<figure class="${classes}" data-page-object-id="${esc(object.id)}"${editing?' data-editor-object data-object-key="image" data-object-kind="image"':''}${css?` style="${esc(css)}"`:''}><img src="${esc(object.settings?.image||'')}" alt="${esc(object.settings?.alt||'插入的图片')}"></figure>`}
 function floatingObjectLayer(page,editing=true){const objects=pageObjects(page);if(!objects.length)return '';return `<div class="${editing?'page-object-layer':'published-object-layer'}">${objects.map(object=>floatingObjectMarkup(object,editing)).join('')}</div>`}
 
@@ -160,8 +161,7 @@ function blockContent(type,element={},editing=true){
     const demoPosts=editing?previewDB.forumPosts:[];
     const dynamicNotice=editing?'<div class="dynamic-preview-note"><b>动态内容不可编辑</b><span>下面的帖子和回复只用于编辑器交互演示，生成预览或正式发布时不会携带。</span></div>':'';
     const dynamicPosts=demoPosts.map((post,index)=>`<article class="forum-topic forum-topic-demo" aria-disabled="true"><span>${String(index+1).padStart(2,'0')}</span><b>${esc(post.title)}</b><em>${post.replies.length} 回复</em></article>`).join('');
-    const forumBoards=['热门讨论','AI 研究所','摄影漫游','乐队排练室','发现更多'];const boardIcons=['⌂','◉','◇','♬','＋'];
-    return `<section class="forum-block"><aside class="forum-nav"><b>${name}</b>${forumBoards.map((_,index)=>`<span>${boardIcons[index]}　${directList('forumBoards',forumBoards,index,'板块名称')}</span>`).join('')}</aside><div class="forum-content"><span class="block-kicker">${direct('eyebrow','社区论坛',false,'栏目眉题')}</span><h2>${title('大家都在聊')}</h2>${settings.description?`<p>${direct('description','',true,'点击编辑论坛说明')}</p>`:''}<button class="b-button" data-preview-action="forum-compose">＋ ${direct('button','发布话题',false,'按钮文字')}</button>${dynamicNotice}<div class="dynamic-preview-data">${dynamicPosts}</div></div></section>`;
+    return `<section class="forum-block"><div class="forum-content"><span class="block-kicker">${direct('eyebrow','社区论坛',false,'栏目眉题')}</span><h2>${title('大家都在聊')}</h2>${settings.description?`<p>${direct('description','',true,'点击编辑论坛说明')}</p>`:''}<button class="b-button" data-preview-action="forum-compose">＋ ${direct('button','发布话题',false,'按钮文字')}</button>${dynamicNotice}<div class="dynamic-preview-data">${dynamicPosts}</div></div></section>`;
   }
   if(type==='account'){const loginLabel=raw('button','登录账号');const panel=previewDB.accountLoggedIn?`<span class="account-avatar">A</span><div><small>当前账号</small><b>admin</b></div><button data-preview-action="account-logout">退出账号</button>`:`<div><small>预览账号固定为</small><b>admin</b></div><button data-preview-action="account-login">${direct('button','登录账号',false,'按钮文字')} →</button>`;const dynamicNotice=editing?'<small class="dynamic-inline-note">登录状态仅为编辑器交互演示，不会随预览或发布保存。</small>':'';return `<section class="account-block"><div class="account-copy"><span class="block-kicker">${direct('eyebrow','MEMBER ACCESS',false,'栏目眉题')}</span><h2>${title('登录你的账号')}</h2><p>${direct('description','登录后即可查看成员内容与参与社区互动。',true,'点击编辑说明')}</p>${dynamicNotice}</div><div class="account-panel" data-login-label="${esc(loginLabel)}">${panel}</div></section>`}
   if(type==='notice')return `<section class="notice-block" style="--notice-bg:${esc(cssColor(settings.background,'var(--page-accent)'))};--notice-fg:${esc(cssColor(settings.color,'#141510'))}"><span>!</span><b>${title('秋季招新开始啦 · 9 月 5 日活动中心见')}</b><button data-preview-action="notice">${direct('button','查看详情',false,'按钮文字')} →</button></section>`;
@@ -170,14 +170,55 @@ function blockContent(type,element={},editing=true){
   if(type==='detail'){
     const page=activePage();const parent=page.parentId?state.pages.find(item=>item.id===page.parentId):null;const body=esc(settings.body||detailBody(settings.detailType||'article',settings.title||page.name)).split(/\n\n+/).map(text=>`<p>${text.replace(/\n/g,'<br>')}</p>`).join('');
     const bodyPlain=settings.body||detailBody(settings.detailType||'article',settings.title||page.name),bodyCss=objectCss(element,'setting:body','text'),bodyContent=richObjectHtml(element,'setting:body',body,bodyPlain);const detailBodyMarkup=editing?`<div class="detail-body direct-edit direct-block editor-object text-object" contenteditable="true" spellcheck="true" data-direct-setting="body" data-direct-multiline="true" data-placeholder="点击这里直接撰写正文"${objectDataAttrs(element,'setting:body','text',true)}>${bodyContent}</div>`:`<div class="detail-body${bodyCss?' published-object':''}"${bodyCss?` style="${esc(bodyCss)}"`:''}>${bodyContent}</div>`;
-    const coverKey='setting:image';const cover=settings.image?`<div class="detail-cover ${editing?'editor-object image-object':'published-object published-image'}"${objectDataAttrs(element,coverKey,'image',editing)}><img src="${esc(settings.image)}" alt="${esc(settings.title||page.name)}"></div>`:'';
+    const coverKey='setting:image';const cover=settings.image?`<div class="detail-cover ${editing?'editor-object image-object':'published-object published-image'}"${objectDataAttrs(element,coverKey,'image',editing)}><img src="${esc(settings.image)}" alt="${esc(settings.title||page.name)}"></div>`:(!editing&&buildingPreviewHtml?'<div class="detail-cover detail-cover-empty"><small class="image-hint">请使用AI助手编辑图片</small></div>':'');
     return `<article class="detail-block">${parent?`<button class="detail-back" data-preview-action="navigate" data-page-id="${parent.id}">← 返回 ${esc(parent.name)}</button>`:''}<span class="block-kicker">${direct('eyebrow',settings.detailType==='project'?'PROJECT DETAIL':'ARTICLE DETAIL',false,'详情类型')}</span><h1 style="--detail-title-size:${esc(cssSize(settings.titleSize,'clamp(48px,8vw,105px)'))}">${title(page.name)}</h1><p class="detail-lead">${direct('description','在这里填写详情摘要。',true,'点击编辑摘要')}</p>${cover}${detailBodyMarkup}</article>`;
   }
+  if(type==='game')return `<section class="mc-game" data-mc-game><header class="block-head"><div><span class="block-kicker">${direct('description','MINICRAFT SANDBOX',false,'栏目眉题')}</span><h2>${title('方块世界 · 一起来搭建')}</h2></div><span class="block-link">${direct('button','左键放置 · 右键挖掘',false,'玩法提示')}</span></header><div class="mc-toolbar"><div class="mc-palette" data-mc-palette></div><div class="mc-actions"><button type="button" data-mc-mode="place" class="active">▣ 放置模式</button><button type="button" data-mc-mode="dig">✕ 挖除模式</button><button type="button" data-mc-reset>↺ 重新生成</button></div></div><div class="mc-world" data-mc-world role="application" aria-label="方块沙盒世界"></div><p class="mc-hint">先从上方挑选方块，再在世界中点击或按住拖动建造；单击右键或切换到“挖除模式”即可拆除方块，点“重新生成”换一片新大陆。</p></section>`;
   return `<footer class="b-footer"><div><b>${direct('title',state.siteName||'未命名网站',false,'点击编辑页脚名称')}</b>${linkedPages()}</div><small>${direct('description','© 2026 · 由 AIchemyHatchery 搭建',false,'点击编辑版权文字')}</small></footer>`;
 }
 
+function initMcGames(rootNode){
+  if(!rootNode)return;
+  const MC_BLOCKS=[['grass','草方块'],['dirt','泥土'],['stone','石头'],['wood','木头'],['leaves','树叶'],['sand','沙子'],['brick','砖块'],['glass','玻璃']];
+  const MC_COLS=28,MC_ROWS=16;
+  rootNode.querySelectorAll('[data-mc-game]').forEach(game=>{
+    if(game.dataset.mcReady)return;game.dataset.mcReady='1';
+    const world=game.querySelector('[data-mc-world]'),palette=game.querySelector('[data-mc-palette]');if(!world||!palette)return;
+    let selected='grass',mode='place',painting=false,data=[];
+    palette.innerHTML=MC_BLOCKS.map((block,index)=>`<button type="button" class="mc-block${index===0?' active':''}" data-mc-block="${block[0]}" title="${block[1]}"><i class="mc-b" data-b="${block[0]}"></i><span>${block[1]}</span></button>`).join('');
+    world.style.setProperty('--mc-cols',MC_COLS);
+    world.innerHTML='';const cells=[];
+    for(let r=0;r<MC_ROWS;r++)for(let c=0;c<MC_COLS;c++){const cell=document.createElement('div');cell.className='mc-b';cell.dataset.b='air';cell.dataset.r=r;cell.dataset.c=c;world.appendChild(cell);cells.push(cell)}
+    const buildWorld=()=>{
+      const heights=[];let level=7;
+      for(let c=0;c<MC_COLS;c++){if(Math.random()<.4)level=Math.max(4,Math.min(9,level+(Math.random()<.5?-1:1)));heights.push(level)}
+      const grid=[];
+      for(let r=0;r<MC_ROWS;r++){const row=[];for(let c=0;c<MC_COLS;c++){const h=heights[c];row.push(r<h?'air':r===h?'grass':r<h+3?'dirt':'stone')}grid.push(row)}
+      let lastTree=-6;
+      for(let c=2;c<MC_COLS-2;c++){
+        if(c-lastTree<4||Math.random()>=.16)continue;lastTree=c;const h=heights[c];if(h<5)continue;
+        for(let t=1;t<=3;t++)grid[h-t][c]='wood';
+        for(let dr=-2;dr<=0;dr++)for(let dc=-2;dc<=2;dc++){const rr=h-3+dr,cc=c+dc;if(rr<0||cc<0||cc>=MC_COLS)continue;if(Math.abs(dc)===2&&dr===-2)continue;if(grid[rr][cc]==='air')grid[rr][cc]='leaves'}
+        if(h-6>=0&&grid[h-6][c]==='air')grid[h-6][c]='leaves';
+      }
+      return grid;
+    };
+    const paint=()=>{for(let r=0;r<MC_ROWS;r++)for(let c=0;c<MC_COLS;c++)cells[r*MC_COLS+c].dataset.b=data[r][c]};
+    const dig=cell=>{const r=Number(cell.dataset.r),c=Number(cell.dataset.c);if(data[r][c]!=='air'){data[r][c]='air';cell.dataset.b='air'}};
+    const place=cell=>{const r=Number(cell.dataset.r),c=Number(cell.dataset.c);if(data[r][c]==='air'){data[r][c]=selected;cell.dataset.b=selected}};
+    data=buildWorld();paint();
+    world.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation()});
+    world.addEventListener('pointerdown',event=>{const cell=event.target.closest('.mc-b');if(!cell)return;event.preventDefault();event.stopPropagation();painting=event.button===2||mode==='dig'?'dig':'place';(painting==='dig'?dig:place)(cell)});
+    world.addEventListener('pointerover',event=>{if(!painting)return;const cell=event.target.closest('.mc-b');if(!cell)return;(painting==='dig'?dig:place)(cell)});
+    window.addEventListener('pointerup',()=>{painting=false});
+    world.addEventListener('pointerleave',()=>{painting=false});
+    palette.addEventListener('click',event=>{const button=event.target.closest('[data-mc-block]');if(!button)return;event.stopPropagation();selected=button.dataset.mcBlock;mode='place';game.querySelectorAll('[data-mc-mode]').forEach(item=>item.classList.toggle('active',item.dataset.mcMode==='place'));palette.querySelectorAll('.mc-block').forEach(item=>item.classList.toggle('active',item===button))});
+    game.querySelectorAll('[data-mc-mode]').forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();mode=button.dataset.mcMode;game.querySelectorAll('[data-mc-mode]').forEach(item=>item.classList.toggle('active',item===button))}));
+    game.querySelector('[data-mc-reset]')?.addEventListener('click',event=>{event.stopPropagation();data=buildWorld();paint()});
+  });
+}
 function editDefaults(element){
-  const defaults={nav:{title:state.siteName,description:'',button:''},hero:{title:'把想法，\n变成真正的作品。',description:state.description,button:'开始了解',titleSize:'clamp(48px,7vw,102px)'},projects:{title:'最近的作品',description:'SELECTED WORK',button:'点击卡片查看详情'},blog:{title:'最新文章',description:'JOURNAL',button:'进入文章'},gallery:{title:'活动瞬间',description:'MOMENTS',button:''},stats:{title:'86|24|12',description:'社团成员|开源项目|本学期活动',button:''},team:{title:'认识成员',description:'OUR TEAM',button:''},timeline:{title:'活动安排',description:'UPCOMING',button:''},forum:{title:'大家都在聊',description:'',button:'发布话题'},account:{title:'登录你的账号',description:'登录后即可查看成员内容与参与社区互动。',button:'登录账号'},notice:{title:'秋季招新开始啦 · 9 月 5 日活动中心见',description:'',button:'查看详情',background:'var(--page-accent)',color:'#141510'},links:{title:'加入交流群|查看 GitHub|关注公众号',description:'#group|https://github.com|#wechat',button:''},cta:{title:'一起把下一个好点子做出来。',description:'',button:'现在加入'},footer:{title:state.siteName,description:'© 2026 · 由 AIchemyHatchery 搭建',button:''},detail:{title:activePage().name,description:'在这里填写详情摘要。',body:'在这里填写详情正文。',button:''}};
+  const defaults={nav:{title:state.siteName,description:'',button:''},hero:{title:'把想法，\n变成真正的作品。',description:state.description,button:'开始了解',titleSize:'clamp(48px,7vw,102px)'},game:{title:'方块世界 · 一起来搭建',description:'MINICRAFT SANDBOX',button:'左键放置 · 右键挖掘'},projects:{title:'最近的作品',description:'SELECTED WORK',button:'点击卡片查看详情'},blog:{title:'最新文章',description:'JOURNAL',button:'进入文章'},gallery:{title:'活动瞬间',description:'MOMENTS',button:''},stats:{title:'86|24|12',description:'社团成员|开源项目|本学期活动',button:''},team:{title:'认识成员',description:'OUR TEAM',button:''},timeline:{title:'活动安排',description:'UPCOMING',button:''},forum:{title:'大家都在聊',description:'',button:'发布话题'},account:{title:'登录你的账号',description:'登录后即可查看成员内容与参与社区互动。',button:'登录账号'},notice:{title:'秋季招新开始啦 · 9 月 5 日活动中心见',description:'',button:'查看详情',background:'var(--page-accent)',color:'#141510'},links:{title:'加入交流群|查看 GitHub|关注公众号',description:'#group|https://github.com|#wechat',button:''},cta:{title:'一起把下一个好点子做出来。',description:'',button:'现在加入'},footer:{title:state.siteName,description:'© 2026 · 由 AIchemyHatchery 搭建',button:''},detail:{title:activePage().name,description:'在这里填写详情摘要。',body:'在这里填写详情正文。',button:''}};
   return {...defaults[element.type],...(element.settings||{})};
 }
 function inlineEditorMarkup(element){
@@ -192,7 +233,7 @@ function inlineEditorMarkup(element){
   const guidance=element.type==='forum'?'<p class="inline-tip"><b>论坛静态标题可以直接修改。</b><br>帖子、回复和登录状态属于动态数据，不提供编辑，也不会带入预览或发布。</p>':complex?'<p class="inline-tip">标题和辅助信息直接输入；点击卡片打开图片与详情设置，点击“＋”新增条目。</p>':extra?'':'<p class="inline-tip">该模块没有额外设置，全部文字都可直接在页面中输入。</p>';
   return `<aside class="canvas-inspector" data-inline-editor><header><div><small>MODULE SETTINGS</small><b>${elementCatalog[element.type].name} · 页面内设置</b></div><button data-editor-action="close-inspector" aria-label="关闭设置">×</button></header>${extra}${guidance}${itemEditor}</aside>`;
 }
-function elementMarkup(element){const inspectorOpen=editingElementId===element.id;const height=numberValue(element.layoutHeight);const heightStyle=height>0?` style="height:${Math.round(height)}px"`:'';return `<section class="page-element editing${inspectorOpen?' inspector-open':''}" data-element-id="${element.id}" data-element-type="${element.type}"${heightStyle}><div class="block-tools"><button class="drag-handle" draggable="true" title="拖动排序" aria-label="拖动排序"><svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><circle cx="5.5" cy="3.5" r="1.5"/><circle cx="10.5" cy="3.5" r="1.5"/><circle cx="5.5" cy="8" r="1.5"/><circle cx="10.5" cy="8" r="1.5"/><circle cx="5.5" cy="12.5" r="1.5"/><circle cx="10.5" cy="12.5" r="1.5"/></svg></button><button class="delete-block" title="删除元素" aria-label="删除元素"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 8.6A1.4 1.4 0 0 0 6.1 14h3.8a1.4 1.4 0 0 0 1.4-1.4L12 4M6.6 7v4M9.4 7v4"/></svg></button></div><div class="element-content-clip">${blockContent(element.type,element,true)}</div>${inspectorOpen?inlineEditorMarkup(element):''}</section>`}
+function elementMarkup(element){const inspectorOpen=editingElementId===element.id;const height=numberValue(element.layoutHeight);const heightStyle=height>0?` style="height:${Math.round(height)}px"`:'';return `<section class="page-element editing${inspectorOpen?' inspector-open':''}" data-element-id="${element.id}" data-element-type="${element.type}"${heightStyle}><div class="element-content-clip">${blockContent(element.type,element,true)}</div>${inspectorOpen?inlineEditorMarkup(element):''}</section>`}
 function insertionZone(index){return `<div class="insert-zone" data-insert-index="${index}"></div>`}
 
 let draftSaveTimer=null;
@@ -215,19 +256,15 @@ function renderCanvas(){
   if(isComposingText){deferredCanvasRender=true;return}captureTextSelectionBookmark();const page=activePage();if(!page)return;
   const canvas=document.querySelector('#siteCanvas');canvas.className=`site-canvas theme-${state.theme}`;canvas.dataset.previewDevice=previewDevice;canvas.style.setProperty('--page-bg',state.background||'#ffffff');canvas.style.setProperty('--canvas-width',previewDevice==='desktop'?`${state.contentWidth||100}%`:'390px');
   const legacyImages=page.elements.filter(element=>element.type==='image');if(legacyImages.length){legacyImages.forEach((element,index)=>pageObjects(page).push({id:uid('obj'),kind:'image',settings:{image:element.settings?.image||'',alt:element.settings?.alt||'插入的图片'},objectStyles:{image:{width:element.objectStyles?.image?.width||360,height:element.objectStyles?.image?.height||230,objectFit:element.objectStyles?.image?.objectFit||'contain',x:element.objectStyles?.image?.x||60+index*24,y:element.objectStyles?.image?.y||70+index*24,rotation:element.objectStyles?.image?.rotation||0}}}));page.elements=page.elements.filter(element=>element.type!=='image')}
-  const content=document.querySelector('#canvasContent');const flow=page.elements.length?insertionZone(0)+page.elements.map((element,index)=>elementMarkup(element)+insertionZone(index+1)).join(''):pageObjects(page).length?'<div class="empty-canvas object-only-canvas" data-empty-drop aria-label="可继续拖入页面模块"></div>':`<div class="empty-canvas" data-empty-drop><div><i>＋</i><b>这是一个空白页面</b><small>从左侧拖入元素，开始搭建</small></div></div>`;content.innerHTML=flow+floatingObjectLayer(page,true);
-  refreshMobileFontScaling(canvas);bindCanvasEvents();enforceElementHeightLimits();ensureObjectEditorChrome();restoreSelectedObject();restoreTextSelectionBookmark();const selected=editingElementId?getElementById(editingElementId):null;const hasContent=page.elements.length||pageObjects(page).length;document.querySelector('#selectionState').textContent=selected?`已打开设置：${elementCatalog[selected.type]?.name||selected.type}`:selectedObjectRef?(selectedObjectRef.kind==='text'?'可直接输入文字':'拖动边框移动 · 拖动控制点缩放'):hasContent?'所有文字与图片均可直接编辑':'空白页面';document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));scheduleDraftSave();
+  const content=document.querySelector('#canvasContent');const flow=page.elements.length?insertionZone(0)+page.elements.map((element,index)=>elementMarkup(element)+insertionZone(index+1)).join(''):pageObjects(page).length?'<div class="empty-canvas object-only-canvas" data-empty-drop aria-label="可继续拖入页面模块"></div>':`<div class="empty-canvas" data-empty-drop><div><i>＋</i><b>这是一个空白页面</b><small>在左侧告诉 AI 你想做什么，让它帮你搭建</small></div></div>`;content.innerHTML=flow+floatingObjectLayer(page,true);
+  refreshMobileFontScaling(canvas);bindCanvasEvents();initMcGames(content);enforceElementHeightLimits();ensureObjectEditorChrome();restoreSelectedObject();restoreTextSelectionBookmark();const selected=editingElementId?getElementById(editingElementId):null;const hasContent=page.elements.length||pageObjects(page).length;document.querySelector('#selectionState').textContent=selected?`已打开设置：${elementCatalog[selected.type]?.name||selected.type}`:selectedObjectRef?(selectedObjectRef.kind==='text'?'可直接输入文字':'拖动边框移动 · 拖动控制点缩放'):hasContent?'所有文字与图片均可直接编辑':'空白页面';document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));scheduleDraftSave();updatePreviewVisibility();
 }
 
 function renderPages(){
-  const tree=document.querySelector('#pageTree');
-  const branch=(parentId,depth)=>state.pages.filter(page=>page.parentId===parentId).map(page=>`<div class="page-tree-branch"><div class="page-tree-node${page.id===state.activePageId?' active':''}" role="treeitem" aria-current="${page.id===state.activePageId?'page':'false'}" style="--depth:${depth}"><button class="page-tree-select" data-page-id="${page.id}"><span>${page.kind==='detail'?'↳':'□'}</span><b>${esc(page.name)}</b></button><button class="tree-add-child" data-parent-id="${page.id}" title="添加子页面">＋</button><button class="tree-duplicate" data-duplicate-page="${page.id}" title="复制页面及子页面">⧉</button>${page.id!==state.pages[0].id?`<button class="tree-delete" data-delete-page="${page.id}" title="删除页面">×</button>`:'<i></i>'}</div>${branch(page.id,depth+1)}</div>`).join('');
-  tree.innerHTML=branch(null,0);tree.querySelectorAll('[data-page-id]').forEach(button=>button.addEventListener('click',()=>selectPage(button.dataset.pageId)));tree.querySelectorAll('[data-parent-id]').forEach(button=>button.addEventListener('click',()=>addPage(button.dataset.parentId)));tree.querySelectorAll('[data-duplicate-page]').forEach(button=>button.addEventListener('click',()=>duplicatePage(button.dataset.duplicatePage)));tree.querySelectorAll('[data-delete-page]').forEach(button=>button.addEventListener('click',()=>deletePage(button.dataset.deletePage)));
   document.querySelector('#currentBreadcrumb').textContent=pageAncestors(activePage()).map(page=>page.name).join(' / ');
 }
 function syncFields(){
-  const page=activePage();document.querySelector('#siteName').value=state.siteName;document.querySelector('#siteDescription').value=state.description;
-  document.querySelector('#titlePreview').textContent=`${page.name}｜${state.siteName}`;
+  document.querySelector('#siteName').value=state.siteName;
 }
 function selectPage(id){if(!state.pages.some(page=>page.id===id))return;state.activePageId=id;editingElementId=null;editingItemId=null;renderPages();syncFields();renderCanvas();document.querySelector('#canvasScroll').scrollTop=0}
 function addPage(parentId=null){const n=state.pages.length+1;const page={id:uid('page'),name:parentId?`子页面 ${n}`:`页面 ${n}`,path:`page-${n}`,parentId:parentId||null,kind:'page',elements:[],objects:[]};state.pages.push(page);state.activePageId=page.id;editingElementId=null;renderPages();syncFields();renderCanvas();showToast(`已创建空白页面「${page.name}」`)}
@@ -238,7 +275,7 @@ function duplicatePage(id){
   state.pages.push(...clones);state.activePageId=pageMap.get(id);editingElementId=null;editingItemId=null;renderPages();syncFields();renderCanvas();showToast(`已复制「${source.name}」及其子页面`)
 }
 function deletePage(id){if(id===state.pages[0].id){showToast('首页不能删除');return}removePageCascade(id);if(!state.pages.some(page=>page.id===state.activePageId))state.activePageId=state.pages[0].id;editingElementId=null;renderPages();syncFields();renderCanvas();showToast('页面及其子页面已删除')}
-function addElement(type,index=activePage().elements.length){const page=activePage();let accountAdded=false;if(type==='forum'&&!page.elements.some(item=>item.type==='account')){page.elements.splice(index,0,createElement('account',page));index+=1;accountAdded=true}const element=createElement(type,page);page.elements.splice(index,0,element);renderPages();renderCanvas();showToast(accountAdded?'已添加「账号登录」和「论坛板块」；论坛必须登录后互动':`已添加「${elementCatalog[type].name}」`)}
+function addElement(type,index=activePage().elements.length){if(aiRunActive){showToast('AI 正在修改网站，完成后再添加模块');return}const page=activePage();let accountAdded=false;if(type==='forum'&&!page.elements.some(item=>item.type==='account')){page.elements.splice(index,0,createElement('account',page));index+=1;accountAdded=true}const element=createElement(type,page);page.elements.splice(index,0,element);renderPages();renderCanvas();showToast(accountAdded?'已添加「账号登录」和「论坛板块」；论坛必须登录后互动':`已添加「${elementCatalog[type].name}」`)}
 
 function clearDropHints(){document.querySelectorAll('.insert-zone').forEach(zone=>zone.classList.remove('active'));document.querySelector('[data-empty-drop]')?.classList.remove('drag-active')}
 function findDropIndex(clientY){const elements=[...document.querySelectorAll('.page-element')];for(let index=0;index<elements.length;index++){const rect=elements[index].getBoundingClientRect();if(clientY<rect.top+rect.height/2)return index}return elements.length}
@@ -417,17 +454,17 @@ function bindCanvasEvents(){
   });
   document.querySelectorAll('.page-element').forEach(block=>{
     block.addEventListener('dragstart',event=>{if(!event.target.closest('.drag-handle')){event.preventDefault();return}dragPayload={source:'canvas',id:block.dataset.elementId};block.classList.add('dragging');document.body.classList.add('is-dragging');event.dataTransfer.setData('text/plain',block.dataset.elementId);event.dataTransfer.effectAllowed='move'});
-    block.addEventListener('dragend',()=>{block.classList.remove('dragging');dragPayload=null;document.body.classList.remove('is-dragging');clearDropHints()});block.querySelector('.delete-block')?.addEventListener('click',()=>deleteElement(block.dataset.elementId));block.addEventListener('contextmenu',event=>{if(event.target.closest('input,textarea,label,[contenteditable]'))return;event.preventDefault();showElementContext(event.clientX,event.clientY,block.dataset.elementId)});
+    block.addEventListener('dragend',()=>{block.classList.remove('dragging');dragPayload=null;document.body.classList.remove('is-dragging');clearDropHints()});block.addEventListener('contextmenu',event=>{if(event.target.closest('input,textarea,label,[contenteditable]'))return;event.preventDefault();showElementContext(event.clientX,event.clientY,block.dataset.elementId)});
   });
   document.querySelectorAll('[data-direct-setting]').forEach(node=>{
     node.addEventListener('click',event=>event.stopPropagation());
-    node.addEventListener('input',()=>{const element=elementForEditorNode(node);if(!element)return;const field=node.dataset.directSetting;const value=directText(node);element.settings={...(element.settings||{}),[field]:value};if(element.type==='detail'){if(field==='title'){activePage().name=value||'未命名详情';document.querySelector('#titlePreview').textContent=`${activePage().name}｜${state.siteName}`}syncDetailOwner(field,value)}positionObjectSelection();scheduleDraftSave()});
+    node.addEventListener('input',()=>{const element=elementForEditorNode(node);if(!element)return;const field=node.dataset.directSetting;const value=directText(node);element.settings={...(element.settings||{}),[field]:value};if(element.type==='detail'){if(field==='title'){activePage().name=value||'未命名详情';renderPages()}syncDetailOwner(field,value)}positionObjectSelection();scheduleDraftSave()});
     node.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();node.blur()}else if(event.key==='Enter'&&node.dataset.directMultiline!=='true'&&!event.shiftKey){event.preventDefault();node.blur()}});
     node.addEventListener('paste',event=>{event.preventDefault();document.execCommand('insertText',false,event.clipboardData?.getData('text/plain')||'')});
   });
   document.querySelectorAll('[data-direct-list-setting]').forEach(node=>{node.addEventListener('click',event=>event.stopPropagation());node.addEventListener('input',()=>{const element=elementForEditorNode(node);if(!element)return;updatePipeSetting(element,node.dataset.directListSetting,Number(node.dataset.directIndex),directText(node),node.dataset.directDefaults||'');positionObjectSelection();scheduleDraftSave()});node.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();node.blur()}});node.addEventListener('paste',event=>{event.preventDefault();document.execCommand('insertText',false,event.clipboardData?.getData('text/plain')||'')})});
   document.querySelectorAll('[data-direct-item-id]').forEach(node=>{node.addEventListener('click',event=>event.stopPropagation());node.addEventListener('input',()=>{const element=elementForEditorNode(node);const item=element?.items?.find(entry=>entry.id===node.dataset.directItemId);if(!item)return;item[node.dataset.directItemField]=directText(node);syncItemDetail(item);positionObjectSelection();scheduleDraftSave()});node.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();node.blur()}});node.addEventListener('paste',event=>{event.preventDefault();document.execCommand('insertText',false,event.clipboardData?.getData('text/plain')||'')})});
-  document.querySelectorAll('[data-direct-page-name]').forEach(node=>{node.addEventListener('click',event=>event.stopPropagation());node.addEventListener('input',()=>{const page=state.pages.find(item=>item.id===node.dataset.directPageName);if(!page)return;page.name=directText(node)||'未命名页面';if(page.id===state.activePageId){document.querySelector('#titlePreview').textContent=`${page.name}｜${state.siteName}`}renderPages();scheduleDraftSave()});node.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();node.blur()}})});
+  document.querySelectorAll('[data-direct-page-name]').forEach(node=>{node.addEventListener('click',event=>event.stopPropagation());node.addEventListener('input',()=>{const page=state.pages.find(item=>item.id===node.dataset.directPageName);if(!page)return;page.name=directText(node)||'未命名页面';renderPages();scheduleDraftSave()});node.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();node.blur()}})});
   document.querySelectorAll('[data-inline-setting]').forEach(input=>{input.addEventListener('input',()=>{const element=elementForEditorNode(input);if(!element)return;element.settings={...(element.settings||{}),[input.dataset.inlineSetting]:input.value};if(input.dataset.inlineSetting==='titleSize')document.querySelector(`[data-element-id="${element.id}"] .b-hero`)?.style.setProperty('--hero-title-size',cssSize(input.value,'clamp(48px,7vw,102px)'));if(input.dataset.inlineSetting==='background')document.querySelector(`[data-element-id="${element.id}"] .notice-block`)?.style.setProperty('--notice-bg',cssColor(input.value,'var(--page-accent)'));if(input.dataset.inlineSetting==='color')document.querySelector(`[data-element-id="${element.id}"] .notice-block`)?.style.setProperty('--notice-fg',cssColor(input.value,'#141510'));syncDetailOwner(input.dataset.inlineSetting,input.value);refreshMobileFontScaling();scheduleDraftSave()});if(input.dataset.inlineSetting==='image')input.addEventListener('change',renderCanvas)});
   document.querySelectorAll('[data-pipe-setting]').forEach(input=>input.addEventListener('input',()=>{const element=elementForEditorNode(input);if(!element)return;updatePipeSetting(element,input.dataset.pipeSetting,Number(input.dataset.pipeIndex),input.value);scheduleDraftSave()}));
   document.querySelectorAll('[data-nav-page]').forEach(input=>input.addEventListener('change',()=>{const element=elementForEditorNode(input);if(!element)return;const panel=input.closest('[data-inline-editor]');const selected=[...panel.querySelectorAll('[data-nav-page]:checked')].map(item=>item.dataset.navPage);element.settings={...(element.settings||{}),pageIds:selected};renderCanvas()}));
@@ -465,13 +502,11 @@ document.querySelector('#previewModal').addEventListener('click',event=>{if(even
 document.querySelector('#previewModal').addEventListener('submit',event=>{const form=event.target.closest('[data-runtime-form]');if(!form)return;event.preventDefault();const data=new FormData(form);if(form.dataset.runtimeForm==='login'){if(String(data.get('password'))!=='admin'){showToast('账号或密码错误：请使用 admin / admin');return}previewDB.accountLoggedIn=true;closeModal();renderCanvas();showToast('已以 admin 身份登录')}else if(form.dataset.runtimeForm==='topic'){previewDB.forumPosts.unshift({id:`post-${Date.now()}`,title:String(data.get('title')),author:String(data.get('author')),body:String(data.get('body')),replies:[]});closeModal();renderCanvas();showToast('话题已发布到临时论坛')}else if(form.dataset.runtimeForm==='reply'){const post=previewDB.forumPosts.find(item=>item.id===form.dataset.postId);if(post)post.replies.push({author:String(data.get('author')),body:String(data.get('body'))});closeModal();renderCanvas();showToast('回复已发布')}});
 document.querySelector('#closeModalBtn').addEventListener('click',closeModal);
 
-document.querySelectorAll('.sidebar-tabs button').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('.sidebar-tabs button').forEach(item=>{item.classList.toggle('active',item===button);item.setAttribute('aria-selected',String(item===button))});document.querySelectorAll('[data-panel-content]').forEach(panel=>{const active=panel.dataset.panelContent===button.dataset.panel;panel.hidden=!active;panel.classList.toggle('active',active)})}));
-document.querySelectorAll('.element-card').forEach(card=>{card.addEventListener('dragstart',event=>{dragPayload={source:'palette',type:card.dataset.element};card.classList.add('dragging');document.body.classList.add('is-dragging');event.dataTransfer.setData('text/plain',card.dataset.element);event.dataTransfer.effectAllowed='copy'});card.addEventListener('dragend',()=>{card.classList.remove('dragging');dragPayload=null;document.body.classList.remove('is-dragging');clearDropHints()});card.addEventListener('click',()=>addElement(card.dataset.element))});
 document.querySelectorAll('[data-theme]').forEach(button=>button.addEventListener('click',()=>{state.theme=button.dataset.theme;document.querySelectorAll('[data-theme]').forEach(item=>{const active=item===button;item.classList.toggle('active',active);item.setAttribute('aria-checked',String(active))});renderCanvas()}));
 document.querySelectorAll('[data-bg]').forEach(button=>button.addEventListener('click',()=>{state.background=button.dataset.bg;document.querySelectorAll('[data-bg]').forEach(item=>item.classList.toggle('active',item===button));renderCanvas()}));
 const contentWidthInput=document.querySelector('#contentWidth');const widthValueLabel=document.querySelector('#widthValue');contentWidthInput?.addEventListener('input',event=>{state.contentWidth=Number(event.target.value);if(widthValueLabel)widthValueLabel.textContent=`${state.contentWidth}%`;renderCanvas()});
-document.querySelector('#siteName').addEventListener('input',event=>{state.siteName=event.target.value;document.querySelector('#titlePreview').textContent=`${activePage().name}｜${state.siteName}`;renderCanvas()});document.querySelector('#siteDescription').addEventListener('input',event=>{state.description=event.target.value;renderCanvas()});
-document.querySelector('#addPageBtn').addEventListener('click',()=>addPage(null));document.querySelector('#clearPageBtn').addEventListener('click',()=>{if(!activePage().elements.length&&!pageObjects().length){showToast('当前页面已经是空白的');return}cleanupElementDetails(activePage().elements);activePage().elements=[];activePage().objects=[];editingElementId=null;clearObjectSelection();renderPages();renderCanvas();showToast('当前页面已清空')});document.querySelector('#toast button').addEventListener('click',()=>document.querySelector('#toast').hidden=true);
+document.querySelector('#siteName').addEventListener('input',event=>{state.siteName=event.target.value;renderCanvas()});
+document.querySelector('#clearPageBtn').addEventListener('click',()=>{if(!activePage().elements.length&&!pageObjects().length){showToast('当前页面已经是空白的');return}cleanupElementDetails(activePage().elements);activePage().elements=[];activePage().objects=[];editingElementId=null;clearObjectSelection();renderPages();renderCanvas();showToast('当前页面已清空')});document.querySelector('#toast button').addEventListener('click',()=>document.querySelector('#toast').hidden=true);
 document.querySelectorAll('.ai-examples button').forEach(button=>button.addEventListener('click',()=>{const prompt=document.querySelector('#aiPrompt');prompt.value=button.textContent;prompt.focus()}));
 const AI_ATTACHMENT_LIMIT=4,AI_ATTACHMENT_TOTAL_LIMIT=8*1024*1024,AI_IMAGE_LIMIT=4*1024*1024,AI_TEXT_LIMIT=512*1024;
 const AI_TEXT_EXTENSIONS=new Set(['txt','md','json','csv','html','css','js','mjs','ts','tsx','jsx','py','yml','yaml','xml','svg']);
@@ -504,15 +539,46 @@ document.querySelectorAll('[data-preview-device]').forEach(button=>button.addEve
 document.addEventListener('keydown',event=>{const editingText=event.target.closest?.('input,textarea,[contenteditable]');if(editingText)return;if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();if(event.shiftKey)redoState();else undoState()}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redoState()}else if(event.key==='Escape'&&editingElementId)openElementEditor(editingElementId)});
 
 let lastAiUndo=null;
+let aiRunActive=false;
+function setAiRunActive(active){aiRunActive=active;document.body.classList.toggle('ai-busy',active)}
 const cloneJson=value=>JSON.parse(JSON.stringify(value));
-function scrollAiConversation(){const node=document.querySelector('#aiConversation');requestAnimationFrame(()=>{node.scrollTop=node.scrollHeight})}
-function appendAiChatMessage(role,text,attachments=[]){const messages=document.querySelector('#aiChatMessages');const files=attachments.length?`<div class="ai-message-files">${attachments.map(item=>`<span>${item.kind==='image'?'▧':'▤'} ${esc(item.name)}</span>`).join('')}</div>`:'';messages.insertAdjacentHTML('beforeend',`<article class="ai-message ${role==='user'?'user':'assistant'}"><div><p>${esc(text)}</p>${files}</div></article>`);scrollAiConversation()}
+const AI_IMAGE_PLACEHOLDER='[本地图片数据已省略，但必须保留原值]';
+const AI_OBJECT_PLACEHOLDER='[页面浮动图片数据已省略，但必须保留原值]';
+const AI_PLACEHOLDERS=new Set([AI_IMAGE_PLACEHOLDER,AI_OBJECT_PLACEHOLDER]);
+let aiChatHistoryTimer=null;
+function aiChatHistoryKey(){return `alchemyhatchery:${currentConsoleUser?.username||'guest'}:ai-chat:v1`}
+function persistAiChatHistory(){
+  if(!currentConsoleUser)return;
+  clearTimeout(aiChatHistoryTimer);
+  aiChatHistoryTimer=setTimeout(()=>{
+    try{
+      const messages=document.querySelector('#aiChatMessages');if(!messages)return;
+      const oldest=()=>messages.querySelector(':scope > .ai-message, :scope > .ai-run-archive');
+      while(messages.innerHTML.length>260000&&oldest())oldest().remove();
+      localStorage.setItem(aiChatHistoryKey(),messages.innerHTML);
+    }catch{}
+  },350);
+}
+function restoreAiChatHistory(){
+  try{
+    const html=localStorage.getItem(aiChatHistoryKey());if(!html)return;
+    const messages=document.querySelector('#aiChatMessages');if(!messages)return;
+    messages.innerHTML=html;
+    messages.querySelectorAll('.ai-preset-chip, .ai-preset-confirm').forEach(node=>{node.disabled=true});
+    const trace=messages.querySelector('#aiRunTrace');if(trace)trace.dataset.rendered=String(trace.childElementCount);
+    if(!pendingAiRunJob()){const card=messages.querySelector('#aiRunCard');card?.querySelector('.ai-working-status')?.remove();card?.classList.remove('is-running')}
+  }catch{}
+}
+function scrollAiConversation(){const node=document.querySelector('#aiConversation');requestAnimationFrame(()=>{node.scrollTop=node.scrollHeight});persistAiChatHistory()}
+function updatePreviewVisibility(){const hasContent=state.pages.some(page=>(page.elements||[]).length>0||(page.objects||[]).length>0);document.querySelector('.app-shell')?.classList.toggle('preview-hidden',!hasContent)}
+function appendAiChatMessage(role,text,attachments=[]){const messages=document.querySelector('#aiChatMessages');const files=attachments.length?`<div class="ai-message-files">${attachments.map(item=>`<span>${item.kind==='image'?'▧':'▤'} ${esc(item.name)}</span>`).join('')}</div>`:'';messages.insertAdjacentHTML('beforeend',`<article class="ai-message ${role==='user'?'user':'assistant'}"><div><p>${esc(text)}</p>${files}</div></article>`);if(role==='user')document.querySelector('.ai-examples')?.remove();scrollAiConversation()}
 function aiSafeSnapshot(){
   const snapshot=cloneJson(state);
-  snapshot.pages.forEach(page=>{page.elements.forEach(element=>{(element.items||[]).forEach(item=>{if(String(item.image||'').startsWith('data:'))item.image='[本地图片数据已省略，但必须保留原值]' });if(String(element.settings?.image||'').startsWith('data:'))element.settings.image='[本地图片数据已省略，但必须保留原值]'});(page.objects||[]).forEach(object=>{if(String(object.settings?.image||'').startsWith('data:'))object.settings.image='[页面浮动图片数据已省略，但必须保留原值]'})});
-  return {site:snapshot,activePageId:state.activePageId,elementTypes:Object.keys(elementCatalog),rules:['未明确要求时保留全部现有内容与 ID','预览交互数据刷新后清空','发布站点使用服务端持久化']};
+  snapshot.pages.forEach(page=>{page.elements.forEach(element=>{(element.items||[]).forEach(item=>{if(String(item.image||'').startsWith('data:'))item.image=AI_IMAGE_PLACEHOLDER });if(String(element.settings?.image||'').startsWith('data:'))element.settings.image=AI_IMAGE_PLACEHOLDER});(page.objects||[]).forEach(object=>{if(String(object.settings?.image||'').startsWith('data:'))object.settings.image=AI_OBJECT_PLACEHOLDER})});
+  return {site:snapshot,activePageId:state.activePageId,elementTypes:Object.keys(elementCatalog),elementCatalog:Object.entries(elementCatalog).filter(([type])=>type!=='detail').map(([type,item])=>({type,name:item.name})),rules:['未明确要求时保留全部现有内容与 ID','预览交互数据刷新后清空','发布站点使用服务端持久化']};
 }
 function syncEditorAfterAI(){
+  updatePreviewVisibility();
   if(!state.pages.some(page=>page.id===state.activePageId))state.activePageId=state.pages[0]?.id;
   editingElementId=null;editingItemId=null;renderPages();syncFields();renderCanvas();
   document.querySelectorAll('[data-theme]').forEach(item=>{const active=item.dataset.theme===state.theme;item.classList.toggle('active',active);item.setAttribute('aria-checked',String(active))});
@@ -543,29 +609,71 @@ function applyAiSiteOperations(operations){
     }else if(op==='move_element'){
       const page=resolvePage(operation.pageId);const resolvedId=createdElements.get(operation.elementId)||operation.elementId;const from=page?.elements.findIndex(item=>item.id===resolvedId)??-1;if(!page||from<0)throw new Error('AI 指定的元素不存在');const [element]=page.elements.splice(from,1);const to=Math.max(0,Math.min(page.elements.length,Number(operation.index)||0));page.elements.splice(to,0,element);
     }else if(op==='set_items'){
-      const page=resolvePage(operation.pageId);const element=resolveElement(page,operation.elementId);if(!page||!element||!['projects','blog'].includes(element.type)||!Array.isArray(operation.items))throw new Error('AI 指定的作品或文章列表无效');const previous=new Map((element.items||[]).map(item=>[item.id,item]));const incoming=operation.items.slice(0,30).map((raw,index)=>{const old=previous.get(raw.id);const item={id:old?.id||uid('item'),title:String(raw.title||`条目 ${index+1}`),meta:String(raw.meta||''),summary:String(raw.summary||''),image:old&&raw.image==='[本地图片数据已省略，但必须保留原值]'?old.image:String(raw.image||''),pageId:old?.pageId||null};previous.delete(item.id);if(!item.pageId)createDetailPage(page.id,element.type==='projects'?'project':'article',item);return item});previous.forEach(item=>{if(item.pageId)removePageCascade(item.pageId)});element.items=incoming;element.items.forEach(syncItemDetail);
+      const page=resolvePage(operation.pageId);const element=resolveElement(page,operation.elementId);if(!page||!element||!['projects','blog'].includes(element.type)||!Array.isArray(operation.items))throw new Error('AI 指定的作品或文章列表无效');const previous=new Map((element.items||[]).map(item=>[item.id,item]));const incoming=operation.items.slice(0,30).map((raw,index)=>{const old=previous.get(raw.id);const item={id:old?.id||uid('item'),title:String(raw.title||`条目 ${index+1}`),meta:String(raw.meta||''),summary:String(raw.summary||''),image:old&&raw.image===AI_IMAGE_PLACEHOLDER?old.image:String(raw.image||''),pageId:old?.pageId||null};previous.delete(item.id);if(!item.pageId)createDetailPage(page.id,element.type==='projects'?'project':'article',item);return item});previous.forEach(item=>{if(item.pageId)removePageCascade(item.pageId)});element.items=incoming;element.items.forEach(syncItemDetail);
     }else throw new Error(`不支持的 AI 操作 ${op}`);
   }ensureForumAccounts()}catch(error){restoreState(backup);throw error}syncEditorAfterAI();return backup;
 }
 function describeAiOperation(operation){const page=state.pages.find(item=>item.id===operation.pageId);const element=page?.elements.find(item=>item.id===operation.elementId);const names={set_site:'修改站点设置',set_page:'修改页面',add_page:'新增页面',remove_page:'删除页面',add_element:'新增元素',update_element:'编辑元素',remove_element:'删除元素',move_element:'移动元素',set_items:'更新作品/文章'};return `${names[operation.op]||operation.op}${page?` · ${page.name}`:''}${element?` · ${elementCatalog[element.type]?.name||element.type}`:''}`}
-function showAiError(message){const result=document.querySelector('#aiResult');result.textContent=message;result.classList.add('error');result.hidden=false;scrollAiConversation()}
+function restoreAiPlaceholders(next,previous){
+  if(typeof next==='string'&&AI_PLACEHOLDERS.has(next))return typeof previous==='string'&&!AI_PLACEHOLDERS.has(previous)?previous:next;
+  if(Array.isArray(next))return next.map((item,index)=>restoreAiPlaceholders(item,Array.isArray(previous)?previous[index]:undefined));
+  if(next&&typeof next==='object'){if(!previous||typeof previous!=='object'||Array.isArray(previous))previous={};const merged={};for(const key of Object.keys(next))merged[key]=restoreAiPlaceholders(next[key],previous[key]);return merged}
+  return next;
+}
+function applyAiSiteReplace(siteData){
+  if(!siteData||typeof siteData!=='object'||!Array.isArray(siteData.pages)||!siteData.pages.length)throw new Error('AI 返回的网站数据无效');
+  const backup=cloneJson(state);restoreState(restoreAiPlaceholders(cloneJson(siteData),state));ensureForumAccounts();return backup;
+}
+function showAiError(message){setAiWorkingStatus(false);const result=document.querySelector('#aiResult');result.textContent=message;result.classList.add('error');result.hidden=false;scrollAiConversation()}
 const aiToolNames={list_files:'列出网站文件',read_file:'读取文件',search_files:'搜索源码',replace_file:'修改文件',browser_open:'打开本机页面',browser_screenshot:'查看页面截图'};
 function renderAiEvents(events=[]){
   const visible=events.filter(item=>item.kind==='tool'||item.tool||(item.kind==='analysis'&&item.status!=='running'));
-  document.querySelector('#aiRunTrace').innerHTML=visible.map(item=>{if(item.kind==='analysis')return `<p class="ai-run-thought">${esc(item.detail||item.label||'')}</p>`;const detail=item.detail?`<small> · ${esc(item.detail)}</small>`:'';return `<p class="ai-run-tool${item.status==='failed'?' failed':''}"><b>${esc(aiToolNames[item.tool]||item.label||item.tool||'网站工具')}</b>${detail}</p>`}).join('');
+  const trace=document.querySelector('#aiRunTrace');const previous=Number(trace.dataset.rendered||0);const start=previous>visible.length?0:previous;
+  trace.innerHTML=visible.map((item,index)=>{const fresh=index>=start?' ai-new':'';if(item.kind==='analysis')return `<p class="ai-run-thought${fresh}">${esc(item.detail||item.label||'')}</p>`;const detail=item.detail?`<small> · ${esc(item.detail)}</small>`:'';return `<p class="ai-run-tool${item.status==='failed'?' failed':''}${fresh}"><b>${esc(aiToolNames[item.tool]||item.label||item.tool||'网站工具')}</b>${detail}</p>`}).join('');
+  trace.dataset.rendered=String(visible.length);
+}
+function setAiWorkingStatus(active){
+  const card=document.querySelector('#aiRunCard');if(!card)return;const node=card.querySelector('.ai-working-status');
+  if(active&&!node)card.insertAdjacentHTML('afterbegin','<div class="ai-working-status"><i></i><b>AI 正在修改并验证网站</b></div>');
+  if(!active)node?.remove();
+  card.classList.toggle('is-running',active);
+}
+function typeAiSummary(text){
+  const node=document.querySelector('#aiRunSummary');const chars=[...String(text||'')];let index=0;clearInterval(node._typingTimer);node.textContent='';node.classList.add('is-typing');
+  node._typingTimer=setInterval(()=>{index=Math.min(chars.length,index+2);node.textContent=chars.slice(0,index).join('');if(index>=chars.length){clearInterval(node._typingTimer);node.classList.remove('is-typing');persistAiChatHistory()}},18);
 }
 function renderAiRunProgress(snapshot){
-  const events=snapshot.events||[];const failed=snapshot.status==='failed';const panel=document.querySelector('#aiRunCard');panel.hidden=false;document.querySelector('#aiRunFinal').hidden=true;document.querySelector('#aiRunChecks').innerHTML='';const process=document.querySelector('#aiRunProcess');process.open=!failed;const summary=document.querySelector('#aiRunProcessLabel');summary.hidden=!failed;summary.textContent='查看过程';renderAiEvents(events);scrollAiConversation();
+  const events=snapshot.events||[];const failed=snapshot.status==='failed';const panel=document.querySelector('#aiRunCard');panel.hidden=false;document.querySelector('#aiRunFinal').hidden=true;document.querySelector('#aiRunChecks').innerHTML='';const process=document.querySelector('#aiRunProcess');process.open=!failed;const summary=document.querySelector('#aiRunProcessLabel');summary.hidden=!failed;summary.textContent='查看过程';setAiWorkingStatus(!failed&&snapshot.status==='running');renderAiEvents(events);scrollAiConversation();
 }
 function renderAiRunResult(run){
-  document.querySelector('#aiResult').hidden=true;const panel=document.querySelector('#aiRunCard');panel.hidden=false;document.querySelector('#aiRunSummary').textContent=run.summary||'网站修改已完成。';document.querySelector('#aiRunFinal').hidden=false;
+  document.querySelector('#aiResult').hidden=true;const panel=document.querySelector('#aiRunCard');panel.hidden=false;setAiWorkingStatus(false);typeAiSummary(run.summary||'网站修改已完成。');document.querySelector('#aiRunFinal').hidden=false;
   const events=run.events||run.trace||[];renderAiEvents(events);const process=document.querySelector('#aiRunProcess');process.open=false;const summary=document.querySelector('#aiRunProcessLabel');summary.hidden=false;summary.textContent='查看过程';
   const changes=[...(run.changedFiles||[]).map(name=>`已修改文件：${name}`),...(run.siteOperations||[]).map(item=>describeAiOperation(item))];document.querySelector('#aiRunChecks').innerHTML=changes.length?changes.map(item=>`<div class="ai-change">${esc(item)}</div>`).join(''):'<div class="ai-change">未产生文件或站点改动</div>';scrollAiConversation();
 }
 async function waitForAiRun(jobId){for(let attempt=0;attempt<1800;attempt++){const response=await fetch(`/api/ai/run/status?id=${encodeURIComponent(jobId)}&ts=${Date.now()}`,{cache:'no-store'});const snapshot=await response.json();if(!response.ok)throw new Error(snapshot.error||'无法读取 AI 执行状态');renderAiRunProgress(snapshot);if(snapshot.status==='completed'){return {...snapshot.result,events:snapshot.events||[]}}if(snapshot.status==='failed')throw new Error(snapshot.error||'AI 自动任务失败');await new Promise(resolve=>setTimeout(resolve,500))}throw new Error('AI 执行超时，请稍后重试')}
-async function loadAiStatus(){try{const response=await fetch('/api/ai/status',{cache:'no-store'});const status=await response.json();document.querySelector('#aiAdjustBtn').disabled=!status.configured}catch{/* 请求时再显示具体错误 */}}
+async function loadAiStatus(){try{const response=await fetch('/api/ai/status',{cache:'no-store'});const status=await response.json();const button=document.querySelector('#aiAdjustBtn');button.disabled=!status.configured;button.classList.toggle('ai-unavailable',!status.configured);button.title=status.configured?'发送修改要求':'AI 尚未配置：服务器缺少 API Key 或运行时'}catch{/* 请求时再显示具体错误 */}}
 function saveDraftNow(){clearTimeout(draftSaveTimer);if(!currentConsoleUser)return;try{const snapshot=JSON.stringify(state);void persistDraftSnapshot(snapshot).catch(()=>setSaveState('同步失败',false))}catch{}}
 function persistAiUndo(){try{if(lastAiUndo)sessionStorage.setItem(AI_UNDO_KEY,JSON.stringify(lastAiUndo));else sessionStorage.removeItem(AI_UNDO_KEY)}catch{}}
+function persistAiPendingRun(jobId){try{if(jobId)sessionStorage.setItem(AI_RUN_KEY,JSON.stringify({jobId}));else sessionStorage.removeItem(AI_RUN_KEY)}catch{}}
+function pendingAiRunJob(){try{return JSON.parse(sessionStorage.getItem(AI_RUN_KEY)||'null')?.jobId||null}catch{return null}}
+function applyAiRunResult(payload){
+  let stateBackup=null;if(payload.siteReplace)stateBackup=applyAiSiteReplace(payload.siteReplace);const opsBackup=applyAiSiteOperations(payload.siteOperations||[]);return stateBackup||opsBackup;
+}
+function storeAiRunUndo(payload,stateBackup){
+  const changedSite=Boolean(payload.siteReplace)||Boolean((payload.siteOperations||[]).length);if(changedSite||payload.undoAvailable){lastAiUndo={proposalId:payload.runId,state:stateBackup,sourceApplied:Boolean(payload.undoAvailable)};persistAiUndo();document.querySelector('#aiUndoBtn').hidden=false}else{lastAiUndo=null;persistAiUndo();document.querySelector('#aiUndoBtn').hidden=true}
+}
+async function resumeAiRun(){
+  const jobId=pendingAiRunJob();if(!jobId)return;
+  const button=document.querySelector('#aiAdjustBtn');button.disabled=true;setAiRunActive(true);renderAiRunProgress({status:'running',events:[]});scrollAiConversation();let stateBackup=null;
+  try{
+    const payload=await waitForAiRun(jobId);persistAiPendingRun(null);
+    stateBackup=applyAiRunResult(payload);storeAiRunUndo(payload,stateBackup);saveDraftNow();renderAiRunResult(payload);
+    if(payload.restartRequired)await restartLocalServer();
+    showToast(payload.restartRequired?'AI 已完成修改并重启服务':'刷新前开始的 AI 任务已完成');
+  }catch(error){
+    if(stateBackup)restoreState(stateBackup);persistAiPendingRun(null);showAiError(`刷新前开始的 AI 任务未能恢复：${error.message}`);
+  }finally{setAiRunActive(false);button.disabled=false;scrollAiConversation()}
+}
 function notifyPublishedReload(reason){try{const channel=new BroadcastChannel('alchemyhatchery-live-preview');channel.postMessage({type:'reload',reason,at:Date.now()});channel.close()}catch{}try{localStorage.setItem('alchemyhatchery:published-reload',JSON.stringify({reason,at:Date.now()}))}catch{}}
 function refreshAiChangedFiles(files=[]){
   const changedStyles=files.filter(name=>['styles.css','mica.css','ai-chat.css'].includes(name));if(changedStyles.length)document.querySelectorAll('link[rel="stylesheet"]').forEach(link=>{const url=new URL(link.href,location.href);if(changedStyles.some(name=>url.pathname.endsWith(`/${name}`))){url.searchParams.set('ai',String(Date.now()));link.href=url.toString()}});
@@ -599,11 +707,11 @@ function updateConsoleAccount(){
   document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#menuUsername').textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPreviewPath').textContent=currentConsoleUser.previewId?`/preview/${currentConsoleUser.previewId}`:'首次预览后生成';document.querySelector('#accountPublishPath').textContent=currentConsoleUser.publishSlug?`${currentConsoleUser.publishSlug}.hatchery.mizusumi.com`:'未发布';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
 }
 async function enterConsole(user){
-  currentConsoleUser=user;const username=user.username;DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_UNDO_KEY=`alchemyhatchery:${username}:ai-undo:v2`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;
+  currentConsoleUser=user;const username=user.username;DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_UNDO_KEY=`alchemyhatchery:${username}:ai-undo:v2`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;AI_RUN_KEY=`alchemyhatchery:${username}:ai-run:v1`;
   let draft=null;try{draft=(await consoleRequest('/api/console/draft')).draft}catch(error){if(error.status===401){showAuthGate('登录已过期，请重新登录');return}showToast(`读取云端草稿失败：${error.message}`)}
   if(!draft){try{draft=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null')}catch{}}
   const next=draft?.pages?.length?{...INITIAL_STATE,...draft}:INITIAL_STATE;restoreState(next);ensureForumAccounts();syncEditorAfterAI();historyStack=[JSON.stringify(state)];historyIndex=0;updateHistoryButtons();lastAiUndo=null;try{const savedUndo=JSON.parse(sessionStorage.getItem(AI_UNDO_KEY)||'null');if(savedUndo?.proposalId)lastAiUndo=savedUndo}catch{}
-  updateConsoleAccount();document.querySelector('#authGate').hidden=true;syncFields();setSaveState(draft?'草稿已同步':'新草稿',false);restoreAiReloadUi();void loadAiStatus();if(!draft)scheduleDraftSave();
+  updateConsoleAccount();document.querySelector('#authGate').hidden=true;syncFields();setSaveState(draft?'草稿已同步':'新草稿',false);restoreAiReloadUi();restoreAiChatHistory();void loadAiStatus();if(!draft)scheduleDraftSave();void resumeAiRun();
 }
 function sessionLabel(userAgent=''){
   const browser=/Edg/i.test(userAgent)?'Edge':/Chrome/i.test(userAgent)?'Chrome':/Firefox/i.test(userAgent)?'Firefox':/Safari/i.test(userAgent)?'Safari':'浏览器';const system=/Windows/i.test(userAgent)?'Windows':/Mac OS/i.test(userAgent)?'macOS':/Android/i.test(userAgent)?'Android':/iPhone|iPad/i.test(userAgent)?'iOS':'未知系统';return `${browser} · ${system}`;
@@ -613,7 +721,8 @@ async function openPasswordSettings(){
 }
 const fmtTokenCount=value=>Number(value||0).toLocaleString('en-US');
 async function openInviteManager(){
-  try{const [userPayload,usagePayload]=await Promise.all([consoleRequest('/api/admin/users'),consoleRequest('/api/admin/ai-usage')]);const users=(userPayload.users||[]).map(item=>{const own=item.username.toLowerCase()===currentConsoleUser?.username?.toLowerCase();const status=item.status==='active'?'正常':'已停用';return `<div class="admin-user-row"><span class="console-avatar">${esc(item.username.slice(0,1).toUpperCase())}</span><div><b>${esc(item.username)}</b><small>${item.role==='admin'?'管理员':'用户'} · ${item.published?'已发布':'未发布'} · ${item.sessionCount} 个会话</small></div><em class="${item.status}">${status}</em>${own?'<i>当前账号</i>':`<button data-user-status="${item.status==='active'?'disabled':'active'}" data-user-name="${esc(item.username)}">${item.status==='active'?'停用':'启用'}</button>`}</div>`}).join('')||'<div class="invite-empty">暂无用户</div>';const usageRows=(usagePayload.usage||[]).map(item=>`<div class="admin-usage-row"><span><b>${esc(item.username)}</b><small>${esc(item.campusId||'')} · ${item.runs} 次任务</small></span><em>${fmtTokenCount(item.dayTokens)}</em><em>${fmtTokenCount(item.weekTokens)}</em><em>${fmtTokenCount(item.totalTokens)}</em><button data-ai-chats="${esc(String(item.userId))}" data-user-name="${esc(item.username)}">记录</button></div>`).join('')||'<div class="invite-empty">还没有 AI 使用记录</div>';const totals=usagePayload.totals||{};openModal('账号与注册管理',`<div class="admin-console"><section><header><div><small>USERS</small><h3>控制台用户</h3></div><b>${userPayload.total||0}</b></header><div class="admin-user-list">${users}</div></section><section class="ai-usage-manager"><header><div><small>AI TOKENS</small><h3>AI 用量统计</h3></div><button data-ai-chats="" data-user-name="全部用户">全部记录</button></header><p>今日 ${fmtTokenCount(totals.dayTokens)} · 近 7 天 ${fmtTokenCount(totals.weekTokens)} · 累计 ${fmtTokenCount(totals.totalTokens)} tokens</p><div class="admin-usage-head"><span>用户</span><span>今日</span><span>近 7 天</span><span>累计</span><span></span></div><div class="admin-usage-list">${usageRows}</div></section></div>`)}catch(error){showToast(error.message)}
+  openModal('账号与注册管理','<div class="invite-empty">正在加载管理后台…</div>');
+  try{const [userPayload,usagePayload]=await Promise.all([consoleRequest('/api/admin/users'),consoleRequest('/api/admin/ai-usage')]);const users=(userPayload.users||[]).map(item=>{const own=item.username.toLowerCase()===currentConsoleUser?.username?.toLowerCase();const status=item.status==='active'?'正常':'已停用';return `<div class="admin-user-row"><span class="console-avatar">${esc(item.username.slice(0,1).toUpperCase())}</span><div><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${item.role==='admin'?'管理员':'用户'} · ${item.published?'已发布':'未发布'} · ${item.sessionCount} 个会话</small></div><em class="${item.status}">${status}</em>${own?'<i>当前账号</i>':`<button data-user-status="${item.status==='active'?'disabled':'active'}" data-user-name="${esc(item.username)}">${item.status==='active'?'停用':'启用'}</button>`}</div>`}).join('')||'<div class="invite-empty">暂无用户</div>';const usageRows=(usagePayload.usage||[]).map(item=>`<div class="admin-usage-row"><span><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${esc(item.campusId||'')} · ${item.runs} 次任务</small></span><em>${fmtTokenCount(item.dayTokens)}</em><em>${fmtTokenCount(item.weekTokens)}</em><em>${fmtTokenCount(item.totalTokens)}</em><button data-ai-chats="${esc(String(item.userId))}" data-user-name="${esc(item.username)}">记录</button></div>`).join('')||'<div class="invite-empty">还没有 AI 使用记录</div>';const totals=usagePayload.totals||{};openModal('账号与注册管理',`<div class="admin-console"><section><header><div><small>USERS</small><h3>控制台用户</h3></div><b>${userPayload.total||0}</b></header><div class="admin-user-list">${users}</div></section><section class="ai-usage-manager"><header><div><small>AI TOKENS</small><h3>AI 用量统计</h3></div><button data-ai-chats="" data-user-name="全部用户">全部记录</button></header><p>今日 ${fmtTokenCount(totals.dayTokens)} · 近 7 天 ${fmtTokenCount(totals.weekTokens)} · 累计 ${fmtTokenCount(totals.totalTokens)} tokens</p><div class="admin-usage-head"><span>用户</span><span>今日</span><span>近 7 天</span><span>累计</span><span></span></div><div class="admin-usage-list">${usageRows}</div></section></div>`)}catch(error){openModal('账号与注册管理',`<div class="invite-empty">${esc(error.message)}</div>`)}
 }
 async function openAiChats(userId,username){
   try{const payload=await consoleRequest(`/api/admin/ai-chats${userId?`?userId=${encodeURIComponent(userId)}`:''}`);const rows=(payload.chats||[]).map(item=>{const time=esc(String(item.createdAt||'').replace('T',' ').slice(0,19));const atts=(item.attachments||[]).map(att=>`<i>${att.kind==='image'?'图片':'附件'} · ${esc(att.name||'')}</i>`).join('');return `<article class="ai-chat-item"><header><b>${esc(item.username)}</b><span>${time} · ${esc(item.model||item.provider||'AI')} · ${fmtTokenCount(item.totalTokens)} tokens（入 ${fmtTokenCount(item.inputTokens)} / 出 ${fmtTokenCount(item.outputTokens)}）· ${item.status==='completed'?'完成':'失败'}</span></header><p>${esc(item.prompt)}</p>${atts?`<div class="ai-chat-atts">${atts}</div>`:''}</article>`}).join('')||'<div class="invite-empty">暂无聊天记录</div>';openModal(`AI 记录 · ${username||'全部用户'}`,`<div class="ai-chat-manager"><button class="ai-chat-back" data-ai-chats-back>← 返回管理后台</button><div class="ai-chat-list">${rows}</div></div>`)}catch(error){showToast(error.message)}
@@ -621,18 +730,111 @@ async function openAiChats(userId,username){
 async function logoutConsole(){
   try{await persistDraftSnapshot(JSON.stringify(state))}catch{}document.querySelector('#consoleAccountMenu').hidden=true;if(window.AIchemyHatcheryAuth)await window.AIchemyHatcheryAuth.logout();else showAuthGate();showToast('已退出控制台账号');
 }
+let lastAiPromptRequest=null;
 document.querySelector('#aiAdjustBtn').addEventListener('click',async()=>{
   const promptInput=document.querySelector('#aiPrompt');const typedPrompt=promptInput.value.trim();if(!typedPrompt&&!aiAttachments.length){showToast('输入修改要求，或先添加附件');promptInput.focus();return}
-  const prompt=typedPrompt||'请根据附件内容调整网站。';const requestAttachments=aiAttachments.map(item=>({...item}));const button=document.querySelector('#aiAdjustBtn');const result=document.querySelector('#aiResult');appendAiChatMessage('user',prompt,requestAttachments);promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();button.disabled=true;result.hidden=true;result.classList.remove('error');renderAiRunProgress({status:'running',events:[]});scrollAiConversation();let payload=null;let stateBackup=null;
+  const prompt=typedPrompt||'请根据附件内容调整网站。';const requestAttachments=aiAttachments.map(item=>({...item}));promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();
+  await startAiRun(prompt,requestAttachments);
+});
+function archiveAiRunOutput(){
+  // 新一轮开始前，把上一轮的运行卡片/结果固化成历史记录，避免被复用清空
+  const card=document.querySelector('#aiRunCard');if(!card||card.hidden)return;
+  const hasTrace=(card.querySelector('#aiRunTrace')?.childElementCount||0)>0,finalShown=card.querySelector('#aiRunFinal')&&!card.querySelector('#aiRunFinal').hidden,result=document.querySelector('#aiResult'),resultShown=result&&!result.hidden&&result.textContent.trim();
+  if(!hasTrace&&!finalShown&&!resultShown)return;
+  const freeze=node=>{const copy=node.cloneNode(true);copy.removeAttribute('id');copy.querySelectorAll('[id]').forEach(item=>item.removeAttribute('id'));copy.classList.add('ai-run-archive');copy.querySelector('.ai-working-status')?.remove();copy.querySelector('.is-typing')?.classList.remove('is-typing');card.before(copy)};
+  if(resultShown)freeze(result);
+  freeze(card);
+}
+async function startAiRun(prompt,requestAttachments=[],chosenPresets=[]){
+  if(!chosenPresets.length)lastAiPromptRequest={prompt,attachments:requestAttachments};
+  const shownText=chosenPresets.length?`使用这些模块制作：${chosenPresets.map(type=>elementCatalog[type]?.name||type).join('、')}`:prompt;
+  const button=document.querySelector('#aiAdjustBtn');const result=document.querySelector('#aiResult');archiveAiRunOutput();appendAiChatMessage('user',shownText,requestAttachments);document.querySelector('#aiChatMessages').append(result,document.querySelector('#aiRunCard'),document.querySelector('#aiUndoBtn'));button.disabled=true;setAiRunActive(true);result.hidden=true;result.classList.remove('error');renderAiRunProgress({status:'running',events:[]});scrollAiConversation();let payload=null;let stateBackup=null;
   try{
-    const response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,attachments:requestAttachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true})});const started=await response.json();if(!response.ok)throw new Error(started.error||'AI 自动任务启动失败');payload=response.status===202&&started.jobId?await waitForAiRun(started.jobId):started;
-    stateBackup=applyAiSiteOperations(payload.siteOperations||[]);const live=refreshAiChangedFiles(payload.changedFiles||[]);const changedSite=Boolean((payload.siteOperations||[]).length);if(changedSite||payload.undoAvailable){lastAiUndo={proposalId:payload.runId,state:stateBackup,sourceApplied:Boolean(payload.undoAvailable)};persistAiUndo();document.querySelector('#aiUndoBtn').hidden=false}else{lastAiUndo=null;persistAiUndo();document.querySelector('#aiUndoBtn').hidden=true}saveDraftNow();renderAiRunResult(payload);
+    const response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,attachments:requestAttachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true,chosenPresets})});const started=await response.json();if(!response.ok)throw new Error(started.error||'AI 自动任务启动失败');const jobId=response.status===202&&started.jobId?started.jobId:null;if(jobId)persistAiPendingRun(jobId);payload=jobId?await waitForAiRun(jobId):started;persistAiPendingRun(null);
+    stateBackup=applyAiRunResult(payload);storeAiRunUndo(payload,stateBackup);const live=refreshAiChangedFiles(payload.changedFiles||[]);saveDraftNow();renderAiRunResult(payload);
+    if(payload.askPresets?.length)appendAiPresetQuestion(payload.question,payload.askPresets);
     if(payload.restartRequired){button.querySelector('b').textContent='重启中…';await restartLocalServer()}
     if(live.editorReloadNeeded){scheduleEditorReload('AI 网站代理已自动修改、验证并刷新编辑器。')}else showToast(payload.restartRequired?'AI 已完成修改并重启服务':'AI 已自动完成并验证网站修改');
   }catch(error){
-    if(stateBackup)restoreState(stateBackup);if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}lastAiUndo=null;persistAiUndo();showAiError(`自动执行失败，修改已回滚：${error.message}`)
-  }finally{button.disabled=false;scrollAiConversation()}
-});
+    persistAiPendingRun(null);if(stateBackup)restoreState(stateBackup);if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}lastAiUndo=null;persistAiUndo();showAiError(`自动执行失败，修改已回滚：${error.message}`)
+  }finally{setAiRunActive(false);button.disabled=false;scrollAiConversation()}
+}
+function appendAiPresetQuestion(question,presets){
+  const valid=(presets||[]).filter(item=>item&&elementCatalog[item.type]);if(!valid.length)return;
+  const messages=document.querySelector('#aiChatMessages');
+  const chips=valid.map(item=>`<button class="ai-preset-chip" aria-pressed="true" data-preset-type="${esc(item.type)}" title="${esc(item.reason||'')}">${esc(elementCatalog[item.type].name)}</button>`).join('');
+  messages.insertAdjacentHTML('beforeend',`<article class="ai-message assistant"><div class="ai-presets-card"><p>${esc(question||'我建议网站包含这些模块，可以点选增减，确认后开始制作：')}</p><div class="ai-preset-chips">${chips}</div><button class="ai-preset-confirm">使用选中的模块开始制作</button></div></article>`);
+  const card=messages.lastElementChild;
+  card.querySelectorAll('.ai-preset-chip').forEach(chip=>chip.addEventListener('click',()=>chip.setAttribute('aria-pressed',String(chip.getAttribute('aria-pressed')!=='true'))));
+  const confirm=card.querySelector('.ai-preset-confirm');
+  confirm.addEventListener('click',async()=>{
+    const chosen=[...card.querySelectorAll('.ai-preset-chip[aria-pressed="true"]')].map(chip=>chip.dataset.presetType);
+    if(!chosen.length){showToast('至少选择一个模块');return}
+    confirm.disabled=true;card.querySelectorAll('.ai-preset-chip').forEach(chip=>chip.disabled=true);
+    const request=lastAiPromptRequest||{prompt:'请按选中的模块制作网站。',attachments:[]};
+    await startAiRun(request.prompt,request.attachments,chosen);
+  });
+  scrollAiConversation();
+}
+const TEMPLATE_GROUPS=[
+  {title:'页面结构',en:'STRUCTURE',items:['nav','hero','footer','cta']},
+  {title:'内容展示',en:'CONTENT',items:['projects','blog','gallery','stats','team','timeline','game']},
+  {title:'社区功能',en:'COMMUNITY',items:['forum','account','notice','links']},
+];
+const TEMPLATE_DESCRIPTIONS={nav:'LOGO 与页面链接',hero:'主标题与行动按钮',footer:'联系与版权信息',cta:'一句话与主按钮',projects:'三列项目作品',blog:'日期、标题与摘要',gallery:'错落图片网格',stats:'关键数字与指标',team:'头像、名字与分工',timeline:'日期与活动安排',game:'可交互的方块沙盒',forum:'板块导航、话题列表与回复数量',account:'登录状态、账号信息与退出',notice:'招新与活动通知',links:'社群与相关站点'};
+const TEMPLATE_VISUALS={nav:'<span></span><span></span><span></span>',hero:'<strong>Aa</strong><span></span>',footer:'<span></span><span></span>',cta:'<strong>→</strong><span></span>',projects:'<span></span><span></span><span></span>',blog:'<span></span><span></span><span></span>',gallery:'<span></span><span></span><span></span>',stats:'<strong>24</strong><strong>08</strong><strong>16</strong>',team:'<span></span><span></span><span></span>',timeline:'<span></span><span></span><span></span>',game:'<span></span><span></span><span></span><span></span>',forum:'<span></span><div><b></b><b></b><b></b></div>',account:'<span>AD</span><b></b>',notice:'<strong>!</strong><span></span>',links:'<span>↗</span><span>↗</span>'};
+function closeTemplatePicker(){document.querySelector('#templatePicker')?.remove()}
+function openTemplatePicker(){
+  if(aiRunActive){showToast('AI 正在修改网站，完成后再添加模块');return}
+  const panel=document.querySelector('.ai-chat-panel');if(!panel||panel.querySelector('#templatePicker'))return;
+  const groups=TEMPLATE_GROUPS.map(group=>`<div class="element-group"><div class="element-group-title"><b>${group.title}</b><span>${group.en}</span></div><div class="element-grid">${group.items.map(type=>`<button type="button" class="element-card${type==='forum'?' wide':''}" data-template-type="${type}" aria-pressed="false"><i class="element-visual v-${type}">${TEMPLATE_VISUALS[type]||'<span></span>'}</i><b>${elementCatalog[type]?.name||type}</b><small>${TEMPLATE_DESCRIPTIONS[type]||''}</small></button>`).join('')}</div></div>`).join('');
+  panel.insertAdjacentHTML('beforeend',`<div class="template-picker" id="templatePicker"><header class="template-picker-head"><div><small>TEMPLATES</small><b>浏览现成模板</b></div><button type="button" class="template-picker-close" data-template-close aria-label="关闭模板选择">×</button></header><div class="template-picker-body"><p class="template-picker-tip">点选要用的模块（可多选），确定后交给 AI 加进当前网站。</p>${groups}</div><footer class="template-picker-foot"><span data-template-count>未选择模块</span><button type="button" class="ai-preset-confirm" data-template-confirm disabled>确定添加</button></footer></div>`);
+  const picker=panel.querySelector('#templatePicker'),confirm=picker.querySelector('[data-template-confirm]'),count=picker.querySelector('[data-template-count]');
+  picker.querySelector('[data-template-close]').addEventListener('click',closeTemplatePicker);
+  picker.querySelectorAll('[data-template-type]').forEach(card=>card.addEventListener('click',()=>{
+    card.setAttribute('aria-pressed',String(card.getAttribute('aria-pressed')!=='true'));
+    const chosen=picker.querySelectorAll('[data-template-type][aria-pressed="true"]').length;
+    count.textContent=chosen?`已选 ${chosen} 个模块`:'未选择模块';confirm.disabled=!chosen;
+  }));
+  confirm.addEventListener('click',async()=>{
+    const chosen=[...picker.querySelectorAll('[data-template-type][aria-pressed="true"]')].map(card=>card.dataset.templateType);
+    if(!chosen.length)return;
+    closeTemplatePicker();
+    const promptInput=document.querySelector('#aiPrompt'),typed=promptInput.value.trim();
+    const prompt=typed||'请把选中的模块添加到当前网站，融入整体设计。';const requestAttachments=aiAttachments.map(item=>({...item}));
+    promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();
+    await startAiRun(prompt,requestAttachments,chosen);
+  });
+}
+document.querySelector('#aiTemplateBtn').addEventListener('click',openTemplatePicker);
+function switchActivity(name){
+  document.querySelectorAll('.activity-item').forEach(item=>{const active=item.dataset.activity===name;item.classList.toggle('active',active);item.setAttribute('aria-selected',String(active))});
+  document.querySelector('.ai-chat-panel').hidden=name!=='ai';
+  document.querySelector('.security-panel').hidden=name!=='security';
+}
+document.querySelectorAll('.activity-item').forEach(item=>item.addEventListener('click',()=>switchActivity(item.dataset.activity)));
+const SECURITY_SENSITIVE_PATHS=['/.env','/.env.example','/.git/config','/.gitignore','/server.py','/requirements.txt','/alchemy_hatchery.db','/miaoda.db'];
+async function runSecurityChecks(){
+  const button=document.querySelector('#securityRunBtn'),summary=document.querySelector('#securitySummary'),list=document.querySelector('#securityResults');
+  if(button.disabled)return;button.disabled=true;button.textContent='正在测试…';list.innerHTML='';summary.hidden=true;
+  const results=[];const started=Date.now();
+  const render=()=>{const counts={pass:0,warn:0,fail:0};results.forEach(item=>counts[item.status]+=1);summary.hidden=false;summary.innerHTML=`<b>${counts.pass}</b> 项通过 · <b>${counts.warn}</b> 项警告 · <b>${counts.fail}</b> 项风险 · 共 ${results.length} 项`;list.innerHTML=results.map(item=>`<article class="security-check ${item.status}"><i>${item.status==='pass'?'✓':item.status==='warn'?'!':'✕'}</i><div><b>${esc(item.name)}</b><small>${esc(item.detail)}</small></div></article>`).join('')};
+  const add=(name,status,detail)=>{results.push({name,status,detail});render()};
+  try{
+    const response=await fetch('/',{cache:'no-store'});const headers=response.headers;
+    const required=[['x-content-type-options','X-Content-Type-Options'],['referrer-policy','Referrer-Policy'],['x-frame-options','X-Frame-Options'],['content-security-policy','Content-Security-Policy'],['strict-transport-security','Strict-Transport-Security']];
+    const missing=required.filter(([key])=>!headers.get(key));
+    add('安全响应头',missing.length?(missing.length>2?'fail':'warn'):'pass',missing.length?`缺少：${missing.map(([,label])=>label).join('、')}`:'常见安全响应头齐全');
+    const serverHeader=headers.get('server');if(serverHeader)add('服务指纹','warn',`Server 响应头暴露了服务标识：${serverHeader}`);
+  }catch(error){add('安全响应头','fail',`无法请求首页：${error.message}`)}
+  for(const path of SECURITY_SENSITIVE_PATHS){
+    try{const response=await fetch(path,{cache:'no-store'});add(`敏感文件 ${path}`,response.status===200?'fail':'pass',response.status===200?`可被直接访问下载（HTTP ${response.status}）`:`不可访问（HTTP ${response.status}）`)}
+    catch{add(`敏感文件 ${path}`,'pass','请求失败，不可访问')}
+  }
+  add('传输加密',location.protocol==='https:'?'pass':'warn',location.protocol==='https:'?'当前通过 HTTPS 访问':'当前是明文 HTTP；本地开发属正常，对外部署必须启用 HTTPS');
+  button.disabled=false;button.textContent='重新测试';summary.innerHTML+=` · 耗时 ${((Date.now()-started)/1000).toFixed(1)}s`;
+}
+document.querySelector('#securityRunBtn').addEventListener('click',()=>void runSecurityChecks());
 document.querySelector('#aiUndoBtn').addEventListener('click',async()=>{
   if(!lastAiUndo)return;const undo=lastAiUndo;const button=document.querySelector('#aiUndoBtn');button.disabled=true;let sourceUndo={restoredFiles:[],restartRequired:false};
   try{
@@ -642,13 +844,14 @@ document.querySelector('#aiUndoBtn').addEventListener('click',async()=>{
     if(live.editorReloadNeeded)scheduleEditorReload('已撤销 AI 修改，并自动刷新恢复编辑器。');else showToast('已恢复 AI 修改前的状态')
   }catch(error){showAiError(`撤销失败：${error.message}`)}finally{button.disabled=false}
 });
-function buildPublishPayload(){
+let buildingPreviewHtml=false;
+function buildPublishPayload(preview=false){
   ensureForumAccounts();
-  const previousPage=state.activePageId,previousAccountState=previewDB.accountLoggedIn;previewDB.accountLoggedIn=false;
+  const previousPage=state.activePageId,previousAccountState=previewDB.accountLoggedIn;previewDB.accountLoggedIn=false;buildingPreviewHtml=preview;
   const pages=state.pages.map(page=>{state.activePageId=page.id;return {id:page.id,name:page.name,path:pageFullPath(page),parentId:page.parentId,kind:page.kind,html:page.elements.map(element=>{const html=blockContent(element.type,element,false);const height=numberValue(element.layoutHeight);return height>0?`<div class="published-element" style="height:${Math.round(height)}px">${html}</div>`:html}).join('')+floatingObjectLayer(page,false)}});
-  state.activePageId=previousPage;previewDB.accountLoggedIn=previousAccountState;return {username:currentConsoleUser?.username||'',siteName:state.siteName,description:state.description,theme:state.theme,background:state.background,contentWidth:state.contentWidth,pages,forumPosts:[]};
+  state.activePageId=previousPage;previewDB.accountLoggedIn=previousAccountState;buildingPreviewHtml=false;return {username:currentConsoleUser?.username||'',siteName:state.siteName,description:state.description,theme:state.theme,background:state.background,contentWidth:state.contentWidth,pages,forumPosts:[]};
 }
-document.querySelector('#previewSiteBtn').addEventListener('click',async()=>{const button=document.querySelector('#previewSiteBtn');const popup=window.open('about:blank','_blank');button.disabled=true;button.firstChild.textContent='生成中 ';try{await persistDraftSnapshot(JSON.stringify(state));const payload=await consoleRequest('/api/preview',{method:'POST',body:buildPublishPayload()});currentConsoleUser.previewId=payload.previewId;updateConsoleAccount();notifyPublishedReload('预览内容已更新');if(popup)popup.location.replace(payload.url);else window.open(payload.url,'_blank');showToast('临时预览已更新')}catch(error){popup?.close();if(error.status===401)showAuthGate('登录已过期，请重新登录');showToast(`预览失败：${error.message}`)}finally{button.disabled=false;button.firstChild.textContent='预览 '}});
+document.querySelector('#previewSiteBtn').addEventListener('click',async()=>{const button=document.querySelector('#previewSiteBtn');const popup=window.open('about:blank','_blank');button.disabled=true;button.firstChild.textContent='生成中 ';try{await persistDraftSnapshot(JSON.stringify(state));const payload=await consoleRequest('/api/preview',{method:'POST',body:buildPublishPayload(true)});currentConsoleUser.previewId=payload.previewId;updateConsoleAccount();notifyPublishedReload('预览内容已更新');if(popup)popup.location.replace(payload.url);else window.open(payload.url,'_blank');showToast('临时预览已更新')}catch(error){popup?.close();if(error.status===401)showAuthGate('登录已过期，请重新登录');showToast(`预览失败：${error.message}`)}finally{button.disabled=false;button.firstChild.textContent='预览 '}});
 function siteAdminCredentialMarkup(admin){return `<div class="site-admin-credential"><small>本站独立管理员 · 仅显示这一次</small><b>${esc(admin.username)}</b><code>${esc(admin.password)}</code><button type="button" data-modal-action="copy" data-copy="用户名：${esc(admin.username)}\n密码：${esc(admin.password)}">复制管理员凭据</button><p>请登录发布网站后妥善保管。它不等于炼丹社Hatchery控制台账号，也不能登录其他网站。</p></div>`}
 function openPublishModal(){
   if(!currentConsoleUser){showAuthGate('请先登录');return}
@@ -674,7 +877,7 @@ document.querySelector('#inviteManagerBtn').addEventListener('click',()=>void op
 document.querySelector('#consoleLogoutBtn').addEventListener('click',()=>void logoutConsole());
 document.querySelector('#previewModal').addEventListener('submit',event=>{const form=event.target.closest('[data-console-form]');if(!form)return;event.preventDefault();const data=new FormData(form);const button=form.querySelector('button');button.disabled=true;void(async()=>{try{if(form.dataset.consoleForm==='password'){const next=String(data.get('newPassword')||'');if(next!==String(data.get('confirmPassword')||''))throw new Error('两次输入的新密码不一致');await consoleRequest('/api/auth/change-password',{method:'POST',body:{oldPassword:String(data.get('oldPassword')||''),newPassword:next}});closeModal();showToast('密码已修改，其他设备的会话已退出')}else if(form.dataset.consoleForm==='publish'){await submitPublish(String(data.get('slug')||'').trim().toLowerCase())}}catch(error){showToast(error.message)}finally{button.disabled=false}})()});
 document.querySelector('#previewModal').addEventListener('click',event=>{const aiChats=event.target.closest('[data-ai-chats]');if(aiChats){void openAiChats(aiChats.dataset.aiChats||'',aiChats.dataset.userName||'');return}if(event.target.closest('[data-ai-chats-back]')){void openInviteManager();return}const otherSessions=event.target.closest('[data-revoke-other-sessions]');if(otherSessions){otherSessions.disabled=true;void consoleRequest('/api/auth/sessions/revoke-others',{method:'POST',body:{}}).then(payload=>{showToast(`已退出其他设备（${payload.removed} 个会话）`);return openPasswordSettings()}).catch(error=>{otherSessions.disabled=false;showToast(error.message)});return}const userStatus=event.target.closest('[data-user-status]');if(userStatus){const verb=userStatus.dataset.userStatus==='disabled'?'停用':'启用';if(!window.confirm(`确认${verb}用户 ${userStatus.dataset.userName}？`))return;userStatus.disabled=true;void consoleRequest('/api/admin/users/status',{method:'POST',body:{username:userStatus.dataset.userName,status:userStatus.dataset.userStatus}}).then(()=>{showToast(`已${verb}用户`);return openInviteManager()}).catch(error=>{userStatus.disabled=false;showToast(error.message)});return}const reset=event.target.closest('[data-site-account-reset]');if(reset){if(!window.confirm('重置后，原站长密码会立即失效。确认继续？'))return;reset.disabled=true;void consoleRequest('/api/site-account/reset-owner',{method:'POST',body:{}}).then(payload=>{openModal('管理员密码已重置',siteAdminCredentialMarkup(payload.siteAdmin));showToast('本站管理员密码已重置')}).catch(error=>{reset.disabled=false;showToast(error.message)});return}const modalCopy=event.target.closest('[data-modal-action="copy"]');if(modalCopy){void navigator.clipboard?.writeText(modalCopy.dataset.copy||'');showToast('已复制本站管理员凭据');return}});
-document.querySelectorAll('[data-context-action]').forEach(button=>button.addEventListener('click',()=>{const id=contextElementId;if(!id)return;const action=button.dataset.contextAction;hideElementContext();if(action==='edit')openElementEditor(id);if(action==='move')moveElementUp(id);if(action==='delete')deleteElement(id)}));document.addEventListener('click',event=>{if(!event.target.closest('#elementContextMenu'))hideElementContext()});document.addEventListener('scroll',hideElementContext,true);window.addEventListener('resize',hideElementContext);
+document.querySelectorAll('[data-context-action]').forEach(button=>button.addEventListener('click',()=>{const id=contextElementId;if(!id)return;const action=button.dataset.contextAction;hideElementContext();if(action==='edit')openElementEditor(id)}));document.addEventListener('click',event=>{if(!event.target.closest('#elementContextMenu'))hideElementContext()});document.addEventListener('scroll',hideElementContext,true);window.addEventListener('resize',hideElementContext);
 document.addEventListener('click',()=>{const menu=document.querySelector('#consoleAccountMenu');menu.hidden=true;document.querySelector('#consoleAccountBtn').setAttribute('aria-expanded','false')});
 
 bindWordToolbar();renderPages();syncFields();renderCanvas();

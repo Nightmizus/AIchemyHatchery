@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -7,20 +7,8 @@ import { tmpdir } from 'node:os'
 export const name = 'miaoda-site-tools'
 export const inject = ['tools']
 
-const root = resolve(process.cwd())
+const workspace = resolve(process.env.MIAODA_AI_WORKSPACE || '.miaoda-ai-workspace-missing')
 const previewPort = Number.parseInt(process.env.MIAODA_PREVIEW_PORT || '4173', 10)
-const readable = parseFileList(process.env.MIAODA_AI_READABLE_FILES)
-const editable = parseFileList(process.env.MIAODA_AI_EDITABLE_FILES)
-
-function parseFileList(raw) {
-  try {
-    const values = JSON.parse(raw || '[]')
-    if (!Array.isArray(values)) return new Set()
-    return new Set(values.filter(value => typeof value === 'string' && basename(value) === value))
-  } catch {
-    return new Set()
-  }
-}
 
 function objectArgs(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -29,15 +17,38 @@ function objectArgs(value) {
   return value
 }
 
-function sourcePath(value, allowed) {
-  if (typeof value !== 'string' || !allowed.has(value) || basename(value) !== value) {
-    throw new Error('path is outside the website source allowlist')
+// The agent may only touch files inside the current website's own folder.
+// Everything else on the host is out of reach by construction.
+function sitePath(value) {
+  if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\')) {
+    throw new Error('path must be a relative POSIX path inside the website folder')
   }
-  const target = resolve(root, value)
-  if (target !== root && !target.startsWith(`${root}${sep}`)) {
-    throw new Error('path is outside the website workspace')
+  if (value.startsWith('/') || /^[A-Za-z]:/.test(value)) {
+    throw new Error('absolute paths are outside the website folder')
+  }
+  const target = resolve(workspace, value)
+  if (target !== workspace && !target.startsWith(`${workspace}${sep}`)) {
+    throw new Error('path is outside the website folder')
   }
   return target
+}
+
+async function listSiteFiles(directory = workspace, prefix = '', limit = { count: 200 }) {
+  if (limit.count <= 0) return []
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => [])
+  const files = []
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      files.push(...await listSiteFiles(join(directory, entry.name), relative, limit))
+    } else if (entry.isFile()) {
+      files.push(relative)
+      limit.count -= 1
+    }
+    if (limit.count <= 0) break
+  }
+  return files
 }
 
 function localUrl(value) {
@@ -132,17 +143,18 @@ function register(ctx, definition) {
 export function apply(ctx) {
   register(ctx, {
     name: 'list_files',
-    description: 'List the website source files that this agent is allowed to inspect.',
+    description: 'List the files inside the current website folder that this agent is allowed to inspect and edit.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: stringOutput(),
     async execute() {
-      return [...readable].sort().join('\n')
+      const files = await listSiteFiles()
+      return files.length ? files.join('\n') : '(empty website folder)'
     },
   })
 
   register(ctx, {
     name: 'read_file',
-    description: 'Read a line range from one allowlisted website source file.',
+    description: 'Read a line range from one file inside the current website folder.',
     parameters: {
       type: 'object',
       properties: {
@@ -156,7 +168,7 @@ export function apply(ctx) {
     output: stringOutput(),
     async execute(value) {
       const args = objectArgs(value)
-      const path = sourcePath(args.path, readable)
+      const path = sitePath(args.path)
       const text = await readFile(path, 'utf8')
       const lines = text.split(/\r?\n/u)
       const start = Number.isInteger(args.startLine) ? Math.max(1, args.startLine) : 1
@@ -167,7 +179,7 @@ export function apply(ctx) {
 
   register(ctx, {
     name: 'search_files',
-    description: 'Search allowlisted website source files for a literal text fragment.',
+    description: 'Search files inside the current website folder for a literal text fragment.',
     parameters: {
       type: 'object',
       properties: { query: { type: 'string' }, path: { type: 'string' } },
@@ -178,10 +190,10 @@ export function apply(ctx) {
     async execute(value) {
       const args = objectArgs(value)
       if (typeof args.query !== 'string' || !args.query || args.query.length > 500) throw new Error('query must be 1-500 characters')
-      const names = args.path === undefined ? [...readable] : [basename(sourcePath(args.path, readable))]
+      const names = args.path === undefined ? await listSiteFiles() : [args.path]
       const matches = []
       for (const file of names) {
-        const lines = (await readFile(sourcePath(file, readable), 'utf8')).split(/\r?\n/u)
+        const lines = (await readFile(sitePath(file), 'utf8')).split(/\r?\n/u)
         lines.forEach((line, index) => {
           if (line.includes(args.query) && matches.length < 200) matches.push(`${file}:${index + 1}: ${line.slice(0, 500)}`)
         })
@@ -192,7 +204,7 @@ export function apply(ctx) {
 
   register(ctx, {
     name: 'replace_file',
-    description: 'Apply one exact, unique text replacement to an allowlisted editable website source file.',
+    description: 'Apply one exact, unique text replacement to one file inside the current website folder.',
     parameters: {
       type: 'object',
       properties: {
@@ -209,7 +221,7 @@ export function apply(ctx) {
       const args = objectArgs(value)
       if (typeof args.search !== 'string' || !args.search || args.search.length > 60000) throw new Error('search must be 1-60000 characters')
       if (typeof args.replace !== 'string' || args.replace.length > 60000) throw new Error('replace must be at most 60000 characters')
-      const path = sourcePath(args.path, editable)
+      const path = sitePath(args.path)
       const before = await readFile(path, 'utf8')
       const occurrences = before.split(args.search).length - 1
       if (occurrences !== 1) throw new Error(`search text must occur exactly once; found ${occurrences}`)

@@ -21,6 +21,12 @@ body {
 }
 .app-shell { height:100vh;padding:12px;gap:12px;position:relative;z-index:1 }
 
+/* ChatGPT-style home: before the site has any content, the conversation
+   takes the whole window and the preview stays hidden. */
+.app-shell.preview-hidden { grid-template-columns:1fr }
+.app-shell.preview-hidden .workspace { display:none }
+.app-shell.preview-hidden .sidebar { width:min(760px,100%);margin:0 auto }
+
 /* Sidebar: fixed glass chrome floating over a full-height scroll area. */
 .sidebar {
   height:calc(100vh - 24px);
@@ -43,6 +49,9 @@ body {
 }
 .brand span { background:#e6edf3;color:#0d1117;box-shadow:none;border-radius:6px }
 .brand b { color:#e6edf3 }
+.sidebar-header .console-account-wrap { position:absolute;right:6px;top:50%;transform:translateY(-50%) }
+.sidebar-header .console-account { width:34px;height:34px;padding:0;display:grid;place-items:center;border:1px solid var(--mica-stroke);border-radius:50%;background:var(--mica-card);cursor:pointer }
+.sidebar-header .console-avatar { width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#e6edf3;color:#0d1117;font:700 12px/1 sans-serif }
 
 /* Four page tabs: floating frosted capsule in the upper-left. */
 .sidebar-tabs {
@@ -86,8 +95,8 @@ body {
 .sidebar-tabs button.active::after { display:none }
 
 /* Tool panels: full-height scroll area sliding under the glass chrome.
-   Content fades out beneath the capsule (top) and the buttons (bottom)
-   via a gradient mask, so the frosted glass hides the clip line. */
+   Content fades out beneath the capsule (top) via a gradient mask; the
+   bottom fade stays under 12px so the floating composer keeps full opacity. */
 .sidebar-body {
   position:absolute;
   top:62px;
@@ -97,8 +106,8 @@ body {
   z-index:1;
   overflow-y:auto;
   scrollbar-color:#30363d transparent;
-  mask-image:linear-gradient(to bottom,transparent 0,#000 34px,#000 calc(100% - 32px),transparent 100%);
-  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 34px,#000 calc(100% - 32px),transparent 100%);
+  mask-image:linear-gradient(to bottom,transparent 0,#000 34px,#000 calc(100% - 10px),transparent 100%);
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 34px,#000 calc(100% - 10px),transparent 100%);
 }
 .tool-panel { padding-top:64px;padding-bottom:120px }
 .tool-panel { color:#e6edf3 }
@@ -114,6 +123,7 @@ body {
 .field input:focus,.field textarea:focus,.path-input:focus-within { border-color:var(--mica-hover-line);box-shadow:var(--mica-focus) }
 .path-input i,.meta-preview p { color:#7d8590 }
 .theme-option:hover,.element-card:hover { border-color:var(--mica-hover-line);background:rgba(240,246,252,.06) }
+.ai-busy .element-card { pointer-events:none;opacity:.42 }
 .theme-option.active { border-color:rgba(240,246,252,.5);box-shadow:inset 0 0 0 1px rgba(240,246,252,.25) }
 .theme-option.active>em { color:#e6edf3 }
 .element-visual { border-color:var(--soft-line);background:rgba(1,4,9,.5) }
@@ -299,6 +309,11 @@ body {
   -webkit-backdrop-filter:blur(24px);
 }
 .toolbar-brand,.toolbar-group { border-color:var(--soft-line) }
+.toolbar-sitename { flex:0 0 auto }
+.toolbar-sitename input { width:170px;padding:5px 10px;border:1px solid var(--mica-stroke);border-radius:6px;background:rgba(1,4,9,.32);color:#e6edf3;font-size:13px;outline:0 }
+.toolbar-sitename input:focus { border-color:var(--mica-hover-line);box-shadow:var(--mica-focus) }
+.toolbar-sitename input::placeholder { color:#6e7681 }
+.toolbar-font select { min-width:104px }
 .toolbar-brand>span { background:#e6edf3;color:#0d1117 }
 .toolbar-brand small,.toolbar-group::after,.toolbar-status small { color:#6e7681 }
 .toolbar-group button { color:#b1bac4 }
@@ -310,7 +325,7 @@ body {
 
 /* Dark Mica AI panel. The conversation scrolls under the floating composer;
    both long edges fade out via a gradient mask, like the main panel scroll. */
-.ai-chat-panel { margin-top:58px;height:calc(100% - 116px);padding:0 }
+.ai-chat-panel { margin-top:0;height:100%;padding:0 }
 .ai-chat-panel { background:rgba(22,27,34,.6);color:#e6edf3 }
 .ai-conversation {
   position:absolute;
@@ -370,6 +385,26 @@ body {
   cursor:pointer;
 }
 .ai-attach-button:hover { border-color:var(--mica-hover-line);color:#e6edf3 }
+.ai-template-button {
+  height:31px;
+  padding:0 12px;
+  flex:0 0 auto;
+  display:grid;
+  place-items:center;
+  border:0;
+  border-radius:9px;
+  background:linear-gradient(135deg,#6d28d9 0%,#9333ea 55%,#c026d3 100%);
+  color:#fff;
+  font-size:11px;
+  font-weight:700;
+  letter-spacing:.05em;
+  white-space:nowrap;
+  cursor:pointer;
+  box-shadow:0 3px 12px rgba(147,51,234,.42),inset 0 1px 0 rgba(255,255,255,.22);
+  transition:filter .15s,box-shadow .15s,transform .15s;
+}
+.ai-template-button:hover { filter:brightness(1.14);box-shadow:0 5px 18px rgba(147,51,234,.6),inset 0 1px 0 rgba(255,255,255,.28);transform:translateY(-1px) }
+.ai-template-button:active { transform:translateY(0);filter:brightness(.96) }
 .ai-composer textarea {
   flex:1;
   min-width:0;
@@ -502,3 +537,32 @@ body {
 .ai-attachment-chip { font-size:10px }
 .ai-message-files span { font-size:10px }
 .ai-chat-panel .ai-undo { font-size:11px }
+/* VSCode-style activity bar on the far left. */
+.activity-bar { position:fixed;z-index:40;left:0;top:0;bottom:0;width:48px;padding:10px 0;display:flex;flex-direction:column;align-items:center;gap:6px;background:#0d1117;border-right:1px solid rgba(240,246,252,.09) }
+.activity-item { position:relative;width:46px;height:46px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:#6e7681;font-size:19px;cursor:pointer;transition:color .15s,background .15s }
+.activity-item:hover { color:#e6edf3;background:rgba(240,246,252,.06) }
+.activity-item.active { color:#f0f6fc }
+.activity-item.active::before { content:"";position:absolute;left:0;top:9px;bottom:9px;width:2px;border-radius:2px;background:#58a6ff }
+.app-shell { margin-left:48px }
+@media(max-width:680px){ .activity-bar { display:none } .app-shell { margin-left:0 } }
+/* Vulnerability test panel. */
+.security-panel { height:100%;min-height:540px;padding:0;position:relative;background:#0d1117;color:#e6edf3;overflow:hidden }
+.security-panel[hidden] { display:none }
+.security-wrap { height:100%;padding:20px 16px;overflow-y:auto;scrollbar-color:#30363d transparent }
+.security-head small { color:#484f58;font:600 10px Consolas,monospace;letter-spacing:.12em }
+.security-head b { display:block;margin-top:3px;font-size:15px }
+.security-head p { margin:10px 0 16px;color:#7d8590;font-size:12px;line-height:1.7 }
+.security-head button { width:100%;padding:10px;border:0;border-radius:9px;background:#e6edf3;color:#0d1117;font-size:12px;font-weight:700;cursor:pointer }
+.security-head button:hover { background:#fff }
+.security-head button:disabled { opacity:.45;cursor:wait }
+.security-summary { margin:0 0 12px;padding:10px 12px;border:1px solid rgba(240,246,252,.09);border-radius:9px;background:rgba(240,246,252,.03);font-size:12px;color:#b1bac4 }
+.security-summary b { color:#e6edf3 }
+.security-results { display:grid;gap:7px }
+.security-check { padding:10px 12px;display:flex;gap:10px;align-items:flex-start;border:1px solid rgba(240,246,252,.07);border-radius:9px;background:rgba(240,246,252,.02);animation:aiMsgIn .3s cubic-bezier(.22,.9,.3,1) both }
+.security-check>i { width:19px;height:19px;flex:0 0 auto;display:grid;place-items:center;border-radius:50%;font-size:11px;font-style:normal;font-weight:800 }
+.security-check.pass>i { background:rgba(63,185,80,.16);color:#3fb950 }
+.security-check.warn>i { background:rgba(210,153,34,.16);color:#d29922 }
+.security-check.fail>i { background:rgba(248,81,73,.16);color:#f85149 }
+.security-check div { min-width:0 }
+.security-check b { display:block;font-size:12px;color:#d8dee4;font-weight:600 }
+.security-check small { display:block;margin-top:3px;color:#7d8590;font-size:11px;line-height:1.55;word-break:break-all }

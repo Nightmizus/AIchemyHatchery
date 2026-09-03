@@ -192,7 +192,10 @@
   function showGate(message = '') {
     authState.user = null;
     const gate = document.querySelector('#authGate');
-    if (gate) gate.hidden = false;
+    if (gate) {
+      gate.dataset.state = 'form';
+      gate.hidden = false;
+    }
     if (message) authError(message);
     window.dispatchEvent(new CustomEvent('alchemyhatchery:logged-out', { detail: { reason: message } }));
   }

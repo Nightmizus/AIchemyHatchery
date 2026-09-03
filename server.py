@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import psycopg2
 import psycopg2.extras
+from psycopg2 import pool as pg_pool
 import urllib.request
 import urllib.error
 import urllib.parse as urlparse_mod
@@ -49,19 +50,47 @@ if not NEON_DATABASE_URL:
                 NEON_DATABASE_URL = line.split("=", 1)[1].strip().strip('"')
                 break
 
+_DB_POOL: pg_pool.ThreadedConnectionPool | None = None
+_DB_POOL_LOCK = threading.Lock()
+
+
+def db_pool() -> pg_pool.ThreadedConnectionPool:
+    """惰性创建连接池，让 Neon 的建连（TLS 握手/冷启动）成本只付一次，
+    而不是像从前那样每个请求都重新 psycopg2.connect（页面加载因此卡约 20 秒）。"""
+    global _DB_POOL
+    if _DB_POOL is None:
+        with _DB_POOL_LOCK:
+            if _DB_POOL is None:
+                _DB_POOL = pg_pool.ThreadedConnectionPool(1, 8, NEON_DATABASE_URL)
+    return _DB_POOL
+
+
 @contextmanager
 def neon_db():
-    """Yield a Neon PostgreSQL connection with RealDictCursor."""
-    conn = psycopg2.connect(NEON_DATABASE_URL)
-    conn.autocommit = False
+    """Yield a pooled Neon PostgreSQL connection with RealDictCursor.
+    取出时先 SELECT 1 探活，空闲被 Neon 断开的旧连接丢弃换新。"""
+    conn = db_pool().getconn()
     try:
+        try:
+            with conn.cursor() as probe:
+                probe.execute("SELECT 1")
+        except psycopg2.Error:
+            db_pool().putconn(conn, close=True)
+            conn = db_pool().getconn()
+        # Neon 连接池可能归还残留事务的会话；先回滚再设 autocommit，
+        # 否则 set_session 会抛 "cannot be used inside a transaction"。
+        conn.rollback()
+        conn.autocommit = False
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except psycopg2.Error:
+            pass
         raise
     finally:
-        conn.close()
+        db_pool().putconn(conn)
 RUNTIME_LOCK = threading.Lock()
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_ATTEMPTS_LOCK = threading.Lock()
@@ -151,6 +180,12 @@ def read_text_exact(path: Path) -> str:
 def write_text_exact(path: Path, content: str) -> None:
     with path.open("w", encoding="utf-8", newline="") as target:
         target.write(content)
+
+
+def ai_site_workspace(user_id) -> Path:
+    """The one folder the AI may touch: the current website's own directory."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(user_id))[:64] or "unknown"
+    return ROOT / "sites" / safe
 
 
 def load_env() -> None:
@@ -1179,99 +1214,116 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(exc)}, 502)
         except Exception as exc:
             self.send_json({"error": f"本地服务错误：{exc}"}, 500)
-    def validate_harness_change(self, name: str, before: str, after: str) -> None:
-        if name not in AI_EDITABLE_SOURCE_FILES:
-            raise ValueError("AI 尝试修改未授权文件")
-        forbidden_growth = {
-            r"sqlite[3]\s*\.\s*connect\s*\(": "禁止新增数据库连接",
-            r"indexedDB\s*\.\s*open\s*\(": "禁止新增浏览器数据库",
-            r"CREATE\s+TABLE[^;]{0,300}(?:user|account|member|session|auth)": "禁止新增独立账号数据表",
-            r"[\"'][^\"']+\.db(?:-[^\"']+)?[\"']": "禁止新增数据库文件",
-            r"subprocess\s*\.\s*(?:run|Popen|call|check_output)\s*\(": "禁止新增命令执行能力",
-            r"os\s*\.\s*system\s*\(": "禁止新增系统命令能力",
-            r"\b(?:eval|exec)\s*\(": "禁止新增动态代码执行能力",
-            r"localStorage[^\n;]{0,160}(?:user|account|session|auth|password)": "禁止新增独立浏览器账号存储",
-        }
-        for pattern, message in forbidden_growth.items():
-            if len(re.findall(pattern, after, flags=re.I | re.S)) > len(re.findall(pattern, before, flags=re.I | re.S)):
-                raise ValueError(message)
-    # DeepSeek Harness is the only automatic execution engine.
-    def run_ai_harness(self, prompt: str, context: dict, include_site: bool, include_source: bool, attachments: list[dict], progress=None) -> dict:
+    # DeepSeek Harness is the only automatic execution engine. Its file access is
+    # confined to the current website's own folder (sites/<user_id>/); the AI may
+    # not read or modify anything else on the host.
+    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, include_source: bool, attachments: list[dict], chosen_presets: list[str], progress=None) -> dict:
         run_id = f"run-{secrets.token_hex(10)}"
-        editable_files = AI_EDITABLE_SOURCE_FILES if include_source else ()
-        originals = {name: read_text_exact(ROOT / name) for name in editable_files}
-        backup_dir = ROOT / ".ai-backups" / run_id
+        site_state = context.get("site") if isinstance(context, dict) else None
+        if not isinstance(site_state, dict) or not isinstance(site_state.get("pages"), list):
+            raise ValueError("缺少当前网站数据，无法启动 AI 任务")
+        if chosen_presets:
+            prompt = prompt + "\n\n用户已确认选用这些预设模块：" + "、".join(chosen_presets) + "。请直接开始制作网站，把它们融入设计，不要再询问。"
+        workspace = ai_site_workspace(user["id"])
+        workspace.mkdir(parents=True, exist_ok=True)
+        site_json_path = workspace / "site.json"
+        original_site_json = json.dumps(site_state, ensure_ascii=False, indent=2)
+        write_text_exact(site_json_path, original_site_json)
 
-        def restore_sources() -> None:
-            for name, content in originals.items():
-                if read_text_exact(ROOT / name) != content:
-                    write_text_exact(ROOT / name, content)
-            shutil.rmtree(backup_dir, ignore_errors=True)
+        result = run_deepseek_harness(
+            root=ROOT,
+            prompt=prompt,
+            context=context,
+            attachments=attachments,
+            workspace=workspace,
+            preview_port=PORT,
+            progress=progress,
+        )
 
-        try:
-            result = run_deepseek_harness(
-                root=ROOT,
-                prompt=prompt,
-                context=context,
-                attachments=attachments,
-                readable_files=AI_SOURCE_FILES,
-                editable_files=editable_files,
-                preview_port=PORT,
-                progress=progress,
-            )
-            changed_files = [name for name, before in originals.items() if read_text_exact(ROOT / name) != before]
-            for name in changed_files:
-                self.validate_harness_change(name, originals[name], read_text_exact(ROOT / name))
-            if changed_files:
-                self.validate_changed_sources({name: read_text_exact(ROOT / name) for name in changed_files})
+        site_replace = None
+        changed_files: list[str] = []
+        if not site_json_path.is_file():
+            raise ValueError("AI 删除了网站数据文件 site.json，本次任务已中止")
+        after_text = read_text_exact(site_json_path)
+        if after_text != original_site_json:
+            if len(after_text.encode("utf-8")) > 4_000_000:
+                raise ValueError("AI 修改后的网站数据超过大小限制，本次任务已中止")
+            try:
+                site_replace = json.loads(after_text)
+            except json.JSONDecodeError as exc:
+                write_text_exact(site_json_path, original_site_json)
+                raise ValueError(f"AI 把 site.json 改成了无法解析的 JSON，已还原：{exc}") from exc
+            self.validate_site_replace(site_replace)
+            if site_replace == site_state:
+                site_replace = None
+            else:
+                changed_files = ["site.json"]
 
-            proposal = self.validate_ai_proposal(
-                {
-                    "summary": result.get("summary", "网站修改已完成"),
-                    "risk": result.get("risk", "medium"),
-                    "assumptions": [],
-                    "siteOperations": result.get("siteOperations", []),
-                    "sourceChanges": [],
-                    "checks": result.get("checks", []),
-                },
-                False,
-            )
-            proposal = self.constrain_instance_intent(proposal, prompt, context)
-            if not include_site:
-                proposal["siteOperations"] = []
+        proposal = self.validate_ai_proposal(
+            {
+                "summary": result.get("summary", "网站修改已完成"),
+                "risk": result.get("risk", "medium"),
+                "assumptions": [],
+                "siteOperations": result.get("siteOperations", []),
+                "sourceChanges": [],
+                "checks": result.get("checks", []),
+            },
+            False,
+            context,
+        )
+        proposal = self.constrain_instance_intent(proposal, prompt, context)
+        if site_replace is not None and proposal["siteOperations"]:
+            # site.json 已包含全部改动。模型常把同样的改动又在 siteOperations 里重复描述，
+            # 再应用一次会重复元素，或指向替换后已不存在的页面/ID（整批回滚的直接原因）。
+            dropped = len(proposal["siteOperations"])
+            proposal["siteOperations"] = []
+            proposal["checks"].append(f"网站数据已整体更新，忽略了模型重复返回的 {dropped} 条站点操作")
+        if not include_site:
+            proposal["siteOperations"] = []
+            site_replace = None
+            changed_files = []
 
-            # A narrowly scoped block request is data-only. If the model edited
-            # global source despite that boundary, discard those source edits.
-            if proposal.get("summary", "").startswith("仅修改当前") and changed_files:
-                restore_sources()
-                changed_files = []
+        # When the site is empty and the needed modules are unclear, the model
+        # asks first instead of building: pass its question and preset picks to
+        # the user, and make sure nothing was applied.
+        ask_presets: list[dict] = []
+        raw_ask = result.get("askPresets")
+        if isinstance(raw_ask, list):
+            for item in raw_ask[:16]:
+                if isinstance(item, dict) and isinstance(item.get("type"), str) and re.fullmatch(r"[a-z0-9]{2,24}", item["type"]):
+                    ask_presets.append({"type": item["type"], "reason": str(item.get("reason", ""))[:200]})
+        ai_question = str(result.get("question", ""))[:500] if ask_presets else ""
+        if ask_presets:
+            proposal["siteOperations"] = []
+            site_replace = None
+            changed_files = []
 
-            if changed_files:
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                for name in changed_files:
-                    write_text_exact(backup_dir / name, originals[name])
-            with AI_LOCK:
-                AI_BACKUPS[run_id] = {name: originals[name] for name in changed_files}
+        return {
+            "runId": run_id,
+            "summary": proposal["summary"],
+            "risk": proposal["risk"],
+            "siteOperations": proposal["siteOperations"],
+            "siteReplace": site_replace,
+            "askPresets": ask_presets,
+            "question": ai_question,
+            "checks": proposal["checks"],
+            "trace": result.get("trace", []),
+            "changedFiles": changed_files,
+            "restartRequired": False,
+            "undoAvailable": False,
+            "engine": "deepseek-harness",
+            "finishReason": result.get("finishReason"),
+            "usage": result.get("usage"),
+        }
 
-            return {
-                "runId": run_id,
-                "summary": proposal["summary"],
-                "risk": proposal["risk"],
-                "siteOperations": proposal["siteOperations"],
-                "checks": proposal["checks"],
-                "trace": result.get("trace", []),
-                "changedFiles": changed_files,
-                "restartRequired": False,
-                "undoAvailable": bool(changed_files),
-                "engine": "deepseek-harness",
-                "finishReason": result.get("finishReason"),
-                "usage": result.get("usage"),
-            }
-        except Exception:
-            restore_sources()
-            raise
+    def validate_site_replace(self, data) -> None:
+        if not isinstance(data, dict) or not isinstance(data.get("pages"), list) or not data["pages"]:
+            raise ValueError("AI 修改后的网站数据结构无效，本次任务已中止")
+        for page in data["pages"]:
+            if not isinstance(page, dict) or not isinstance(page.get("elements", []), list):
+                raise ValueError("AI 修改后的页面数据结构无效，本次任务已中止")
 
-    def validate_ai_proposal(self, proposal: dict, include_source: bool) -> dict:
+    def validate_ai_proposal(self, proposal: dict, include_source: bool, context: dict | None = None) -> dict:
         if not isinstance(proposal, dict):
             raise ValueError("DeepSeek Harness 返回的方案不是对象")
         proposal["summary"] = str(proposal.get("summary", "AI 已生成修改方案"))[:500]
@@ -1284,9 +1336,20 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if not isinstance(changes, list) or len(changes) > 12:
             raise ValueError("源码修改格式错误或数量过多")
         allowed_ops = {"set_site", "set_page", "add_page", "remove_page", "add_element", "update_element", "remove_element", "move_element", "set_items"}
+        valid_element_types = None
+        if isinstance(context, dict) and isinstance(context.get("elementTypes"), list):
+            valid_element_types = {str(item) for item in context["elementTypes"]}
+        kept_operations = []
+        dropped_types: list[str] = []
         for operation in operations:
             if not isinstance(operation, dict) or operation.get("op") not in allowed_ops:
                 raise ValueError("DeepSeek Harness 返回了不支持的站点操作")
+            # 模型偶尔编造编辑器不存在的模块类型；整条失败会回滚全部改动，改为丢弃这一条并记录
+            if valid_element_types is not None and operation.get("op") == "add_element" and str(operation.get("type", "")) not in valid_element_types:
+                dropped_types.append(str(operation.get("type", ""))[:24])
+                continue
+            kept_operations.append(operation)
+        operations = kept_operations
         normalized_changes = []
         for change in changes if include_source else []:
             if not isinstance(change, dict) or change.get("path") not in AI_EDITABLE_SOURCE_FILES:
@@ -1300,6 +1363,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         proposal["sourceChanges"] = normalized_changes
         proposal["assumptions"] = [str(item)[:300] for item in proposal.get("assumptions", []) if str(item).strip()][:10]
         proposal["checks"] = [str(item)[:300] for item in proposal.get("checks", []) if str(item).strip()][:10]
+        if dropped_types:
+            proposal["checks"].append(f"已忽略 {len(dropped_types)} 个编辑器不支持的模块类型：{'、'.join(dropped_types)}")
         return proposal
 
     def constrain_instance_intent(self, proposal: dict, prompt: str, context: dict) -> dict:
@@ -1360,13 +1425,21 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         proposal["checks"] = ["检查当前模块实例立即变化", "检查同类模块与后续新增模块保持默认样式"]
         return proposal
 
-    def prepare_ai_run(self) -> tuple[str, dict, bool, bool, list[dict]]:
+    def prepare_ai_run(self) -> tuple[str, dict, bool, bool, list[dict], list[str]]:
         payload = self.read_json()
         prompt = str(payload.get("prompt", "")).strip()
         context = payload.get("context", {})
         include_site = bool(payload.get("includeSite", True))
         include_source = bool(payload.get("includeSource", True))
         raw_attachments = payload.get("attachments", [])
+        raw_presets = payload.get("chosenPresets", [])
+        if not isinstance(raw_presets, list) or len(raw_presets) > 20:
+            raise ValueError("预设选择格式错误")
+        chosen_presets: list[str] = []
+        for item in raw_presets:
+            if not isinstance(item, str) or not re.fullmatch(r"[a-z0-9]{2,24}", item):
+                raise ValueError("预设选择格式错误")
+            chosen_presets.append(item)
         if not prompt:
             raise ValueError("调整描述不能为空")
         if not isinstance(context, dict):
@@ -1395,15 +1468,15 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             if total_attachment_size > 8 * 1024 * 1024:
                 raise ValueError("附件总大小不能超过 8 MB")
             attachments.append({"name": name, "kind": kind, "type": mime_type, "content": content})
-        return prompt, context, include_site, include_source, attachments
+        return prompt, context, include_site, include_source, attachments, chosen_presets
 
     def handle_ai_run(self, user: dict) -> None:
-        prompt, context, include_site, include_source, attachments = self.prepare_ai_run()
+        prompt, context, include_site, include_source, attachments, chosen_presets = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         provider_name, model = current_ai_provider_model()
         try:
-            result = self.run_ai_harness(prompt, context, include_site, include_source, attachments)
+            result = self.run_ai_harness(user, prompt, context, include_site, include_source, attachments, chosen_presets)
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
         except Exception:
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, None, "failed")
@@ -1413,7 +1486,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
-        prompt, context, include_site, include_source, attachments = self.prepare_ai_run()
+        prompt, context, include_site, include_source, attachments, chosen_presets = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
@@ -1440,7 +1513,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         def worker() -> None:
             provider_name, model = current_ai_provider_model()
             try:
-                result = self.run_ai_harness(prompt, context, include_site, include_source, attachments, progress=progress)
+                result = self.run_ai_harness(user, prompt, context, include_site, include_source, attachments, chosen_presets, progress=progress)
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
@@ -2187,6 +2260,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             users = [
                 {
                     "username": row["name"],
+                    "realName": row_value(row, "realName") or "",
                     "role": "admin" if (row_value(row, "isAdmin") or is_site_owner_campus_id(row.get("campusId"))) else "user",
                     "status": "disabled" if row_value(row, "bannedUntil") else "active",
                     "createdAt": json_time(row_value(row, "createdAt")),
@@ -2206,11 +2280,13 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 return
             day_cutoff = iso_time(utc_now() - timedelta(hours=24))
             week_cutoff = iso_time(utc_now() - timedelta(days=7))
+            real_name_col = user_column_name("realName")
+            real_name_fragment = f', u."{real_name_col}" AS "realName"' if real_name_col else ', NULL AS "realName"'
             with neon_db() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute(
-                        """
-                        SELECT u.id AS user_id, u.name AS username, u."campusId",
+                        f"""
+                        SELECT u.id AS user_id, u.name AS username, u."campusId"{real_name_fragment},
                                COUNT(g.id) AS runs,
                                COALESCE(SUM(g.total_tokens), 0) AS total_tokens,
                                COALESCE(SUM(CASE WHEN g.created_at >= %s THEN g.total_tokens ELSE 0 END), 0) AS day_tokens,
@@ -2229,6 +2305,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 {
                     "userId": row["user_id"],
                     "username": row["username"],
+                    "realName": row["realName"] or "",
                     "campusId": row["campusId"],
                     "runs": int(row["runs"]),
                     "dayTokens": int(row["day_tokens"]),
@@ -2317,7 +2394,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/ai/status":
             status = harness_status(ROOT)
-            status.update({"readableFiles": list(AI_SOURCE_FILES), "editableFiles": list(AI_EDITABLE_SOURCE_FILES)})
+            status.update({"filePolicy": "site-workspace-only"})
             self.send_json(status)
             return
         preview_match = re.match(r"^/preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
