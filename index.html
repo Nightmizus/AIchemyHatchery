@@ -6,17 +6,10 @@
   <meta name="description" content="炼丹社Hatchery——面向校园个人与社团的模块化 AI 建站控制台。">
   <title>炼丹社Hatchery｜页面编辑器</title>
   <link rel="stylesheet" href="/styles.css?v=20260831-5">
-  <link rel="stylesheet" href="/mica.css?v=20260902-1">
-  <link rel="stylesheet" href="/ai-chat.css?v=20260902-1">
+  <link rel="stylesheet" href="/mica.css?v=20260902-3">
+  <link rel="stylesheet" href="/ai-chat.css?v=20260902-3">
 </head>
 <body>
-  <svg width="0" height="0" style="position:absolute;pointer-events:none" aria-hidden="true">
-    <filter id="liquidGlass" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
-      <feTurbulence type="fractalNoise" baseFrequency="0.011 0.019" numOctaves="2" seed="8" result="noise"/>
-      <feGaussianBlur in="noise" stdDeviation="2.4" result="smooth"/>
-      <feDisplacementMap in="SourceGraphic" in2="smooth" scale="26" xChannelSelector="R" yChannelSelector="G"/>
-    </filter>
-  </svg>
   <section class="auth-gate" id="authGate" data-state="checking" aria-label="炼丹社Hatchery账号登录">
     <div class="auth-card">
       <header><span class="auth-mark">炼</span><div><b>炼丹社Hatchery控制台</b><small>AIchemyHatchery</small></div></header>
@@ -41,6 +34,7 @@
   <main class="app-shell preview-hidden">
     <nav class="activity-bar" aria-label="主功能区">
       <button class="activity-item active" data-activity="ai" title="AI 对话" aria-label="AI 对话"><span>✦</span></button>
+      <button class="activity-item" data-template-open title="浏览模板" aria-label="浏览模板"><span>▦</span></button>
       <button class="activity-item" data-activity="security" title="漏洞测试" aria-label="漏洞测试"><span>⛨</span></button>
     </nav>
     <aside class="sidebar">
@@ -64,7 +58,7 @@
         <section class="tool-panel ai-chat-panel active" data-panel-content="ai">
           <div class="ai-conversation" id="aiConversation">
             <div class="ai-chat-messages" id="aiChatMessages">
-              <article class="ai-message assistant"><div><p>告诉我你想做一个什么样的网站。不确定选什么模块也没关系，我会先给你建议，你挑完我再把网站搭出来。</p></div></article>
+              <article class="ai-message assistant"><div><p>告诉我你想做一个什么样的网站，我会自己规划好模块和版式，直接把网站搭出来。</p></div></article>
               <div class="ai-result" id="aiResult" hidden></div>
               <section class="ai-run-output" id="aiRunCard" hidden>
                 <details class="ai-run-process" id="aiRunProcess" open>
@@ -86,7 +80,6 @@
               <button class="ai-attach-button" id="aiAttachBtn" type="button" aria-label="添加图片或文件" title="添加图片或文件">＋</button>
               <input id="aiFileInput" type="file" multiple hidden accept="image/*,.txt,.md,.json,.csv,.html,.css,.js,.mjs,.ts,.tsx,.jsx,.py,.yml,.yaml,.xml,.svg">
               <textarea id="aiPrompt" rows="1" aria-label="发送给 AI 的修改要求" placeholder="告诉 AI 你想怎么改…"></textarea>
-              <button class="ai-template-button" id="aiTemplateBtn" type="button" aria-label="浏览现成模板" title="浏览现成模板">浏览模板</button>
               <button class="ai-run" id="aiAdjustBtn" aria-label="发送修改要求"><span>✦</span><b>发送</b><em>↑</em></button>
             </div>
             <div class="ai-composer-meta"><span>Enter 发送 · Shift + Enter 换行</span><span id="aiAttachmentMeta">可添加图片或文件</span></div>
@@ -115,6 +108,7 @@
           <div class="history-actions" aria-label="编辑历史"><button id="undoBtn" title="撤销（Ctrl+Z）" disabled>↶</button><button id="redoBtn" title="重做（Ctrl+Shift+Z）" disabled>↷</button></div>
           <div class="device-switch" role="group" aria-label="预览设备"><button class="active" data-preview-device="desktop" title="桌面预览">桌面</button><button data-preview-device="mobile" title="手机预览">手机</button></div>
           <button id="clearPageBtn" title="清空当前页面">清空</button>
+          <button id="previewCollapseBtn" title="向左收起预览" aria-label="向左收起预览">«</button>
         </div>
         <div class="deploy-actions">
           <button class="preview-site-button" id="previewSiteBtn">预览 <span>↗</span></button>
@@ -166,6 +160,7 @@
         </div>
       </div>
     </section>
+    <button class="preview-expand-fab" id="previewExpandFab" title="展开网站预览" aria-label="展开网站预览">» 预览</button>
   </main>
 
   <div class="toast" id="toast" hidden><span></span><button aria-label="关闭提示">×</button></div>
@@ -179,6 +174,6 @@
     <button data-context-action="edit">编辑</button>
   </div>
   <script src="/auth.js?v=20260831-1"></script>
-  <script src="/script.js?v=20260902-1"></script>
+  <script src="/script.js?v=20260903-1"></script>
 </body>
 </html>

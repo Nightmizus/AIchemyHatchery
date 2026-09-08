@@ -385,26 +385,6 @@ body {
   cursor:pointer;
 }
 .ai-attach-button:hover { border-color:var(--mica-hover-line);color:#e6edf3 }
-.ai-template-button {
-  height:31px;
-  padding:0 12px;
-  flex:0 0 auto;
-  display:grid;
-  place-items:center;
-  border:0;
-  border-radius:9px;
-  background:linear-gradient(135deg,#6d28d9 0%,#9333ea 55%,#c026d3 100%);
-  color:#fff;
-  font-size:11px;
-  font-weight:700;
-  letter-spacing:.05em;
-  white-space:nowrap;
-  cursor:pointer;
-  box-shadow:0 3px 12px rgba(147,51,234,.42),inset 0 1px 0 rgba(255,255,255,.22);
-  transition:filter .15s,box-shadow .15s,transform .15s;
-}
-.ai-template-button:hover { filter:brightness(1.14);box-shadow:0 5px 18px rgba(147,51,234,.6),inset 0 1px 0 rgba(255,255,255,.28);transform:translateY(-1px) }
-.ai-template-button:active { transform:translateY(0);filter:brightness(.96) }
 .ai-composer textarea {
   flex:1;
   min-width:0;
@@ -566,3 +546,9 @@ body {
 .security-check div { min-width:0 }
 .security-check b { display:block;font-size:12px;color:#d8dee4;font-weight:600 }
 .security-check small { display:block;margin-top:3px;color:#7d8590;font-size:11px;line-height:1.55;word-break:break-all }
+/* Preview collapse/expand controls. */
+.page-actions>#previewCollapseBtn { height:34px;padding:0 12px;border:1px solid var(--mica-stroke);border-radius:8px;background:var(--mica-card);color:#b1bac4;font-size:13px;cursor:pointer;box-shadow:var(--mica-shadow);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px) }
+.page-actions>#previewCollapseBtn:hover { border-color:var(--mica-hover-line);background:var(--mica-card-strong);color:#e6edf3 }
+.preview-expand-fab { position:fixed;z-index:45;top:14px;right:16px;display:none;height:36px;padding:0 15px;border:1px solid var(--mica-stroke);border-radius:99px;background:var(--mica-card);color:#e6edf3;font-size:12px;font-weight:600;cursor:pointer;box-shadow:var(--mica-shadow);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px) }
+.preview-expand-fab:hover { border-color:var(--mica-hover-line);background:var(--mica-card-strong) }
+.app-shell.preview-hidden .preview-expand-fab { display:block }

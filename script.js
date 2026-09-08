@@ -4,7 +4,7 @@ const elementCatalog = {
 
 const INITIAL_STATE = {
   siteName:'未命名网站', description:'在这里写下网站的一句话介绍。', theme:'minimal', background:'#ffffff', contentWidth:100,
-  pages:[{id:'page-1',name:'首页',path:'home',parentId:null,kind:'page',elements:[],objects:[]}], activePageId:'page-1'
+  pages:[{id:'page-1',name:'首页',path:'home',parentId:null,kind:'page',code:'',elements:[],objects:[]}], activePageId:'page-1'
 };
 const state = JSON.parse(JSON.stringify(INITIAL_STATE));
 let currentConsoleUser=null;
@@ -252,12 +252,22 @@ function scheduleDraftSave(){if(!currentConsoleUser)return;setSaveState('保存�
 function restoreHistory(index){if(index<0||index>=historyStack.length)return;const message=index<historyIndex?'已撤销':'已重做';historyIndex=index;const snapshot=JSON.parse(historyStack[index]);Object.keys(state).forEach(key=>delete state[key]);Object.assign(state,snapshot);editingElementId=null;editingItemId=null;renderPages();syncFields();renderCanvas();updateHistoryButtons();showToast(message)}
 function undoState(){captureHistoryNow();if(historyIndex>0)restoreHistory(historyIndex-1)}
 function redoState(){if(historyIndex<historyStack.length-1)restoreHistory(historyIndex+1)}
+function ensurePageCode(page){
+  // 整页代码模式：page.code 是唯一渲染来源。旧草稿只有模块元素时，一次性渲染成代码并清空元素
+  if(!page||typeof page.code==='string')return;
+  const previousPage=state.activePageId;state.activePageId=page.id;
+  try{page.code=(page.elements||[]).map(element=>blockContent(element.type,element,false)).join('')}catch{page.code=''}
+  page.elements=[];page.codeGeneratedFromElements=true;
+  state.activePageId=previousPage;
+}
+function ensureAllPagesCode(){const previousPage=state.activePageId;state.pages.forEach(page=>ensurePageCode(page));state.activePageId=previousPage}
 function renderCanvas(){
   if(isComposingText){deferredCanvasRender=true;return}captureTextSelectionBookmark();const page=activePage();if(!page)return;
   const canvas=document.querySelector('#siteCanvas');canvas.className=`site-canvas theme-${state.theme}`;canvas.dataset.previewDevice=previewDevice;canvas.style.setProperty('--page-bg',state.background||'#ffffff');canvas.style.setProperty('--canvas-width',previewDevice==='desktop'?`${state.contentWidth||100}%`:'390px');
-  const legacyImages=page.elements.filter(element=>element.type==='image');if(legacyImages.length){legacyImages.forEach((element,index)=>pageObjects(page).push({id:uid('obj'),kind:'image',settings:{image:element.settings?.image||'',alt:element.settings?.alt||'插入的图片'},objectStyles:{image:{width:element.objectStyles?.image?.width||360,height:element.objectStyles?.image?.height||230,objectFit:element.objectStyles?.image?.objectFit||'contain',x:element.objectStyles?.image?.x||60+index*24,y:element.objectStyles?.image?.y||70+index*24,rotation:element.objectStyles?.image?.rotation||0}}}));page.elements=page.elements.filter(element=>element.type!=='image')}
-  const content=document.querySelector('#canvasContent');const flow=page.elements.length?insertionZone(0)+page.elements.map((element,index)=>elementMarkup(element)+insertionZone(index+1)).join(''):pageObjects(page).length?'<div class="empty-canvas object-only-canvas" data-empty-drop aria-label="可继续拖入页面模块"></div>':`<div class="empty-canvas" data-empty-drop><div><i>＋</i><b>这是一个空白页面</b><small>在左侧告诉 AI 你想做什么，让它帮你搭建</small></div></div>`;content.innerHTML=flow+floatingObjectLayer(page,true);
-  refreshMobileFontScaling(canvas);bindCanvasEvents();initMcGames(content);enforceElementHeightLimits();ensureObjectEditorChrome();restoreSelectedObject();restoreTextSelectionBookmark();const selected=editingElementId?getElementById(editingElementId):null;const hasContent=page.elements.length||pageObjects(page).length;document.querySelector('#selectionState').textContent=selected?`已打开设置：${elementCatalog[selected.type]?.name||selected.type}`:selectedObjectRef?(selectedObjectRef.kind==='text'?'可直接输入文字':'拖动边框移动 · 拖动控制点缩放'):hasContent?'所有文字与图片均可直接编辑':'空白页面';document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));scheduleDraftSave();updatePreviewVisibility();
+  const legacyImages=(page.elements||[]).filter(element=>element.type==='image');if(legacyImages.length){legacyImages.forEach((element,index)=>pageObjects(page).push({id:uid('obj'),kind:'image',settings:{image:element.settings?.image||'',alt:element.settings?.alt||'插入的图片'},objectStyles:{image:{width:element.objectStyles?.image?.width||360,height:element.objectStyles?.image?.height||230,objectFit:element.objectStyles?.image?.objectFit||'contain',x:element.objectStyles?.image?.x||60+index*24,y:element.objectStyles?.image?.y||70+index*24,rotation:element.objectStyles?.image?.rotation||0}}}));page.elements=page.elements.filter(element=>element.type!=='image')}
+  ensurePageCode(page);
+  const content=document.querySelector('#canvasContent');const flow=page.code.trim()||pageObjects(page).length?page.code:`<div class="empty-canvas" data-empty-drop><div><i>＋</i><b>这是一个空白页面</b><small>在左侧告诉 AI 你想做什么，让它帮你搭建</small></div></div>`;content.innerHTML=flow+floatingObjectLayer(page,true);
+  refreshMobileFontScaling(canvas);bindCanvasEvents();initMcGames(content);enforceElementHeightLimits();ensureObjectEditorChrome();restoreSelectedObject();restoreTextSelectionBookmark();const selected=editingElementId?getElementById(editingElementId):null;const hasContent=page.code.trim().length||pageObjects(page).length;document.querySelector('#selectionState').textContent=selected?`已打开设置：${elementCatalog[selected.type]?.name||selected.type}`:selectedObjectRef?(selectedObjectRef.kind==='text'?'可直接输入文字':'拖动边框移动 · 拖动控制点缩放'):hasContent?'页面为整页代码，由 AI 直接修改':'空白页面';document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));scheduleDraftSave();updatePreviewVisibility();
 }
 
 function renderPages(){
@@ -267,7 +277,7 @@ function syncFields(){
   document.querySelector('#siteName').value=state.siteName;
 }
 function selectPage(id){if(!state.pages.some(page=>page.id===id))return;state.activePageId=id;editingElementId=null;editingItemId=null;renderPages();syncFields();renderCanvas();document.querySelector('#canvasScroll').scrollTop=0}
-function addPage(parentId=null){const n=state.pages.length+1;const page={id:uid('page'),name:parentId?`子页面 ${n}`:`页面 ${n}`,path:`page-${n}`,parentId:parentId||null,kind:'page',elements:[],objects:[]};state.pages.push(page);state.activePageId=page.id;editingElementId=null;renderPages();syncFields();renderCanvas();showToast(`已创建空白页面「${page.name}」`)}
+function addPage(parentId=null){const n=state.pages.length+1;const page={id:uid('page'),name:parentId?`子页面 ${n}`:`页面 ${n}`,path:`page-${n}`,parentId:parentId||null,kind:'page',code:'',elements:[],objects:[]};state.pages.push(page);state.activePageId=page.id;editingElementId=null;renderPages();syncFields();renderCanvas();showToast(`已创建空白页面「${page.name}」`)}
 function uniquePagePath(base,parentId){let path=base||'page',suffix=2;const used=value=>state.pages.some(page=>page.parentId===parentId&&page.path===value);while(used(path))path=`${base||'page'}-${suffix++}`;return path}
 function duplicatePage(id){
   const source=state.pages.find(page=>page.id===id);if(!source)return;const subtree=[];const collect=pageId=>{const page=state.pages.find(item=>item.id===pageId);if(!page)return;subtree.push(page);state.pages.filter(item=>item.parentId===pageId).forEach(child=>collect(child.id))};collect(id);
@@ -275,7 +285,7 @@ function duplicatePage(id){
   state.pages.push(...clones);state.activePageId=pageMap.get(id);editingElementId=null;editingItemId=null;renderPages();syncFields();renderCanvas();showToast(`已复制「${source.name}」及其子页面`)
 }
 function deletePage(id){if(id===state.pages[0].id){showToast('首页不能删除');return}removePageCascade(id);if(!state.pages.some(page=>page.id===state.activePageId))state.activePageId=state.pages[0].id;editingElementId=null;renderPages();syncFields();renderCanvas();showToast('页面及其子页面已删除')}
-function addElement(type,index=activePage().elements.length){if(aiRunActive){showToast('AI 正在修改网站，完成后再添加模块');return}const page=activePage();let accountAdded=false;if(type==='forum'&&!page.elements.some(item=>item.type==='account')){page.elements.splice(index,0,createElement('account',page));index+=1;accountAdded=true}const element=createElement(type,page);page.elements.splice(index,0,element);renderPages();renderCanvas();showToast(accountAdded?'已添加「账号登录」和「论坛板块」；论坛必须登录后互动':`已添加「${elementCatalog[type].name}」`)}
+function addElement(type,index=activePage().elements.length){if(aiRunActive){showToast('AI 正在修改网站，完成后再添加模块');return}const page=activePage();if(typeof page.code==='string'){showToast('页面为整页代码模式：请通过左侧「浏览模板」让 AI 嵌入模块');return}let accountAdded=false;if(type==='forum'&&!page.elements.some(item=>item.type==='account')){page.elements.splice(index,0,createElement('account',page));index+=1;accountAdded=true}const element=createElement(type,page);page.elements.splice(index,0,element);renderPages();renderCanvas();showToast(accountAdded?'已添加「账号登录」和「论坛板块」；论坛必须登录后互动':`已添加「${elementCatalog[type].name}」`)}
 
 function clearDropHints(){document.querySelectorAll('.insert-zone').forEach(zone=>zone.classList.remove('active'));document.querySelector('[data-empty-drop]')?.classList.remove('drag-active')}
 function findDropIndex(clientY){const elements=[...document.querySelectorAll('.page-element')];for(let index=0;index<elements.length;index++){const rect=elements[index].getBoundingClientRect();if(clientY<rect.top+rect.height/2)return index}return elements.length}
@@ -506,7 +516,7 @@ document.querySelectorAll('[data-theme]').forEach(button=>button.addEventListene
 document.querySelectorAll('[data-bg]').forEach(button=>button.addEventListener('click',()=>{state.background=button.dataset.bg;document.querySelectorAll('[data-bg]').forEach(item=>item.classList.toggle('active',item===button));renderCanvas()}));
 const contentWidthInput=document.querySelector('#contentWidth');const widthValueLabel=document.querySelector('#widthValue');contentWidthInput?.addEventListener('input',event=>{state.contentWidth=Number(event.target.value);if(widthValueLabel)widthValueLabel.textContent=`${state.contentWidth}%`;renderCanvas()});
 document.querySelector('#siteName').addEventListener('input',event=>{state.siteName=event.target.value;renderCanvas()});
-document.querySelector('#clearPageBtn').addEventListener('click',()=>{if(!activePage().elements.length&&!pageObjects().length){showToast('当前页面已经是空白的');return}cleanupElementDetails(activePage().elements);activePage().elements=[];activePage().objects=[];editingElementId=null;clearObjectSelection();renderPages();renderCanvas();showToast('当前页面已清空')});document.querySelector('#toast button').addEventListener('click',()=>document.querySelector('#toast').hidden=true);
+document.querySelector('#clearPageBtn').addEventListener('click',()=>{const page=activePage();if(!page.code.trim()&&!pageObjects().length&&!page.elements.length){showToast('当前页面已经是空白的');return}cleanupElementDetails(page.elements);page.elements=[];page.code='';page.objects=[];editingElementId=null;clearObjectSelection();renderPages();renderCanvas();showToast('当前页面已清空')});document.querySelector('#toast button').addEventListener('click',()=>document.querySelector('#toast').hidden=true);
 document.querySelectorAll('.ai-examples button').forEach(button=>button.addEventListener('click',()=>{const prompt=document.querySelector('#aiPrompt');prompt.value=button.textContent;prompt.focus()}));
 const AI_ATTACHMENT_LIMIT=4,AI_ATTACHMENT_TOTAL_LIMIT=8*1024*1024,AI_IMAGE_LIMIT=4*1024*1024,AI_TEXT_LIMIT=512*1024;
 const AI_TEXT_EXTENSIONS=new Set(['txt','md','json','csv','html','css','js','mjs','ts','tsx','jsx','py','yml','yaml','xml','svg']);
@@ -540,7 +550,19 @@ document.addEventListener('keydown',event=>{const editingText=event.target.close
 
 let lastAiUndo=null;
 let aiRunActive=false;
+let aiRunQueue=[];
 function setAiRunActive(active){aiRunActive=active;document.body.classList.toggle('ai-busy',active)}
+function enqueueAiRun(prompt,requestAttachments,chosenPresets,presetSnippets=[]){
+  const shownText=chosenPresets.length?`使用这些模块制作：${chosenPresets.map(type=>elementCatalog[type]?.name||type).join('、')}`:prompt;
+  appendAiChatMessage('user',shownText,requestAttachments);
+  const last=document.querySelector('#aiChatMessages')?.lastElementChild;const tag=document.createElement('small');tag.className='ai-queue-tag';tag.textContent=`排队中（第 ${aiRunQueue.length+1} 位）`;last?.querySelector('div')?.append(tag);
+  aiRunQueue.push({prompt,attachments:requestAttachments,chosenPresets,presetSnippets,tag});
+  showToast('已加入队列，当前任务完成后自动执行');
+}
+function runQueuedAiTask(item){
+  if(item.tag)item.tag.textContent='执行中';
+  void startAiRun(item.prompt,item.attachments,item.chosenPresets,item.presetSnippets||[]);
+}
 const cloneJson=value=>JSON.parse(JSON.stringify(value));
 const AI_IMAGE_PLACEHOLDER='[本地图片数据已省略，但必须保留原值]';
 const AI_OBJECT_PLACEHOLDER='[页面浮动图片数据已省略，但必须保留原值]';
@@ -569,13 +591,26 @@ function restoreAiChatHistory(){
     if(!pendingAiRunJob()){const card=messages.querySelector('#aiRunCard');card?.querySelector('.ai-working-status')?.remove();card?.classList.remove('is-running')}
   }catch{}
 }
-function scrollAiConversation(){const node=document.querySelector('#aiConversation');requestAnimationFrame(()=>{node.scrollTop=node.scrollHeight});persistAiChatHistory()}
-function updatePreviewVisibility(){const hasContent=state.pages.some(page=>(page.elements||[]).length>0||(page.objects||[]).length>0);document.querySelector('.app-shell')?.classList.toggle('preview-hidden',!hasContent)}
-function appendAiChatMessage(role,text,attachments=[]){const messages=document.querySelector('#aiChatMessages');const files=attachments.length?`<div class="ai-message-files">${attachments.map(item=>`<span>${item.kind==='image'?'▧':'▤'} ${esc(item.name)}</span>`).join('')}</div>`:'';messages.insertAdjacentHTML('beforeend',`<article class="ai-message ${role==='user'?'user':'assistant'}"><div><p>${esc(text)}</p>${files}</div></article>`);if(role==='user')document.querySelector('.ai-examples')?.remove();scrollAiConversation()}
+function scrollAiConversation(force=false){const node=document.querySelector('#aiConversation');if(!force&&node.scrollHeight-node.scrollTop-node.clientHeight>120){persistAiChatHistory();return}requestAnimationFrame(()=>{node.scrollTop=node.scrollHeight});persistAiChatHistory()}
+let previewManualState=null;
+function updatePreviewVisibility(){
+  const hasContent=state.pages.some(page=>(page.code||'').trim().length>0||(page.elements||[]).length>0||(page.objects||[]).length>0);
+  const hidden=previewManualState??!hasContent;
+  document.querySelector('.app-shell')?.classList.toggle('preview-hidden',hidden);
+}
+function togglePreviewCollapsed(){
+  const hidden=document.querySelector('.app-shell')?.classList.contains('preview-hidden');
+  previewManualState=!hidden;
+  updatePreviewVisibility();
+}
+document.querySelector('#previewCollapseBtn').addEventListener('click',togglePreviewCollapsed);
+document.querySelector('#previewExpandFab').addEventListener('click',togglePreviewCollapsed);
+function appendAiChatMessage(role,text,attachments=[]){const messages=document.querySelector('#aiChatMessages');const files=attachments.length?`<div class="ai-message-files">${attachments.map(item=>`<span>${item.kind==='image'?'▧':'▤'} ${esc(item.name)}</span>`).join('')}</div>`:'';messages.insertAdjacentHTML('beforeend',`<article class="ai-message ${role==='user'?'user':'assistant'}"><div><p>${esc(text)}</p>${files}</div></article>`);if(role==='user')document.querySelector('.ai-examples')?.remove();scrollAiConversation(true)}
 function aiSafeSnapshot(){
+  ensureAllPagesCode();
   const snapshot=cloneJson(state);
-  snapshot.pages.forEach(page=>{page.elements.forEach(element=>{(element.items||[]).forEach(item=>{if(String(item.image||'').startsWith('data:'))item.image=AI_IMAGE_PLACEHOLDER });if(String(element.settings?.image||'').startsWith('data:'))element.settings.image=AI_IMAGE_PLACEHOLDER});(page.objects||[]).forEach(object=>{if(String(object.settings?.image||'').startsWith('data:'))object.settings.image=AI_OBJECT_PLACEHOLDER})});
-  return {site:snapshot,activePageId:state.activePageId,elementTypes:Object.keys(elementCatalog),elementCatalog:Object.entries(elementCatalog).filter(([type])=>type!=='detail').map(([type,item])=>({type,name:item.name})),rules:['未明确要求时保留全部现有内容与 ID','预览交互数据刷新后清空','发布站点使用服务端持久化']};
+  snapshot.pages.forEach(page=>{if(typeof page.code==='string')page.code=page.code.replace(/data:image\/[^"'\s)]+/g,AI_IMAGE_PLACEHOLDER);(page.elements||[]).forEach(element=>{(element.items||[]).forEach(item=>{if(String(item.image||'').startsWith('data:'))item.image=AI_IMAGE_PLACEHOLDER });if(String(element.settings?.image||'').startsWith('data:'))element.settings.image=AI_IMAGE_PLACEHOLDER});(page.objects||[]).forEach(object=>{if(String(object.settings?.image||'').startsWith('data:'))object.settings.image=AI_OBJECT_PLACEHOLDER})});
+  return {site:snapshot,activePageId:state.activePageId,pageFormat:'pages[].code 是整页 HTML，直接整体修改；pages[].elements 仅旧数据兼容，通常为空',elementTypes:Object.keys(elementCatalog),elementCatalog:Object.entries(elementCatalog).filter(([type])=>type!=='detail').map(([type,item])=>({type,name:item.name})),rules:['未明确要求时保留全部现有内容与 ID','预览交互数据刷新后清空','发布站点使用服务端持久化']};
 }
 function syncEditorAfterAI(){
   updatePreviewVisibility();
@@ -620,11 +655,15 @@ function restoreAiPlaceholders(next,previous){
   if(next&&typeof next==='object'){if(!previous||typeof previous!=='object'||Array.isArray(previous))previous={};const merged={};for(const key of Object.keys(next))merged[key]=restoreAiPlaceholders(next[key],previous[key]);return merged}
   return next;
 }
+function restoreCodeImages(nextCode,previousCode){
+  const sources=[...String(previousCode||'').matchAll(/data:image\/[^"'\s)]+/g)].map(match=>match[0]);let index=0;
+  return String(nextCode||'').replaceAll(AI_IMAGE_PLACEHOLDER,()=>index<sources.length?sources[index++]:AI_IMAGE_PLACEHOLDER);
+}
 function applyAiSiteReplace(siteData){
   if(!siteData||typeof siteData!=='object'||!Array.isArray(siteData.pages)||!siteData.pages.length)throw new Error('AI 返回的网站数据无效');
-  const backup=cloneJson(state);restoreState(restoreAiPlaceholders(cloneJson(siteData),state));ensureForumAccounts();return backup;
+  const backup=cloneJson(state);const previousPages=new Map(state.pages.map(page=>[page.id,page]));siteData.pages.forEach(page=>{const previous=previousPages.get(page.id);if(previous&&typeof page.code==='string')page.code=restoreCodeImages(page.code,previous.code)});restoreState(restoreAiPlaceholders(cloneJson(siteData),state));ensureForumAccounts();return backup;
 }
-function showAiError(message){setAiWorkingStatus(false);const result=document.querySelector('#aiResult');result.textContent=message;result.classList.add('error');result.hidden=false;scrollAiConversation()}
+function showAiError(message){setAiWorkingStatus(false);const result=document.querySelector('#aiResult');result.textContent=message;result.classList.add('error');result.hidden=false;scrollAiConversation(true)}
 const aiToolNames={list_files:'列出网站文件',read_file:'读取文件',search_files:'搜索源码',replace_file:'修改文件',browser_open:'打开本机页面',browser_screenshot:'查看页面截图'};
 function renderAiEvents(events=[]){
   const visible=events.filter(item=>item.kind==='tool'||item.tool||(item.kind==='analysis'&&item.status!=='running'));
@@ -648,7 +687,7 @@ function renderAiRunProgress(snapshot){
 function renderAiRunResult(run){
   document.querySelector('#aiResult').hidden=true;const panel=document.querySelector('#aiRunCard');panel.hidden=false;setAiWorkingStatus(false);typeAiSummary(run.summary||'网站修改已完成。');document.querySelector('#aiRunFinal').hidden=false;
   const events=run.events||run.trace||[];renderAiEvents(events);const process=document.querySelector('#aiRunProcess');process.open=false;const summary=document.querySelector('#aiRunProcessLabel');summary.hidden=false;summary.textContent='查看过程';
-  const changes=[...(run.changedFiles||[]).map(name=>`已修改文件：${name}`),...(run.siteOperations||[]).map(item=>describeAiOperation(item))];document.querySelector('#aiRunChecks').innerHTML=changes.length?changes.map(item=>`<div class="ai-change">${esc(item)}</div>`).join(''):'<div class="ai-change">未产生文件或站点改动</div>';scrollAiConversation();
+  const changes=[...(run.changedFiles||[]).map(name=>`已修改文件：${name}`),...(run.siteOperations||[]).map(item=>describeAiOperation(item))];document.querySelector('#aiRunChecks').innerHTML=changes.length?changes.map(item=>`<div class="ai-change">${esc(item)}</div>`).join(''):'<div class="ai-change">未产生文件或站点改动</div>';scrollAiConversation(true);
 }
 async function waitForAiRun(jobId){for(let attempt=0;attempt<1800;attempt++){const response=await fetch(`/api/ai/run/status?id=${encodeURIComponent(jobId)}&ts=${Date.now()}`,{cache:'no-store'});const snapshot=await response.json();if(!response.ok)throw new Error(snapshot.error||'无法读取 AI 执行状态');renderAiRunProgress(snapshot);if(snapshot.status==='completed'){return {...snapshot.result,events:snapshot.events||[]}}if(snapshot.status==='failed')throw new Error(snapshot.error||'AI 自动任务失败');await new Promise(resolve=>setTimeout(resolve,500))}throw new Error('AI 执行超时，请稍后重试')}
 async function loadAiStatus(){try{const response=await fetch('/api/ai/status',{cache:'no-store'});const status=await response.json();const button=document.querySelector('#aiAdjustBtn');button.disabled=!status.configured;button.classList.toggle('ai-unavailable',!status.configured);button.title=status.configured?'发送修改要求':'AI 尚未配置：服务器缺少 API Key 或运行时'}catch{/* 请求时再显示具体错误 */}}
@@ -664,7 +703,7 @@ function storeAiRunUndo(payload,stateBackup){
 }
 async function resumeAiRun(){
   const jobId=pendingAiRunJob();if(!jobId)return;
-  const button=document.querySelector('#aiAdjustBtn');button.disabled=true;setAiRunActive(true);renderAiRunProgress({status:'running',events:[]});scrollAiConversation();let stateBackup=null;
+  const button=document.querySelector('#aiAdjustBtn');setAiRunActive(true);renderAiRunProgress({status:'running',events:[]});scrollAiConversation();let stateBackup=null;
   try{
     const payload=await waitForAiRun(jobId);persistAiPendingRun(null);
     stateBackup=applyAiRunResult(payload);storeAiRunUndo(payload,stateBackup);saveDraftNow();renderAiRunResult(payload);
@@ -672,7 +711,7 @@ async function resumeAiRun(){
     showToast(payload.restartRequired?'AI 已完成修改并重启服务':'刷新前开始的 AI 任务已完成');
   }catch(error){
     if(stateBackup)restoreState(stateBackup);persistAiPendingRun(null);showAiError(`刷新前开始的 AI 任务未能恢复：${error.message}`);
-  }finally{setAiRunActive(false);button.disabled=false;scrollAiConversation()}
+  }finally{setAiRunActive(false);scrollAiConversation();const next=aiRunQueue.shift();if(next)runQueuedAiTask(next)}
 }
 function notifyPublishedReload(reason){try{const channel=new BroadcastChannel('alchemyhatchery-live-preview');channel.postMessage({type:'reload',reason,at:Date.now()});channel.close()}catch{}try{localStorage.setItem('alchemyhatchery:published-reload',JSON.stringify({reason,at:Date.now()}))}catch{}}
 function refreshAiChangedFiles(files=[]){
@@ -730,7 +769,6 @@ async function openAiChats(userId,username){
 async function logoutConsole(){
   try{await persistDraftSnapshot(JSON.stringify(state))}catch{}document.querySelector('#consoleAccountMenu').hidden=true;if(window.AIchemyHatcheryAuth)await window.AIchemyHatcheryAuth.logout();else showAuthGate();showToast('已退出控制台账号');
 }
-let lastAiPromptRequest=null;
 document.querySelector('#aiAdjustBtn').addEventListener('click',async()=>{
   const promptInput=document.querySelector('#aiPrompt');const typedPrompt=promptInput.value.trim();if(!typedPrompt&&!aiAttachments.length){showToast('输入修改要求，或先添加附件');promptInput.focus();return}
   const prompt=typedPrompt||'请根据附件内容调整网站。';const requestAttachments=aiAttachments.map(item=>({...item}));promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();
@@ -745,36 +783,18 @@ function archiveAiRunOutput(){
   if(resultShown)freeze(result);
   freeze(card);
 }
-async function startAiRun(prompt,requestAttachments=[],chosenPresets=[]){
-  if(!chosenPresets.length)lastAiPromptRequest={prompt,attachments:requestAttachments};
+async function startAiRun(prompt,requestAttachments=[],chosenPresets=[],presetSnippets=[]){
+  if(aiRunActive){enqueueAiRun(prompt,requestAttachments,chosenPresets,presetSnippets);return}
   const shownText=chosenPresets.length?`使用这些模块制作：${chosenPresets.map(type=>elementCatalog[type]?.name||type).join('、')}`:prompt;
-  const button=document.querySelector('#aiAdjustBtn');const result=document.querySelector('#aiResult');archiveAiRunOutput();appendAiChatMessage('user',shownText,requestAttachments);document.querySelector('#aiChatMessages').append(result,document.querySelector('#aiRunCard'),document.querySelector('#aiUndoBtn'));button.disabled=true;setAiRunActive(true);result.hidden=true;result.classList.remove('error');renderAiRunProgress({status:'running',events:[]});scrollAiConversation();let payload=null;let stateBackup=null;
+  const button=document.querySelector('#aiAdjustBtn');const result=document.querySelector('#aiResult');archiveAiRunOutput();appendAiChatMessage('user',shownText,requestAttachments);document.querySelector('#aiChatMessages').append(result,document.querySelector('#aiRunCard'),document.querySelector('#aiUndoBtn'));setAiRunActive(true);result.hidden=true;result.classList.remove('error');renderAiRunProgress({status:'running',events:[]});scrollAiConversation();let payload=null;let stateBackup=null;
   try{
-    const response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,attachments:requestAttachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true,chosenPresets})});const started=await response.json();if(!response.ok)throw new Error(started.error||'AI 自动任务启动失败');const jobId=response.status===202&&started.jobId?started.jobId:null;if(jobId)persistAiPendingRun(jobId);payload=jobId?await waitForAiRun(jobId):started;persistAiPendingRun(null);
+    const response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,attachments:requestAttachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true,chosenPresets,presetSnippets})});const started=await response.json();if(!response.ok)throw new Error(started.error||'AI 自动任务启动失败');const jobId=response.status===202&&started.jobId?started.jobId:null;if(jobId)persistAiPendingRun(jobId);payload=jobId?await waitForAiRun(jobId):started;persistAiPendingRun(null);
     stateBackup=applyAiRunResult(payload);storeAiRunUndo(payload,stateBackup);const live=refreshAiChangedFiles(payload.changedFiles||[]);saveDraftNow();renderAiRunResult(payload);
-    if(payload.askPresets?.length)appendAiPresetQuestion(payload.question,payload.askPresets);
     if(payload.restartRequired){button.querySelector('b').textContent='重启中…';await restartLocalServer()}
     if(live.editorReloadNeeded){scheduleEditorReload('AI 网站代理已自动修改、验证并刷新编辑器。')}else showToast(payload.restartRequired?'AI 已完成修改并重启服务':'AI 已自动完成并验证网站修改');
   }catch(error){
     persistAiPendingRun(null);if(stateBackup)restoreState(stateBackup);if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}lastAiUndo=null;persistAiUndo();showAiError(`自动执行失败，修改已回滚：${error.message}`)
-  }finally{setAiRunActive(false);button.disabled=false;scrollAiConversation()}
-}
-function appendAiPresetQuestion(question,presets){
-  const valid=(presets||[]).filter(item=>item&&elementCatalog[item.type]);if(!valid.length)return;
-  const messages=document.querySelector('#aiChatMessages');
-  const chips=valid.map(item=>`<button class="ai-preset-chip" aria-pressed="true" data-preset-type="${esc(item.type)}" title="${esc(item.reason||'')}">${esc(elementCatalog[item.type].name)}</button>`).join('');
-  messages.insertAdjacentHTML('beforeend',`<article class="ai-message assistant"><div class="ai-presets-card"><p>${esc(question||'我建议网站包含这些模块，可以点选增减，确认后开始制作：')}</p><div class="ai-preset-chips">${chips}</div><button class="ai-preset-confirm">使用选中的模块开始制作</button></div></article>`);
-  const card=messages.lastElementChild;
-  card.querySelectorAll('.ai-preset-chip').forEach(chip=>chip.addEventListener('click',()=>chip.setAttribute('aria-pressed',String(chip.getAttribute('aria-pressed')!=='true'))));
-  const confirm=card.querySelector('.ai-preset-confirm');
-  confirm.addEventListener('click',async()=>{
-    const chosen=[...card.querySelectorAll('.ai-preset-chip[aria-pressed="true"]')].map(chip=>chip.dataset.presetType);
-    if(!chosen.length){showToast('至少选择一个模块');return}
-    confirm.disabled=true;card.querySelectorAll('.ai-preset-chip').forEach(chip=>chip.disabled=true);
-    const request=lastAiPromptRequest||{prompt:'请按选中的模块制作网站。',attachments:[]};
-    await startAiRun(request.prompt,request.attachments,chosen);
-  });
-  scrollAiConversation();
+  }finally{setAiRunActive(false);scrollAiConversation();const next=aiRunQueue.shift();if(next)runQueuedAiTask(next)}
 }
 const TEMPLATE_GROUPS=[
   {title:'页面结构',en:'STRUCTURE',items:['nav','hero','footer','cta']},
@@ -783,10 +803,17 @@ const TEMPLATE_GROUPS=[
 ];
 const TEMPLATE_DESCRIPTIONS={nav:'LOGO 与页面链接',hero:'主标题与行动按钮',footer:'联系与版权信息',cta:'一句话与主按钮',projects:'三列项目作品',blog:'日期、标题与摘要',gallery:'错落图片网格',stats:'关键数字与指标',team:'头像、名字与分工',timeline:'日期与活动安排',game:'可交互的方块沙盒',forum:'板块导航、话题列表与回复数量',account:'登录状态、账号信息与退出',notice:'招新与活动通知',links:'社群与相关站点'};
 const TEMPLATE_VISUALS={nav:'<span></span><span></span><span></span>',hero:'<strong>Aa</strong><span></span>',footer:'<span></span><span></span>',cta:'<strong>→</strong><span></span>',projects:'<span></span><span></span><span></span>',blog:'<span></span><span></span><span></span>',gallery:'<span></span><span></span><span></span>',stats:'<strong>24</strong><strong>08</strong><strong>16</strong>',team:'<span></span><span></span><span></span>',timeline:'<span></span><span></span><span></span>',game:'<span></span><span></span><span></span><span></span>',forum:'<span></span><div><b></b><b></b><b></b></div>',account:'<span>AD</span><b></b>',notice:'<strong>!</strong><span></span>',links:'<span>↗</span><span>↗</span>'};
-function closeTemplatePicker(){document.querySelector('#templatePicker')?.remove()}
+function closeTemplatePicker(){
+  document.querySelector('#templatePicker')?.remove();
+  document.querySelector('[data-template-open]')?.classList.remove('active');
+  // 模板面板只存在于 AI 界面，关闭后把选中状态还给 AI 按钮
+  if(!document.querySelector('.ai-chat-panel')?.hidden)document.querySelector('[data-activity="ai"]')?.classList.add('active');
+}
 function openTemplatePicker(){
   if(aiRunActive){showToast('AI 正在修改网站，完成后再添加模块');return}
   const panel=document.querySelector('.ai-chat-panel');if(!panel||panel.querySelector('#templatePicker'))return;
+  document.querySelector('[data-activity="ai"]')?.classList.remove('active');
+  document.querySelector('[data-template-open]')?.classList.add('active');
   const groups=TEMPLATE_GROUPS.map(group=>`<div class="element-group"><div class="element-group-title"><b>${group.title}</b><span>${group.en}</span></div><div class="element-grid">${group.items.map(type=>`<button type="button" class="element-card${type==='forum'?' wide':''}" data-template-type="${type}" aria-pressed="false"><i class="element-visual v-${type}">${TEMPLATE_VISUALS[type]||'<span></span>'}</i><b>${elementCatalog[type]?.name||type}</b><small>${TEMPLATE_DESCRIPTIONS[type]||''}</small></button>`).join('')}</div></div>`).join('');
   panel.insertAdjacentHTML('beforeend',`<div class="template-picker" id="templatePicker"><header class="template-picker-head"><div><small>TEMPLATES</small><b>浏览现成模板</b></div><button type="button" class="template-picker-close" data-template-close aria-label="关闭模板选择">×</button></header><div class="template-picker-body"><p class="template-picker-tip">点选要用的模块（可多选），确定后交给 AI 加进当前网站。</p>${groups}</div><footer class="template-picker-foot"><span data-template-count>未选择模块</span><button type="button" class="ai-preset-confirm" data-template-confirm disabled>确定添加</button></footer></div>`);
   const picker=panel.querySelector('#templatePicker'),confirm=picker.querySelector('[data-template-confirm]'),count=picker.querySelector('[data-template-count]');
@@ -802,17 +829,20 @@ function openTemplatePicker(){
     closeTemplatePicker();
     const promptInput=document.querySelector('#aiPrompt'),typed=promptInput.value.trim();
     const prompt=typed||'请把选中的模块添加到当前网站，融入整体设计。';const requestAttachments=aiAttachments.map(item=>({...item}));
+    // 把模块的默认渲染代码一并交给 AI，让它读取并嵌入整页代码中
+    const page=activePage();const presetSnippets=chosen.map(type=>{const element=createElement(type,page);return {type,name:elementCatalog[type]?.name||type,html:blockContent(type,element,false)}});
     promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();
-    await startAiRun(prompt,requestAttachments,chosen);
+    await startAiRun(prompt,requestAttachments,chosen,presetSnippets);
   });
 }
-document.querySelector('#aiTemplateBtn').addEventListener('click',openTemplatePicker);
 function switchActivity(name){
-  document.querySelectorAll('.activity-item').forEach(item=>{const active=item.dataset.activity===name;item.classList.toggle('active',active);item.setAttribute('aria-selected',String(active))});
+  closeTemplatePicker();
+  document.querySelectorAll('.activity-item[data-activity]').forEach(item=>{const active=item.dataset.activity===name;item.classList.toggle('active',active);item.setAttribute('aria-selected',String(active))});
   document.querySelector('.ai-chat-panel').hidden=name!=='ai';
   document.querySelector('.security-panel').hidden=name!=='security';
 }
-document.querySelectorAll('.activity-item').forEach(item=>item.addEventListener('click',()=>switchActivity(item.dataset.activity)));
+document.querySelectorAll('.activity-item[data-activity]').forEach(item=>item.addEventListener('click',()=>switchActivity(item.dataset.activity)));
+document.querySelector('[data-template-open]').addEventListener('click',()=>{if(document.querySelector('#templatePicker')){closeTemplatePicker();return}switchActivity('ai');openTemplatePicker()});
 const SECURITY_SENSITIVE_PATHS=['/.env','/.env.example','/.git/config','/.gitignore','/server.py','/requirements.txt','/alchemy_hatchery.db','/miaoda.db'];
 async function runSecurityChecks(){
   const button=document.querySelector('#securityRunBtn'),summary=document.querySelector('#securitySummary'),list=document.querySelector('#securityResults');
@@ -840,15 +870,15 @@ document.querySelector('#aiUndoBtn').addEventListener('click',async()=>{
   try{
     if(undo.sourceApplied){const response=await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:undo.proposalId})});sourceUndo=await response.json();if(!response.ok)throw new Error(sourceUndo.error||'源码恢复失败')}
     restoreState(undo.state);saveDraftNow();const live=refreshAiChangedFiles(sourceUndo.restoredFiles||[]);lastAiUndo=null;persistAiUndo();button.hidden=true;
-    if(sourceUndo.restartRequired)await restartLocalServer();const result=document.querySelector('#aiResult');result.classList.remove('error');result.textContent='已撤销上一次 AI 修改。';result.hidden=false;scrollAiConversation();
+    if(sourceUndo.restartRequired)await restartLocalServer();const result=document.querySelector('#aiResult');result.classList.remove('error');result.textContent='已撤销上一次 AI 修改。';result.hidden=false;scrollAiConversation(true);
     if(live.editorReloadNeeded)scheduleEditorReload('已撤销 AI 修改，并自动刷新恢复编辑器。');else showToast('已恢复 AI 修改前的状态')
   }catch(error){showAiError(`撤销失败：${error.message}`)}finally{button.disabled=false}
 });
 let buildingPreviewHtml=false;
 function buildPublishPayload(preview=false){
-  ensureForumAccounts();
+  ensureForumAccounts();ensureAllPagesCode();
   const previousPage=state.activePageId,previousAccountState=previewDB.accountLoggedIn;previewDB.accountLoggedIn=false;buildingPreviewHtml=preview;
-  const pages=state.pages.map(page=>{state.activePageId=page.id;return {id:page.id,name:page.name,path:pageFullPath(page),parentId:page.parentId,kind:page.kind,html:page.elements.map(element=>{const html=blockContent(element.type,element,false);const height=numberValue(element.layoutHeight);return height>0?`<div class="published-element" style="height:${Math.round(height)}px">${html}</div>`:html}).join('')+floatingObjectLayer(page,false)}});
+  const pages=state.pages.map(page=>{state.activePageId=page.id;return {id:page.id,name:page.name,path:pageFullPath(page),parentId:page.parentId,kind:page.kind,html:page.code+floatingObjectLayer(page,false)}});
   state.activePageId=previousPage;previewDB.accountLoggedIn=previousAccountState;buildingPreviewHtml=false;return {username:currentConsoleUser?.username||'',siteName:state.siteName,description:state.description,theme:state.theme,background:state.background,contentWidth:state.contentWidth,pages,forumPosts:[]};
 }
 document.querySelector('#previewSiteBtn').addEventListener('click',async()=>{const button=document.querySelector('#previewSiteBtn');const popup=window.open('about:blank','_blank');button.disabled=true;button.firstChild.textContent='生成中 ';try{await persistDraftSnapshot(JSON.stringify(state));const payload=await consoleRequest('/api/preview',{method:'POST',body:buildPublishPayload(true)});currentConsoleUser.previewId=payload.previewId;updateConsoleAccount();notifyPublishedReload('预览内容已更新');if(popup)popup.location.replace(payload.url);else window.open(payload.url,'_blank');showToast('临时预览已更新')}catch(error){popup?.close();if(error.status===401)showAuthGate('登录已过期，请重新登录');showToast(`预览失败：${error.message}`)}finally{button.disabled=false;button.firstChild.textContent='预览 '}});

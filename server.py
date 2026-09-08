@@ -129,6 +129,19 @@ PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai
 SITE_OWNER_CAMPUS_ID = "20264689"
 
 
+# 从零建站时注入的随机风格灵感（用户没给线索时用），保证每次生成的整体风格不重样
+SITE_STYLE_SEEDS = [
+    "深色科技感：暗底、荧光点缀、等宽字体氛围（theme 可选 terminal）",
+    "极简留白：大量留白、细线分割、黑白灰（theme 可选 minimal）",
+    "复古编辑部：米色纸感、衬线大标题、杂志分栏（theme 可选 editorial）",
+    "活力撞色：高饱和对比色、圆角卡片、大字标语（background 用亮色）",
+    "日系清新：浅色柔和、细字重、淡雅配色（theme 可选 soft）",
+    "赛博霓虹：深色底、霓虹渐变、发光边框（background 用近黑色）",
+    "学院网格：蓝白校色、正式网格、突出数据栏（theme 可选 editorial）",
+    "自然户外：大地色系、粗边框、手作质感（theme 可选 soft）",
+]
+
+
 def is_site_owner_campus_id(campus_id) -> bool:
     return str(campus_id or "").strip() == SITE_OWNER_CAMPUS_ID
 
@@ -227,6 +240,24 @@ def password_matches(password: str, salt_hex: str, expected_hex: str, iterations
         return False
         return False
     return hmac.compare_digest(actual, expected_hex)
+
+
+def user_preview_id(user_id: str) -> str:
+    """读取或创建用户的随机预览 id，供工作区实时预览地址使用。"""
+    with neon_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT preview_id FROM hatchery_user_extras WHERE user_id = %s", (str(user_id),))
+            row = cur.fetchone()
+            preview_id = str(row[0] or "") if row else ""
+            if PREVIEW_ID_PATTERN.fullmatch(preview_id):
+                return preview_id
+            preview_id = new_preview_id(cur)
+            cur.execute(
+                "INSERT INTO hatchery_user_extras(user_id,preview_id,created_at) VALUES(%s,%s,%s)"
+                " ON CONFLICT (user_id) DO UPDATE SET preview_id=EXCLUDED.preview_id",
+                (str(user_id), preview_id, iso_time()),
+            )
+            return preview_id
 
 
 def new_preview_id(cur) -> str:
@@ -1217,15 +1248,24 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     # DeepSeek Harness is the only automatic execution engine. Its file access is
     # confined to the current website's own folder (sites/<user_id>/); the AI may
     # not read or modify anything else on the host.
-    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, include_source: bool, attachments: list[dict], chosen_presets: list[str], progress=None) -> dict:
+    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, include_source: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, progress=None) -> dict:
         run_id = f"run-{secrets.token_hex(10)}"
         site_state = context.get("site") if isinstance(context, dict) else None
         if not isinstance(site_state, dict) or not isinstance(site_state.get("pages"), list):
             raise ValueError("缺少当前网站数据，无法启动 AI 任务")
         if chosen_presets:
             prompt = prompt + "\n\n用户已确认选用这些预设模块：" + "、".join(chosen_presets) + "。请直接开始制作网站，把它们融入设计，不要再询问。"
+        if preset_snippets:
+            blocks = "\n\n".join(f"【{item['name']} / {item['type']}】\n{item['html']}" for item in preset_snippets)
+            prompt = prompt + "\n\n用户手动选用了以下模块。请读取它们的代码并嵌入到整页代码中（可自由改写文案与样式以融入整体设计，但保留模块的结构意图）：\n\n" + blocks
+        total_elements = sum(len(page.get("elements", [])) for page in site_state.get("pages", []) if isinstance(page, dict))
+        if not chosen_presets and total_elements == 0:
+            style_seed = secrets.choice(SITE_STYLE_SEEDS)
+            prompt = prompt + f"\n\n本次是从零建站。如果用户没有透露社团、项目或爱好等风格线索，参考这个随机风格方向：{style_seed}；如果用户给了线索，以用户线索为准。"
         workspace = ai_site_workspace(user["id"])
         workspace.mkdir(parents=True, exist_ok=True)
+        preview_url = f"/ai-preview/{user_preview_id(user['id'])}"
+        prompt = prompt + f"\n\n本次改动的工作区实时预览地址：{preview_url}（它实时渲染你改完后的 site.json。用浏览器工具打开它验证改动效果，不要打开控制台首页——那是登录页，看不到任何东西）。"
         site_json_path = workspace / "site.json"
         original_site_json = json.dumps(site_state, ensure_ascii=False, indent=2)
         write_text_exact(site_json_path, original_site_json)
@@ -1283,19 +1323,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             site_replace = None
             changed_files = []
 
-        # When the site is empty and the needed modules are unclear, the model
-        # asks first instead of building: pass its question and preset picks to
-        # the user, and make sure nothing was applied.
-        ask_presets: list[dict] = []
-        raw_ask = result.get("askPresets")
-        if isinstance(raw_ask, list):
-            for item in raw_ask[:16]:
-                if isinstance(item, dict) and isinstance(item.get("type"), str) and re.fullmatch(r"[a-z0-9]{2,24}", item["type"]):
-                    ask_presets.append({"type": item["type"], "reason": str(item.get("reason", ""))[:200]})
-        ai_question = str(result.get("question", ""))[:500] if ask_presets else ""
-        if ask_presets:
-            proposal["siteOperations"] = []
-            site_replace = None
+        # 模型应自行决定模块，不再向用户提问；askPresets 一律不下发，
+        # 但如果模型还是问了而不是直接做，把它做的任何改动丢弃，避免半成品落站。
+        model_asked = bool(result.get("askPresets"))
+        if model_asked and site_replace is None and not proposal["siteOperations"]:
+            proposal["checks"].append("模型试图先让你选模块而不是直接制作，本次未应用改动；可直接重试，或在左侧“浏览模板”手动挑选模块")
             changed_files = []
 
         return {
@@ -1304,8 +1336,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             "risk": proposal["risk"],
             "siteOperations": proposal["siteOperations"],
             "siteReplace": site_replace,
-            "askPresets": ask_presets,
-            "question": ai_question,
+            "askPresets": [],
+            "question": "",
             "checks": proposal["checks"],
             "trace": result.get("trace", []),
             "changedFiles": changed_files,
@@ -1440,6 +1472,21 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             if not isinstance(item, str) or not re.fullmatch(r"[a-z0-9]{2,24}", item):
                 raise ValueError("预设选择格式错误")
             chosen_presets.append(item)
+        raw_snippets = payload.get("presetSnippets", [])
+        if not isinstance(raw_snippets, list) or len(raw_snippets) > 8:
+            raise ValueError("模块代码片段格式错误")
+        preset_snippets: list[dict] = []
+        for item in raw_snippets:
+            if not isinstance(item, dict):
+                raise ValueError("模块代码片段格式错误")
+            snippet_type = str(item.get("type", ""))
+            if not re.fullmatch(r"[a-z0-9]{2,24}", snippet_type):
+                raise ValueError("模块代码片段格式错误")
+            preset_snippets.append({
+                "type": snippet_type,
+                "name": str(item.get("name", snippet_type))[:40],
+                "html": str(item.get("html", ""))[:60000],
+            })
         if not prompt:
             raise ValueError("调整描述不能为空")
         if not isinstance(context, dict):
@@ -1468,15 +1515,15 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             if total_attachment_size > 8 * 1024 * 1024:
                 raise ValueError("附件总大小不能超过 8 MB")
             attachments.append({"name": name, "kind": kind, "type": mime_type, "content": content})
-        return prompt, context, include_site, include_source, attachments, chosen_presets
+        return prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets
 
     def handle_ai_run(self, user: dict) -> None:
-        prompt, context, include_site, include_source, attachments, chosen_presets = self.prepare_ai_run()
+        prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         provider_name, model = current_ai_provider_model()
         try:
-            result = self.run_ai_harness(user, prompt, context, include_site, include_source, attachments, chosen_presets)
+            result = self.run_ai_harness(user, prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets)
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
         except Exception:
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, None, "failed")
@@ -1486,7 +1533,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
-        prompt, context, include_site, include_source, attachments, chosen_presets = self.prepare_ai_run()
+        prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
@@ -1513,7 +1560,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         def worker() -> None:
             provider_name, model = current_ai_provider_model()
             try:
-                result = self.run_ai_harness(user, prompt, context, include_site, include_source, attachments, chosen_presets, progress=progress)
+                result = self.run_ai_harness(user, prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets, progress=progress)
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
@@ -2397,6 +2444,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             status.update({"filePolicy": "site-workspace-only"})
             self.send_json(status)
             return
+        ai_preview_match = re.match(r"^/ai-preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
+        if ai_preview_match:
+            self.serve_workspace_preview(parsed.path, ai_preview_match.group(1))
+            return
         preview_match = re.match(r"^/preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
         if preview_match:
             preview_id = preview_match.group(1)
@@ -2516,6 +2567,66 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             super().do_GET()
             return
         self.send_error(404, "Not found")
+
+    def serve_workspace_preview(self, path: str, preview_id: str) -> None:
+        """AI 工作区实时预览：按随机预览 id 读取对应用户工作区的 site.json，把 pages[].code 直接渲染出来。"""
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id FROM hatchery_user_extras WHERE preview_id = %s", (preview_id,))
+                row = cur.fetchone()
+        if not row:
+            self.send_error(404, "Not found")
+            return
+        site_file = ai_site_workspace(row[0]) / "site.json"
+        if not site_file.is_file():
+            body = "<meta charset='utf-8'><p style='font:14px sans-serif;padding:40px'>工作区还没有内容，先让 AI 做点什么。</p>".encode("utf-8")
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        state = json.loads(site_file.read_text(encoding="utf-8"))
+        pages = []
+        for page in state.get("pages", []):
+            if not isinstance(page, dict):
+                continue
+            pages.append({
+                "id": page.get("id"),
+                "name": page.get("name", "页面"),
+                "path": page.get("path", "page"),
+                "parentId": page.get("parentId"),
+                "kind": page.get("kind", "page"),
+                "html": str(page.get("code", "")),
+            })
+        site = {
+            "username": "preview",
+            "siteName": state.get("siteName", "未命名网站"),
+            "description": state.get("description", ""),
+            "theme": state.get("theme", "minimal"),
+            "background": state.get("background", "#ffffff"),
+            "contentWidth": state.get("contentWidth", 100),
+            "pages": pages,
+            "forumPosts": [],
+            "previewMode": True,
+            "previewId": preview_id,
+            "basePath": f"/ai-preview/{preview_id}",
+        }
+        template = (ROOT / "viewer.html").read_text(encoding="utf-8")
+        site_data = json.dumps(site, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+        prefix = f"/ai-preview/{preview_id}"
+        page_path = path.removeprefix(prefix).strip("/") if path not in (prefix, f"{prefix}/") else ""
+        html = template.replace("__SITE_DATA_JSON__", site_data).replace("__PAGE_PATH_JSON__", json.dumps(page_path, ensure_ascii=False))
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, private")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_preview(self, path: str, preview_id: str, data_json: str) -> None:
         template = (ROOT / "viewer.html").read_text(encoding="utf-8")
