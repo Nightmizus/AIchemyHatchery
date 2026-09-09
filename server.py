@@ -133,6 +133,28 @@ def site_slug_from_host(host: str) -> str | None:
     return None
 AI_LOCK = threading.Lock()
 AI_RUN_LOCK = threading.Lock()
+# 任务仍标记 running 的秒数上限（harness 默认 600s 超时 + 余量），超过视为泄漏可被看门狗清理
+AI_JOB_STALE_SECONDS = float(os.environ.get("HATCHERY_AI_JOB_STALE_SECONDS", "720"))
+
+
+def ai_run_lock_reset_stale(now: float) -> int:
+    """清理超时仍挂起的 AI 任务：标记失败并强制释放全局锁。返回清理的任务数。
+    锁本身可能被 harness 子进程挂起长期占用；超过 harness 自身超时后仍持有即判定为泄漏。"""
+    released = 0
+    with AI_RUN_JOBS_LOCK:
+        stale_ids = [
+            key for key, value in AI_RUN_JOBS.items()
+            if value.get("status") == "running" and now - float(value.get("createdAt", now)) > AI_JOB_STALE_SECONDS
+        ]
+        for key in stale_ids:
+            AI_RUN_JOBS[key].update({"status": "failed", "error": "任务超时被系统终止"})
+            released += 1
+    if released and AI_RUN_LOCK.locked():
+        try:
+            AI_RUN_LOCK.release()
+        except RuntimeError:
+            pass
+    return released
 AI_RUN_JOBS_LOCK = threading.Lock()
 AI_BACKUPS: dict[str, dict[str, str]] = {}
 AI_RUN_JOBS: dict[str, dict] = {}
@@ -1224,8 +1246,13 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     # DeepSeek Harness is the only automatic execution engine. Its file access is
     # confined to the current website's own folder (sites/<user_id>/); the AI may
     # not read or modify anything else on the host.
-    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, progress=None) -> dict:
+    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None) -> dict:
         run_id = f"run-{secrets.token_hex(10)}"
+        if history:
+            lines = ["对话历史（帮助理解上下文，按时间先后；当前请求见末尾）："]
+            for item in history:
+                lines.append(f"{'用户' if item['role'] == 'user' else 'AI'}：{item['text']}")
+            prompt = "\n".join(lines) + "\n\n当前请求：" + prompt
         site_state = context.get("site") if isinstance(context, dict) else None
         if not isinstance(site_state, dict) or not isinstance(site_state.get("pages"), list):
             raise ValueError("缺少当前网站数据，无法启动 AI 任务")
@@ -1474,27 +1501,41 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             if total_attachment_size > 8 * 1024 * 1024:
                 raise ValueError("附件总大小不能超过 8 MB")
             attachments.append({"name": name, "kind": kind, "type": mime_type, "content": content})
-        return prompt, context, include_site, attachments, chosen_presets, preset_snippets
+        raw_history = payload.get("history", [])
+        history: list[dict] = []
+        if isinstance(raw_history, list):
+            for item in raw_history[-12:]:
+                if not isinstance(item, dict) or item.get("role") not in ("user", "assistant"):
+                    continue
+                text = str(item.get("text", "")).strip()[:1000]
+                if text:
+                    history.append({"role": item["role"], "text": text})
+        return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history
 
     def handle_ai_run(self, user: dict) -> None:
-        prompt, context, include_site, attachments, chosen_presets, preset_snippets = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
-            raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
+            if not ai_run_lock_reset_stale(time.time()) or not AI_RUN_LOCK.acquire(blocking=False):
+                raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         provider_name, model = current_ai_provider_model()
         try:
-            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets)
+            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history)
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
         except Exception:
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, None, "failed")
             raise
         finally:
-            AI_RUN_LOCK.release()
+            try:
+                AI_RUN_LOCK.release()
+            except RuntimeError:
+                pass  # 锁可能已被超时看门狗强制释放
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
-        prompt, context, include_site, attachments, chosen_presets, preset_snippets = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
-            raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
+            if not ai_run_lock_reset_stale(time.time()) or not AI_RUN_LOCK.acquire(blocking=False):
+                raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
         now = time.time()
         with AI_RUN_JOBS_LOCK:
@@ -1519,20 +1560,23 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         def worker() -> None:
             provider_name, model = current_ai_provider_model()
             try:
-                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, progress=progress)
+                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress=progress)
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
-                    if job:
+                    if job and job.get("status") == "running":
                         job.update({"status": "completed", "result": result})
             except Exception as error:
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, None, "failed")
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
-                    if job:
+                    if job and job.get("status") == "running":
                         job.update({"status": "failed", "error": str(error)[:1000]})
             finally:
-                AI_RUN_LOCK.release()
+                try:
+                    AI_RUN_LOCK.release()
+                except RuntimeError:
+                    pass  # 锁可能已被超时看门狗强制释放
 
         try:
             threading.Thread(target=worker, name=f"hatchery-ai-{job_id[-6:]}", daemon=True).start()

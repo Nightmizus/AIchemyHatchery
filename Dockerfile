@@ -2,6 +2,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# 浏览器（AI 的页面预览/截图工具）：chromium 及其运行库；MIAODA_EDGE_BIN 指给 Harness 的浏览器工具
+RUN env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+    apt-get update \
+    && apt-get install -y --no-install-recommends chromium \
+    && rm -rf /var/lib/apt/lists/*
+ENV MIAODA_EDGE_BIN=/usr/bin/chromium
+
 # 依赖：应用（bcrypt + psycopg2-binary）+ 集成的 DeepSeek Harness 运行时。
 # runtime-bin 按构建架构自动选择平台 wheel（linux x64/arm64），开箱即用。
 COPY requirements.txt .

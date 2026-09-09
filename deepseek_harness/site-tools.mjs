@@ -66,12 +66,19 @@ function localUrl(value) {
 function edgeExecutable() {
   const candidates = [
     process.env.MIAODA_EDGE_BIN,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
     join(process.env['PROGRAMFILES(X86)'] || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     join(process.env.PROGRAMFILES || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
     join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
   ]
   const found = candidates.find(candidate => candidate && existsSync(candidate))
-  if (!found) throw new Error('Microsoft Edge was not found on this host')
+  if (!found) throw new Error('no usable browser was found on this host (chromium/chrome/edge)')
   return found
 }
 
@@ -84,6 +91,8 @@ async function runEdge(args, signal, timeoutMs = 45000) {
     '--disable-extensions',
     '--no-first-run',
     '--no-default-browser-check',
+    '--no-sandbox',
+    '--disable-dev-shm-usage',
     `--user-data-dir=${profile}`,
     ...args,
   ]

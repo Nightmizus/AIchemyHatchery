@@ -798,6 +798,17 @@ document.querySelector('#aiAdjustBtn').addEventListener('click',async()=>{
   const prompt=typedPrompt||'请根据附件内容调整网站。';const requestAttachments=aiAttachments.map(item=>({...item}));promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();
   await startAiRun(prompt,requestAttachments);
 });
+function aiChatHistoryForContext(limit=8){
+  // 提取最近几轮对话（用户消息 + AI 摘要），作为本次请求的上下文
+  const entries=[];
+  for(const node of document.querySelector('#aiChatMessages')?.children||[]){
+    let role=null,text='';
+    if(node.classList?.contains('ai-message')){role=node.classList.contains('user')?'user':'assistant';text=node.innerText.trim()}
+    else if(node.classList?.contains('ai-run-archive')||node.id==='aiRunCard'){const summary=node.querySelector('#aiRunSummary, .ai-run-final p');if(summary?.textContent.trim()){role='assistant';text=summary.textContent.trim()}}
+    if(role&&text)entries.push({role,text:text.slice(0,600)});
+  }
+  return entries.slice(-limit);
+}
 function archiveAiRunOutput(){
   // 新一轮开始前，把上一轮的运行卡片/结果固化成历史记录，避免被复用清空
   const card=document.querySelector('#aiRunCard');if(!card||card.hidden)return;
@@ -812,12 +823,13 @@ async function startAiRun(prompt,requestAttachments=[],chosenPresets=[],presetSn
   const shownText=chosenPresets.length?`使用这些模块制作：${chosenPresets.map(type=>elementCatalog[type]?.name||type).join('、')}`:prompt;
   const button=document.querySelector('#aiAdjustBtn');const result=document.querySelector('#aiResult');archiveAiRunOutput();appendAiChatMessage('user',shownText,requestAttachments);document.querySelector('#aiChatMessages').append(result,document.querySelector('#aiRunCard'),document.querySelector('#aiUndoBtn'));setAiRunActive(true);result.hidden=true;result.classList.remove('error');renderAiRunProgress({status:'running',events:[]});scrollAiConversation();let payload=null;let stateBackup=null;
   try{
-    const response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,attachments:requestAttachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true,chosenPresets,presetSnippets})});const started=await response.json();if(!response.ok)throw new Error(started.error||'AI 自动任务启动失败');const jobId=response.status===202&&started.jobId?started.jobId:null;if(jobId)persistAiPendingRun(jobId);payload=jobId?await waitForAiRun(jobId):started;persistAiPendingRun(null);
+    const response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,attachments:requestAttachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true,chosenPresets,presetSnippets,history:aiChatHistoryForContext()})});const started=await response.json();if(!response.ok)throw new Error(started.error||'AI 自动任务启动失败');const jobId=response.status===202&&started.jobId?started.jobId:null;if(jobId)persistAiPendingRun(jobId);payload=jobId?await waitForAiRun(jobId):started;persistAiPendingRun(null);
     stateBackup=applyAiRunResult(payload);storeAiRunUndo(payload,stateBackup);const live=refreshAiChangedFiles(payload.changedFiles||[]);saveDraftNow();renderAiRunResult(payload);
     if(payload.restartRequired){button.querySelector('b').textContent='重启中…';await restartLocalServer()}
     if(live.editorReloadNeeded){scheduleEditorReload('AI 网站代理已自动修改、验证并刷新编辑器。')}else showToast(payload.restartRequired?'AI 已完成修改并重启服务':'AI 已自动完成并验证网站修改');
   }catch(error){
-    persistAiPendingRun(null);if(stateBackup)restoreState(stateBackup);if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}lastAiUndo=null;persistAiUndo();showAiError(`自动执行失败，修改已回滚：${error.message}`)
+    persistAiPendingRun(null);if(stateBackup)restoreState(stateBackup);if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}lastAiUndo=null;persistAiUndo();showAiError(`自动执行失败，修改已回滚：${error.message}`);
+    if(String(error?.message||'').includes('尚未结束')){aiRunQueue.forEach(item=>{if(item.tag)item.tag.textContent='已取消'});aiRunQueue=[]}
   }finally{setAiRunActive(false);scrollAiConversation();const next=aiRunQueue.shift();if(next)runQueuedAiTask(next)}
 }
 const TEMPLATE_GROUPS=[
