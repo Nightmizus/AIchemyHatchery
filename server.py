@@ -1546,11 +1546,14 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     def handle_ai_run_status(self, user: dict, parsed) -> None:
         job_id = str((parse_qs(parsed.query).get("id") or [""])[0])
         if not re.fullmatch(r"job-[0-9a-f]{24}", job_id):
-            raise ValueError("AI 任务编号无效")
+            self.send_json({"error": "AI 任务编号无效"}, 400)
+            return
         with AI_RUN_JOBS_LOCK:
             job = AI_RUN_JOBS.get(job_id)
             if not job or str(job.get("userId", "")) != str(user["id"]):
-                raise ValueError("AI 任务不存在或已过期")
+                # 任务只存内存：服务重启或过期后会查不到；返回 JSON 让前端体面收尾，而不是掐断连接
+                self.send_json({"error": "AI 任务不存在或已过期（可能刚重启过服务）", "status": "failed"}, 404)
+                return
             payload = {
                 "jobId": job_id,
                 "status": job["status"],
@@ -2135,6 +2138,27 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "forumPosts": runtime["forumPosts"]})
 
     def do_GET(self) -> None:
+        # GET 路由无兜底时任何 ValueError 都会掐断连接（前端拿到的是网络错误而非可读 JSON）
+        try:
+            self._do_GET()
+        except ValueError as exc:
+            try:
+                self.send_json({"error": str(exc)}, 400)
+            except Exception:
+                pass
+        except RuntimeError as exc:
+            try:
+                self.send_json({"error": str(exc)}, 502)
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"[error] GET {self.path}：{type(exc).__name__}: {exc}", file=sys.stderr)
+            try:
+                self.send_json({"error": "服务器内部错误，请稍后重试"}, 500)
+            except Exception:
+                pass
+
+    def _do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html", "/styles.css", "/mica.css", "/auth.js", "/script.js", "/viewer.html", "/viewer.js"):
             for header in ("If-Modified-Since", "If-None-Match"):
