@@ -252,6 +252,12 @@ function scheduleDraftSave(){if(!currentConsoleUser)return;setSaveState('保存�
 function restoreHistory(index){if(index<0||index>=historyStack.length)return;const message=index<historyIndex?'已撤销':'已重做';historyIndex=index;const snapshot=JSON.parse(historyStack[index]);Object.keys(state).forEach(key=>delete state[key]);Object.assign(state,snapshot);editingElementId=null;editingItemId=null;renderPages();syncFields();renderCanvas();updateHistoryButtons();showToast(message)}
 function undoState(){captureHistoryNow();if(historyIndex>0)restoreHistory(historyIndex-1)}
 function redoState(){if(historyIndex<historyStack.length-1)restoreHistory(historyIndex+1)}
+function isolatePageCode(code){
+  // 子网站样式隔离：blob 里的 <style> 全局生效会污染控制台，统一套上 @scope 作用域
+  if(!code)return '';
+  const scoped=code.includes('@scope')?code:code.replace(/<style(\s[^>]*)?>([\s\S]*?)<\/style>/gi,(match,attrs,body)=>`<style${attrs||''}>@scope (.pg-scope) {\n${body}\n}</style>`);
+  return `<div class="pg-scope">${scoped}</div>`;
+}
 function ensurePageCode(page){
   // 整页代码模式：page.code 是唯一渲染来源。旧草稿只有模块元素时，一次性渲染成代码并清空元素
   if(!page||typeof page.code==='string')return;
@@ -266,7 +272,7 @@ function renderCanvas(){
   const canvas=document.querySelector('#siteCanvas');canvas.className=`site-canvas theme-${state.theme}`;canvas.dataset.previewDevice=previewDevice;canvas.style.setProperty('--page-bg',state.background||'#ffffff');canvas.style.setProperty('--canvas-width',previewDevice==='desktop'?`${state.contentWidth||100}%`:'390px');
   const legacyImages=(page.elements||[]).filter(element=>element.type==='image');if(legacyImages.length){legacyImages.forEach((element,index)=>pageObjects(page).push({id:uid('obj'),kind:'image',settings:{image:element.settings?.image||'',alt:element.settings?.alt||'插入的图片'},objectStyles:{image:{width:element.objectStyles?.image?.width||360,height:element.objectStyles?.image?.height||230,objectFit:element.objectStyles?.image?.objectFit||'contain',x:element.objectStyles?.image?.x||60+index*24,y:element.objectStyles?.image?.y||70+index*24,rotation:element.objectStyles?.image?.rotation||0}}}));page.elements=page.elements.filter(element=>element.type!=='image')}
   ensurePageCode(page);
-  const content=document.querySelector('#canvasContent');const flow=page.code.trim()||pageObjects(page).length?page.code:`<div class="empty-canvas" data-empty-drop><div><i>＋</i><b>这是一个空白页面</b><small>在左侧告诉 AI 你想做什么，让它帮你搭建</small></div></div>`;content.innerHTML=flow+floatingObjectLayer(page,true);
+  const content=document.querySelector('#canvasContent');const flow=page.code.trim()||pageObjects(page).length?page.code:`<div class="empty-canvas" data-empty-drop><div><i>＋</i><b>这是一个空白页面</b><small>在左侧告诉 AI 你想做什么，让它帮你搭建</small></div></div>`;content.innerHTML=isolatePageCode(flow)+floatingObjectLayer(page,true);
   refreshMobileFontScaling(canvas);bindCanvasEvents();initMcGames(content);enforceElementHeightLimits();ensureObjectEditorChrome();restoreSelectedObject();restoreTextSelectionBookmark();const selected=editingElementId?getElementById(editingElementId):null;const hasContent=page.code.trim().length||pageObjects(page).length;document.querySelector('#selectionState').textContent=selected?`已打开设置：${elementCatalog[selected.type]?.name||selected.type}`:selectedObjectRef?(selectedObjectRef.kind==='text'?'可直接输入文字':'拖动边框移动 · 拖动控制点缩放'):hasContent?'页面为整页代码，由 AI 直接修改':'空白页面';document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));scheduleDraftSave();updatePreviewVisibility();
 }
 
@@ -878,7 +884,7 @@ let buildingPreviewHtml=false;
 function buildPublishPayload(preview=false){
   ensureForumAccounts();ensureAllPagesCode();
   const previousPage=state.activePageId,previousAccountState=previewDB.accountLoggedIn;previewDB.accountLoggedIn=false;buildingPreviewHtml=preview;
-  const pages=state.pages.map(page=>{state.activePageId=page.id;return {id:page.id,name:page.name,path:pageFullPath(page),parentId:page.parentId,kind:page.kind,html:page.code+floatingObjectLayer(page,false)}});
+  const pages=state.pages.map(page=>{state.activePageId=page.id;return {id:page.id,name:page.name,path:pageFullPath(page),parentId:page.parentId,kind:page.kind,html:isolatePageCode(page.code)+floatingObjectLayer(page,false)}});
   state.activePageId=previousPage;previewDB.accountLoggedIn=previousAccountState;buildingPreviewHtml=false;return {username:currentConsoleUser?.username||'',siteName:state.siteName,description:state.description,theme:state.theme,background:state.background,contentWidth:state.contentWidth,pages,forumPosts:[]};
 }
 document.querySelector('#previewSiteBtn').addEventListener('click',async()=>{const button=document.querySelector('#previewSiteBtn');const popup=window.open('about:blank','_blank');button.disabled=true;button.firstChild.textContent='生成中 ';try{await persistDraftSnapshot(JSON.stringify(state));const payload=await consoleRequest('/api/preview',{method:'POST',body:buildPublishPayload(true)});currentConsoleUser.previewId=payload.previewId;updateConsoleAccount();notifyPublishedReload('预览内容已更新');if(popup)popup.location.replace(payload.url);else window.open(payload.url,'_blank');showToast('临时预览已更新')}catch(error){popup?.close();if(error.status===401)showAuthGate('登录已过期，请重新登录');showToast(`预览失败：${error.message}`)}finally{button.disabled=false;button.firstChild.textContent='预览 '}});
