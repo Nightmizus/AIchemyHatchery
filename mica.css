@@ -552,3 +552,12 @@ body {
 .preview-expand-fab { position:fixed;z-index:45;top:14px;right:16px;display:none;height:36px;padding:0 15px;border:1px solid var(--mica-stroke);border-radius:99px;background:var(--mica-card);color:#e6edf3;font-size:12px;font-weight:600;cursor:pointer;box-shadow:var(--mica-shadow);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px) }
 .preview-expand-fab:hover { border-color:var(--mica-hover-line);background:var(--mica-card-strong) }
 .app-shell.preview-hidden .preview-expand-fab { display:block }
+/* Preview collapse/expand animation. */
+.app-shell { transition:grid-template-columns .46s cubic-bezier(.22,.9,.3,1) }
+.workspace { min-width:0;transition:opacity .38s cubic-bezier(.4,0,.2,1),transform .46s cubic-bezier(.22,.9,.3,1) }
+.app-shell.preview-collapsing,.app-shell.preview-expanding { grid-template-columns:var(--sidebar) 0fr }
+.app-shell.preview-collapsing .workspace,.app-shell.preview-expanding .workspace { opacity:0;transform:translateX(36px);overflow:hidden;pointer-events:none }
+.app-shell.preview-settling .sidebar { animation:sidebarSettle .34s cubic-bezier(.22,.9,.3,1) both }
+.app-shell.preview-hidden .preview-expand-fab { animation:sidebarSettle .3s cubic-bezier(.22,.9,.3,1) both }
+@keyframes sidebarSettle { 0% { opacity:.35;transform:translateX(-18px) } 100% { opacity:1;transform:translateX(0) } }
+@media(prefers-reduced-motion:reduce){ .app-shell,.workspace{transition:none}.app-shell.preview-settling .sidebar,.app-shell.preview-hidden .preview-expand-fab{animation:none} }

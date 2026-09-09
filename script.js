@@ -599,15 +599,33 @@ function restoreAiChatHistory(){
 }
 function scrollAiConversation(force=false){const node=document.querySelector('#aiConversation');if(!force&&node.scrollHeight-node.scrollTop-node.clientHeight>120){persistAiChatHistory();return}requestAnimationFrame(()=>{node.scrollTop=node.scrollHeight});persistAiChatHistory()}
 let previewManualState=null;
+let previewAnimTimer=null;
 function updatePreviewVisibility(){
+  if(previewAnimTimer)return;
   const hasContent=state.pages.some(page=>(page.code||'').trim().length>0||(page.elements||[]).length>0||(page.objects||[]).length>0);
   const hidden=previewManualState??!hasContent;
   document.querySelector('.app-shell')?.classList.toggle('preview-hidden',hidden);
 }
 function togglePreviewCollapsed(){
-  const hidden=document.querySelector('.app-shell')?.classList.contains('preview-hidden');
-  previewManualState=!hidden;
-  updatePreviewVisibility();
+  const shell=document.querySelector('.app-shell');if(!shell)return;
+  const hidden=shell.classList.contains('preview-hidden');
+  clearTimeout(previewAnimTimer);
+  if(hidden){
+    // 展开：先回到双栏布局，再从压缩态滑入
+    previewManualState=false;
+    shell.classList.remove('preview-hidden');
+    shell.classList.add('preview-expanding','preview-settling');
+    requestAnimationFrame(()=>requestAnimationFrame(()=>shell.classList.remove('preview-expanding')));
+    previewAnimTimer=setTimeout(()=>{previewAnimTimer=null;shell.classList.remove('preview-settling');updatePreviewVisibility()},560);
+  }else{
+    // 收起：工作区压缩右滑淡出后，再切到居中布局
+    previewManualState=true;
+    shell.classList.add('preview-collapsing');
+    previewAnimTimer=setTimeout(()=>{
+      shell.classList.remove('preview-collapsing');shell.classList.add('preview-hidden','preview-settling');updatePreviewVisibility();
+      previewAnimTimer=setTimeout(()=>{previewAnimTimer=null;shell.classList.remove('preview-settling')},380);
+    },500);
+  }
 }
 document.querySelector('#previewCollapseBtn').addEventListener('click',togglePreviewCollapsed);
 document.querySelector('#previewExpandFab').addEventListener('click',togglePreviewCollapsed);
