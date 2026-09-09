@@ -94,11 +94,28 @@ def neon_db():
 RUNTIME_LOCK = threading.Lock()
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_ATTEMPTS_LOCK = threading.Lock()
+# 通用限流桶（按 "用途:标识" 计数），供验证码发送/校验等敏感接口使用
+RATE_BUCKETS: dict[str, list[float]] = {}
+RATE_BUCKETS_LOCK = threading.Lock()
 PASSWORD_ITERATIONS = 310_000
 CONSOLE_SESSION_DAYS = 7
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 INVITE_PATTERN = re.compile(r"^[0-9a-fA-F]{16}$")
 PREVIEW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32}$")
+
+
+def rate_limit_hit(scope: str, identity: str, limit: int, window: float) -> bool:
+    """记录一次调用；window 秒内超过 limit 次返回 True（漏洞：敏感接口缺少限流）。"""
+    key = f"{scope}:{identity}"
+    now = time.time()
+    with RATE_BUCKETS_LOCK:
+        recent = [item for item in RATE_BUCKETS.get(key, []) if item > now - window]
+        recent.append(now)
+        RATE_BUCKETS[key] = recent
+        if len(RATE_BUCKETS) > 20_000:
+            for stale in [name for name, items in RATE_BUCKETS.items() if not items or items[-1] <= now - window]:
+                RATE_BUCKETS.pop(stale, None)
+        return len(recent) > limit
 # 发布路径会作为 xxx.hatchery.mizusumi.com 的子域名，必须是 DNS label 安全的小写形式（不允许连续短横线）
 SITE_SLUG_PATTERN = re.compile(r"^(?=.{3,32}$)[a-z0-9]+(?:-[a-z0-9]+)*$")
 RESERVED_SITE_SLUGS = frozenset({
@@ -117,11 +134,9 @@ def site_slug_from_host(host: str) -> str | None:
 AI_LOCK = threading.Lock()
 AI_RUN_LOCK = threading.Lock()
 AI_RUN_JOBS_LOCK = threading.Lock()
-AI_PROPOSALS: dict[str, dict] = {}
 AI_BACKUPS: dict[str, dict[str, str]] = {}
 AI_RUN_JOBS: dict[str, dict] = {}
 AI_SOURCE_FILES = ("index.html", "styles.css", "mica.css", "ai-chat.css", "auth.js", "script.js", "viewer.html", "viewer.js", "server.py")
-AI_EDITABLE_SOURCE_FILES = tuple(name for name in AI_SOURCE_FILES if name not in {"server.py", "auth.js"})
 PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/auth.js", "/script.js", "/viewer.js"))
 
 # 写死的站长账号：数字校园号为 20264689 的用户始终是站长（管理员），
@@ -234,12 +249,13 @@ def password_digest(password: str, salt: bytes | None = None, iterations: int = 
 
 def password_matches(password: str, salt_hex: str, expected_hex: str, iterations: int = 0) -> bool:
     """Verify password against stored bcrypt hash."""
+    # 库里可能存着 NULL 或旧格式哈希；此处只能返回 False，不能抛异常（否则 500 泄露内部细节）
+    if not isinstance(expected_hex, str) or not expected_hex:
+        return False
     try:
         return bcrypt.checkpw(password.encode("utf-8"), expected_hex.encode("ascii"))
     except (ValueError, TypeError):
         return False
-        return False
-    return hmac.compare_digest(actual, expected_hex)
 
 
 def user_preview_id(user_id: str) -> str:
@@ -271,7 +287,7 @@ def new_preview_id(cur) -> str:
 def initialize_database() -> None:
     if not NEON_DATABASE_URL:
         sys.exit("缺少 Neon 连接串：请设置 NEON_DATABASE_URL 环境变量，或在 ~/Project/sdszwebsite/.env 写入 DATABASE_URL=...")
-    # "User" / "CampusUser" 属于 sdszwebsite，禁止 CREATE/ALTER。
+    # "User" 属于 sdszwebsite，禁止 CREATE/ALTER。
     ddl = """
     CREATE TABLE IF NOT EXISTS hatchery_user_extras(
         user_id TEXT PRIMARY KEY,
@@ -549,16 +565,54 @@ if not NEON_DATABASE_URL:
     NEON_DATABASE_URL = os.environ.get("NEON_DATABASE_URL", "")
 HOST = os.environ.get("ALCHEMY_HATCHERY_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SECURE_COOKIES = os.environ.get("ALCHEMY_HATCHERY_SECURE_COOKIES", "false").strip().lower() in ("1", "true", "yes", "on")
-COOKIE_SECURITY_SUFFIX = "; Secure" if SECURE_COOKIES else ""
+# 允许被当作自身地址反射（SSO 回调 URL）的 Host，防止 Host 头注入把授权码送到攻击者域名
+ALLOWED_HOSTS = tuple(
+    item.strip().lower()
+    for item in os.environ.get(
+        "ALCHEMY_HATCHERY_ALLOWED_HOSTS", "hatchery.mizusumi.com,localhost,127.0.0.1"
+    ).split(",")
+    if item.strip()
+)
+
+
+def host_is_allowed(host: str) -> bool:
+    """Host 头（含泛域名子站）是否在允许列表内。"""
+    name = host.split(":", 1)[0].strip().lower()
+    return any(name == allowed or name.endswith(f".{allowed}") for allowed in ALLOWED_HOSTS)
+
+
 try:
     PORT = int(os.environ.get("ALCHEMY_HATCHERY_PORT", "4173"))
 except ValueError:
     PORT = 4173
 class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
-    server_version = "AIchemyHatcheryLocal/0.1"
+    server_version = "AIchemyHatchery"
+    sys_version = ""  # 不在 Server 响应头里暴露 Python 版本（指纹信息泄露）
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{self.log_date_time_string()}] {fmt % args}")
+
+    def request_is_https(self) -> bool:
+        return SECURE_COOKIES or self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https"
+
+    def cookie_security(self) -> str:
+        """反向代理已是 HTTPS 时也补上 Secure，避免会话 Cookie 走明文（Cookie 属性缺陷）。"""
+        return "; Secure" if self.request_is_https() else ""
+
+    def request_host(self) -> str:
+        return self.headers.get("Host", "").split(",")[0].strip().lower()
+
+    def same_origin_request(self) -> bool:
+        """CSRF 防护：Cookie 虽是 SameSite=Strict，但用户发布的站点位于同站子域
+        （*.hatchery.mizusumi.com），能借浏览器带上控制台 Cookie 发起写请求。"""
+        host = self.request_host()
+        origin = self.headers.get("Origin", "").strip()
+        if origin:
+            return origin.lower() != "null" and urlparse(origin).netloc.lower() == host
+        referer = self.headers.get("Referer", "").strip()
+        if referer:
+            return urlparse(referer).netloc.lower() == host
+        return True  # 非浏览器客户端不会带 Origin/Referer
 
     def end_headers(self) -> None:
         static_path = urlparse(self.path).path
@@ -569,6 +623,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
+        if self.request_is_https():
+            # 缺少 HSTS：HTTPS 部署下仍可被降级到明文
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         super().end_headers()
 
     def do_HEAD(self) -> None:
@@ -595,9 +652,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json(self) -> dict:
+    def read_json(self, max_bytes: int = 25_000_000) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0 or length > 25_000_000:
+        # 未登录接口用更小的上限，避免单请求吃掉内存（拒绝服务）
+        if length <= 0 or length > max_bytes:
             raise ValueError("请求内容为空或过大")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
@@ -668,7 +726,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         return {
             "Set-Cookie": (
                 f"alchemy_hatchery_console_session={token}; Path=/; Max-Age={max_age}; "
-                f"HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}"
+                f"HttpOnly; SameSite=Strict{self.cookie_security()}"
             )
         }
 
@@ -743,7 +801,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if self.login_is_limited():
             self.send_json({"error": "登录尝试过于频繁，请 5 分钟后再试"}, 429)
             return
-        data = self.read_json()
+        data = self.read_json(64_000)  # 未登录接口限制请求体大小，避免内存型拒绝服务
         identifier = str(data.get("identifier", "") or data.get("username", "")).strip()
         password = str(data.get("password", ""))
         remember = bool(data.get("remember", True))
@@ -781,116 +839,19 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         headers = self.issue_console_session(row["id"], remember)
         self.send_json({"ok": True, "user": self.attach_preview_id(self.public_user(row), row["id"])}, headers=headers)
 
-    def handle_auth_register(self) -> None:
-        if self.login_is_limited():
-            self.send_json({"error": "操作过于频繁，请 5 分钟后再试"}, 429)
-            return
-        data = self.read_json()
-        username, password = self.validate_credentials(data.get("username"), data.get("password"))
-        campus_id = str(data.get("campusId", "")).strip()
-        email = str(data.get("email", "")).strip().lower()
-        code = str(data.get("code", "")).strip()
-        grade = str(data.get("grade", "")).strip()
-        class_group = str(data.get("classGroup", "")).strip()
-        real_name = str(data.get("realName", "")).strip()
-
-        if not campus_id:
-            raise ValueError("请输入数字校园号")
-        if not email:
-            raise ValueError("请输入邮箱")
-        if not code:
-            raise ValueError("请输入邮箱验证码")
-
-        # Validate campus ID & email verification
-        with neon_db() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute('SELECT * FROM "CampusUser" WHERE "campusId" = %s', (campus_id,))
-                campus = cur.fetchone()
-                if not campus:
-                    raise ValueError("数字校园号无效")
-                if campus["registered"]:
-                    raise ValueError("该校园号已注册，请直接登录")
-
-                cur.execute(
-                    "SELECT * FROM email_verifications WHERE email = %s AND code = %s ORDER BY created_at DESC LIMIT 1",
-                    (email, code),
-                )
-                verification = cur.fetchone()
-                if not verification:
-                    raise ValueError("验证码错误")
-                if verification["expires_at"] < iso_time():
-                    raise ValueError("验证码已过期，请重新发送")
-
-                cur.execute('SELECT id FROM "User" WHERE email = %s', (email,))
-                if cur.fetchone():
-                    raise ValueError("该邮箱已注册")
-
-        _, hashed = password_digest(password)
-        initials = username[:2].upper() if len(username) >= 2 else username.upper()
-        colors = ["#E8622A", "#3B82F6", "#22C55E", "#A855F7", "#EC4899", "#F59E0B", "#06B6D4"]
-        avatar_color = colors[hash(username) % len(colors)]
-
-        with neon_db() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                try:
-                    candidate_fields = {
-                        "id": f"local_{secrets.token_hex(8)}",
-                        "email": email,
-                        "campusId": campus_id,
-                        "name": username,
-                        "password": hashed,
-                        "grade": grade,
-                        "classGroup": class_group,
-                        "initials": initials,
-                        "avatarColor": avatar_color,
-                        "isAdmin": False,
-                        "isOwner": False,
-                        "createdAt": datetime.now(timezone.utc).replace(tzinfo=None),
-                    }
-                    fields = {}
-                    for field_name, field_value in candidate_fields.items():
-                        actual = user_column_name(field_name)
-                        if actual:
-                            fields[actual] = field_value
-                    missing = [field_name for field_name in ("id", "email", "campusId", "name", "password") if not user_column_name(field_name)]
-                    if missing:
-                        raise ValueError(f"数据库 User 表缺少必要列：{', '.join(missing)}")
-                    columns_sql = ",".join(f'"{name}"' for name in fields)
-                    placeholders = ",".join(["%s"] * len(fields))
-                    cur.execute(f'INSERT INTO "User"({columns_sql}) VALUES({placeholders})', tuple(fields.values()))
-                    cur.execute(
-                        'UPDATE "CampusUser" SET registered = TRUE WHERE "campusId" = %s AND registered = FALSE',
-                        (campus_id,),
-                    )
-                    if cur.rowcount != 1:
-                        raise ValueError("该校园号已被注册")
-                    cur.execute("DELETE FROM email_verifications WHERE email = %s", (email,))
-                    cur.execute('SELECT * FROM "User" WHERE email = %s', (email,))
-                    row = cur.fetchone()
-                    cur.execute(
-                        "INSERT INTO hatchery_user_extras(user_id,preview_id,created_at) VALUES(%s,%s,%s)",
-                        (row["id"], new_preview_id(cur), iso_time()),
-                    )
-                except psycopg2.IntegrityError as exc:
-                    if "User_name_key" in str(exc) or "name" in str(exc):
-                        raise ValueError("用户名已存在") from exc
-                    if "User_email_key" in str(exc) or "email" in str(exc):
-                        raise ValueError("该邮箱已注册") from exc
-                    if "User_campusId_key" in str(exc) or "campusId" in str(exc):
-                        raise ValueError("该校园号已注册") from exc
-                    raise ValueError("注册数据冲突，请重试") from exc
-        self.clear_login_failures()
-        headers = self.issue_console_session(row["id"], bool(data.get("remember", True)))
-        self.send_json({"ok": True, "user": self.attach_preview_id(self.public_user(row), row["id"])}, 201, headers)
-
     def handle_send_otp(self) -> None:
         if self.login_is_limited():
             self.send_json({"error": "操作过于频繁，请 5 分钟后再试"}, 429)
             return
-        data = self.read_json()
+        data = self.read_json(64_000)
         email = str(data.get("email", "")).strip().lower()
-        if not email or "@" not in email:
+        if not email or "@" not in email or len(email) > 254:
             raise ValueError("请输入有效邮箱地址")
+        # 发信接口原先完全不限流：可被用来轰炸任意邮箱，也能无限刷新验证码
+        address = self.client_address[0] if self.client_address else "unknown"
+        if rate_limit_hit("otp-send-ip", address, 5, 600) or rate_limit_hit("otp-send-mail", email, 3, 600):
+            self.send_json({"error": "验证码发送过于频繁，请 10 分钟后再试"}, 429)
+            return
 
         # Generate 6-digit code
         code = "".join(secrets.choice("0123456789") for _ in range(6))
@@ -931,7 +892,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     server.login(smtp_user, smtp_pass)
                     server.sendmail(smtp_from, [email], msg.as_string())
         except Exception as exc:
-            self.send_json({"error": f"发送邮件失败：{exc}"}, 500)
+            # 不回显 SMTP 异常（会暴露邮件服务器地址、账号等内部信息）
+            print(f"[otp] 发送验证码失败：{exc}", file=sys.stderr)
+            self.send_json({"error": "发送邮件失败，请稍后再试"}, 500)
             return
 
         self.send_json({"ok": True, "message": "验证码已发送，10 分钟内有效"})
@@ -946,11 +909,20 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json(
             {"ok": True},
             headers={"Set-Cookie": [
-                f"alchemy_hatchery_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
+                f"alchemy_hatchery_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{self.cookie_security()}",
             ]},
         )
 
     # ── SSO (via sdsz) ──────────────────────────────────────────────
+
+    def safe_return_path(self, value: str) -> str:
+        """只接受站内绝对路径；"//evil.com" 与 "/\\evil.com" 会被浏览器当作外站（开放重定向）。"""
+        candidate = (value or "").strip()
+        if not candidate.startswith("/") or candidate.startswith("//") or candidate.startswith("/\\"):
+            return "/"
+        if "\r" in candidate or "\n" in candidate:  # 顺带挡住响应头注入
+            return "/"
+        return candidate
 
     def handle_sso_authorize(self) -> None:
         """Redirect user to sdsz login page. After login, sdsz redirects back with a code."""
@@ -959,13 +931,16 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
-        return_to = params.get("returnTo", ["/"])[0]
         # Sanitize: only allow relative paths
-        if not return_to.startswith("/"):
-            return_to = "/"
+        return_to = self.safe_return_path(params.get("returnTo", ["/"])[0])
+        base_url = self._base_url()
+        if base_url is None:
+            # Host 头不在允许列表内：拒绝，否则回调地址会被指向攻击者域名（Host 头注入）
+            self.send_json({"error": "请求的站点地址不被允许"}, 400)
+            return
         state = secrets.token_urlsafe(16)
         # Store state in a short-lived cookie for CSRF protection
-        callback_url = f"{self._base_url()}/api/auth/sso/callback"
+        callback_url = f"{base_url}/api/auth/sso/callback"
         sdsz_login = (
             f"{SDSZ_BASE_URL}/login"
             f"?intent=sso"
@@ -975,10 +950,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", sdsz_login)
         self.send_header("Set-Cookie",
-            f"sso_state={state}; Path=/api/auth/sso; Max-Age=300; HttpOnly; SameSite=Lax{COOKIE_SECURITY_SUFFIX}")
+            f"sso_state={state}; Path=/api/auth/sso; Max-Age=300; HttpOnly; SameSite=Lax{self.cookie_security()}")
         # Also store returnTo
         self.send_header("Set-Cookie",
-            f"sso_return_to={urlparse_mod.quote(return_to)}; Path=/api/auth/sso; Max-Age=300; HttpOnly; SameSite=Lax{COOKIE_SECURITY_SUFFIX}")
+            f"sso_return_to={urlparse_mod.quote(return_to)}; Path=/api/auth/sso; Max-Age=300; HttpOnly; SameSite=Lax{self.cookie_security()}")
         self.end_headers()
 
     def handle_sso_callback(self) -> None:
@@ -1039,9 +1014,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         return_to = "/"
         return_to_cookie = cookies.get("sso_return_to")
         if return_to_cookie:
-            decoded = urlparse_mod.unquote(return_to_cookie.value)
-            if decoded.startswith("/"):
-                return_to = decoded
+            return_to = self.safe_return_path(urlparse_mod.unquote(return_to_cookie.value))
 
         # Clear SSO cookies, set session cookie, redirect
         self.send_response(302)
@@ -1049,16 +1022,19 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         for key, value in headers.items():
             self.send_header(key, value)
         self.send_header("Set-Cookie",
-            f"sso_state=; Path=/api/auth/sso; Max-Age=0; HttpOnly{COOKIE_SECURITY_SUFFIX}")
+            f"sso_state=; Path=/api/auth/sso; Max-Age=0; HttpOnly; SameSite=Lax{self.cookie_security()}")
         self.send_header("Set-Cookie",
-            f"sso_return_to=; Path=/api/auth/sso; Max-Age=0; HttpOnly{COOKIE_SECURITY_SUFFIX}")
+            f"sso_return_to=; Path=/api/auth/sso; Max-Age=0; HttpOnly; SameSite=Lax{self.cookie_security()}")
         self.end_headers()
 
-    def _base_url(self) -> str:
-        """Best-effort base URL from request headers."""
-        proto = self.headers.get("X-Forwarded-Proto", "http")
-        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host", f"localhost:{PORT}")
-        return f"{proto}://{host}"
+    def _base_url(self) -> str | None:
+        """Best-effort base URL from request headers；Host/X-Forwarded-Host 必须在允许列表内。"""
+        proto = "https" if self.request_is_https() else "http"
+        for candidate in (self.headers.get("X-Forwarded-Host", ""), self.headers.get("Host", "")):
+            host = candidate.split(",")[0].strip()
+            if host and host_is_allowed(host):
+                return f"{proto}://{host}"
+        return None
 
     def handle_change_password(self) -> None:
         user = self.require_console_user()
@@ -1161,10 +1137,12 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
+            # CSRF：所有写操作都要求同源发起（原先仅依赖 SameSite=Strict，同站子域可绕过）
+            if not self.same_origin_request():
+                self.send_json({"error": "请求来源不被允许"}, 403)
+                return
             if path == "/api/auth/login":
                 self.handle_auth_login()
-            elif path == "/api/auth/register":
-                self.handle_auth_register()
             elif path == "/api/auth/send-otp":
                 self.handle_send_otp()
             elif path == "/api/auth/logout":
@@ -1179,9 +1157,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_save_draft()
             elif path == "/api/site-account/reset-owner":
                 self.handle_site_owner_reset()
-            elif path in ("/api/ai", "/api/ai/propose"):
-                if self.require_console_user():
-                    self.handle_ai_propose()
             elif path == "/api/ai/run":
                 user = self.require_console_user()
                 if user:
@@ -1189,14 +1164,13 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                         self.handle_ai_run_start(user)
                     else:
                         self.handle_ai_run(user)
-            elif path == "/api/ai/apply":
-                if self.require_console_user():
-                    self.handle_ai_apply()
             elif path == "/api/ai/undo":
-                if self.require_console_user():
+                # 越权：这个接口直接改写平台源码，只有管理员可用
+                if self.require_console_user(admin=True):
                     self.handle_ai_undo()
             elif path == "/api/server/restart":
-                if self.require_console_user():
+                # 越权：重启服务是全站影响，原先任何登录用户都能触发（拒绝服务）
+                if self.require_console_user(admin=True):
                     self.handle_server_restart()
             elif path == "/api/preview":
                 self.handle_preview()
@@ -1244,11 +1218,13 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         except RuntimeError as exc:
             self.send_json({"error": str(exc)}, 502)
         except Exception as exc:
-            self.send_json({"error": f"本地服务错误：{exc}"}, 500)
+            # 不把内部异常（数据库报错、SQL 片段、文件路径等）回显给客户端
+            print(f"[error] POST {self.path}：{type(exc).__name__}: {exc}", file=sys.stderr)
+            self.send_json({"error": "服务器内部错误，请稍后重试"}, 500)
     # DeepSeek Harness is the only automatic execution engine. Its file access is
     # confined to the current website's own folder (sites/<user_id>/); the AI may
     # not read or modify anything else on the host.
-    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, include_source: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, progress=None) -> dict:
+    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, progress=None) -> dict:
         run_id = f"run-{secrets.token_hex(10)}"
         site_state = context.get("site") if isinstance(context, dict) else None
         if not isinstance(site_state, dict) or not isinstance(site_state.get("pages"), list):
@@ -1305,10 +1281,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 "risk": result.get("risk", "medium"),
                 "assumptions": [],
                 "siteOperations": result.get("siteOperations", []),
-                "sourceChanges": [],
                 "checks": result.get("checks", []),
             },
-            False,
             context,
         )
         proposal = self.constrain_instance_intent(proposal, prompt, context)
@@ -1355,18 +1329,15 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             if not isinstance(page, dict) or not isinstance(page.get("elements", []), list):
                 raise ValueError("AI 修改后的页面数据结构无效，本次任务已中止")
 
-    def validate_ai_proposal(self, proposal: dict, include_source: bool, context: dict | None = None) -> dict:
+    def validate_ai_proposal(self, proposal: dict, context: dict | None = None) -> dict:
         if not isinstance(proposal, dict):
             raise ValueError("DeepSeek Harness 返回的方案不是对象")
         proposal["summary"] = str(proposal.get("summary", "AI 已生成修改方案"))[:500]
         if proposal.get("risk") not in ("low", "medium", "high"):
             proposal["risk"] = "medium"
         operations = proposal.get("siteOperations", [])
-        changes = proposal.get("sourceChanges", [])
         if not isinstance(operations, list) or len(operations) > 40:
             raise ValueError("站点修改操作格式错误或数量过多")
-        if not isinstance(changes, list) or len(changes) > 12:
-            raise ValueError("源码修改格式错误或数量过多")
         allowed_ops = {"set_site", "set_page", "add_page", "remove_page", "add_element", "update_element", "remove_element", "move_element", "set_items"}
         valid_element_types = None
         if isinstance(context, dict) and isinstance(context.get("elementTypes"), list):
@@ -1382,17 +1353,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 continue
             kept_operations.append(operation)
         operations = kept_operations
-        normalized_changes = []
-        for change in changes if include_source else []:
-            if not isinstance(change, dict) or change.get("path") not in AI_EDITABLE_SOURCE_FILES:
-                raise ValueError("网站代理尝试修改未授权文件")
-            search = str(change.get("search", ""))
-            replace = str(change.get("replace", ""))
-            if not search or len(search) > 60_000 or len(replace) > 60_000:
-                raise ValueError("源码修改片段为空或过大")
-            normalized_changes.append({"path": change["path"], "search": search, "replace": replace, "reason": str(change.get("reason", "修改源码"))[:300]})
         proposal["siteOperations"] = operations
-        proposal["sourceChanges"] = normalized_changes
         proposal["assumptions"] = [str(item)[:300] for item in proposal.get("assumptions", []) if str(item).strip()][:10]
         proposal["checks"] = [str(item)[:300] for item in proposal.get("checks", []) if str(item).strip()][:10]
         if dropped_types:
@@ -1451,18 +1412,16 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             else:
                 operations = [{"op": "update_element", "pageId": active_page.get("id"), "elementId": element.get("id"), "settings": settings}]
         proposal["siteOperations"] = operations
-        proposal["sourceChanges"] = []
         proposal["risk"] = "low"
         proposal["summary"] = f"仅修改当前{('首页大字' if target_type == 'hero' else '公告栏')}实例；已阻止全局样式和源码改动。"
         proposal["checks"] = ["检查当前模块实例立即变化", "检查同类模块与后续新增模块保持默认样式"]
         return proposal
 
-    def prepare_ai_run(self) -> tuple[str, dict, bool, bool, list[dict], list[str]]:
+    def prepare_ai_run(self) -> tuple[str, dict, bool, list[dict], list[str], list[dict]]:
         payload = self.read_json()
         prompt = str(payload.get("prompt", "")).strip()
         context = payload.get("context", {})
         include_site = bool(payload.get("includeSite", True))
-        include_source = bool(payload.get("includeSource", True))
         raw_attachments = payload.get("attachments", [])
         raw_presets = payload.get("chosenPresets", [])
         if not isinstance(raw_presets, list) or len(raw_presets) > 20:
@@ -1515,15 +1474,15 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             if total_attachment_size > 8 * 1024 * 1024:
                 raise ValueError("附件总大小不能超过 8 MB")
             attachments.append({"name": name, "kind": kind, "type": mime_type, "content": content})
-        return prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets
+        return prompt, context, include_site, attachments, chosen_presets, preset_snippets
 
     def handle_ai_run(self, user: dict) -> None:
-        prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         provider_name, model = current_ai_provider_model()
         try:
-            result = self.run_ai_harness(user, prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets)
+            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets)
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
         except Exception:
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, None, "failed")
@@ -1533,7 +1492,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
-        prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets = self.prepare_ai_run()
         if not AI_RUN_LOCK.acquire(blocking=False):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
@@ -1560,7 +1519,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         def worker() -> None:
             provider_name, model = current_ai_provider_model()
             try:
-                result = self.run_ai_harness(user, prompt, context, include_site, include_source, attachments, chosen_presets, preset_snippets, progress=progress)
+                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, progress=progress)
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
@@ -1600,62 +1559,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 "error": job.get("error"),
             }
         self.send_json(payload)
-    def handle_ai_propose(self) -> None:
-        raise ValueError("方案确认接口已停用；DeepSeek Harness 只通过 /api/ai/run 自动执行")
-
-    def validate_changed_sources(self, contents: dict[str, str]) -> None:
-        if "server.py" in contents:
-            compile(contents["server.py"], str(ROOT / "server.py"), "exec")
-        node = shutil.which("node")
-        if not node:
-            bundled = Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "node" / "bin" / "node.exe"
-            node = str(bundled) if bundled.exists() else None
-        if node:
-            for name in ("auth.js", "script.js", "viewer.js"):
-                if name not in contents:
-                    continue
-                check_file = ROOT / f".{name}.ai-check.js"
-                try:
-                    write_text_exact(check_file, contents[name])
-                    checked = subprocess.run([node, "--check", str(check_file)], capture_output=True, text=True, timeout=20)
-                    if checked.returncode:
-                        raise ValueError(f"{name} 语法检查失败：{checked.stderr.strip()[:500]}")
-                finally:
-                    check_file.unlink(missing_ok=True)
-
-    def handle_ai_apply(self) -> None:
-        proposal_id = str(self.read_json().get("proposalId", ""))
-        with AI_LOCK:
-            proposal = AI_PROPOSALS.get(proposal_id)
-        if not proposal:
-            raise ValueError("修改方案已失效，请重新生成")
-        changes = proposal.get("sourceChanges", [])
-        originals: dict[str, str] = {}
-        updated: dict[str, str] = {}
-        for change in changes:
-            name = change["path"]
-            if name not in originals:
-                originals[name] = read_text_exact(ROOT / name)
-                updated[name] = originals[name]
-            if updated[name].count(change["search"]) != 1:
-                raise ValueError(f"{name} 的目标代码已变化，未应用任何修改")
-            updated[name] = updated[name].replace(change["search"], change["replace"], 1)
-        self.validate_changed_sources(updated)
-        if updated:
-            backup_dir = ROOT / ".ai-backups" / proposal_id
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                for name, content in originals.items():
-                    write_text_exact(backup_dir / name, content)
-                for name, content in updated.items():
-                    write_text_exact(ROOT / name, content)
-            except Exception:
-                for name, content in originals.items():
-                    write_text_exact(ROOT / name, content)
-                raise
-        with AI_LOCK:
-            AI_BACKUPS[proposal_id] = originals
-        self.send_json({"ok": True, "changedFiles": list(updated), "restartRequired": "server.py" in updated, "undoAvailable": bool(updated)})
 
     def handle_ai_undo(self) -> None:
         proposal_id = str(self.read_json().get("proposalId", ""))
@@ -1952,7 +1855,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     (token_hash, site_username, user_id, iso_time(created_at), iso_time(expires_at)),
                 )
         cookie_name = self.site_cookie_name(site_username)
-        return {"Set-Cookie": f"{cookie_name}={token}; Path=/; Max-Age={CONSOLE_SESSION_DAYS * 86400}; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}"}
+        return {"Set-Cookie": f"{cookie_name}={token}; Path=/; Max-Age={CONSOLE_SESSION_DAYS * 86400}; HttpOnly; SameSite=Strict{self.cookie_security()}"}
 
     def require_published_user(self, site_username: str) -> str | None:
         user = self.published_session_user(site_username)
@@ -1967,7 +1870,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if self.login_is_limited():
             self.send_json({"error": "登录尝试过于频繁，请稍后再试"}, 429)
             return
-        data = self.read_json()
+        data = self.read_json(64_000)  # 未登录接口限制请求体大小，避免内存型拒绝服务
         username, password = str(data.get("username", "")).strip(), str(data.get("password", ""))
         with neon_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1991,7 +1894,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if not self.site_account_enabled(site_username) or not site_account_initialized(site_username):
             self.send_json({"error": "该站点未启用账号系统"}, 404)
             return
-        data = self.read_json()
+        data = self.read_json(64_000)  # 未登录接口限制请求体大小，避免内存型拒绝服务
         username, password = self.validate_credentials(data.get("username"), data.get("password"))
         registration_mode = self.site_registration_mode(site_username)
         invite = str(data.get("invite", "")).strip().lower()
@@ -2046,7 +1949,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                         (token_hash, site_username),
                     )
         self.send_json({"ok": True}, headers={"Set-Cookie": [
-            f"{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{COOKIE_SECURITY_SUFFIX}",
+            f"{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{self.cookie_security()}",
         ]})
 
     def handle_forum_topic(self, site_username: str) -> None:
@@ -2544,15 +2447,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             user = identity["username"] if identity else None
             registration_mode = self.site_registration_mode(site_username) if self.site_account_enabled(site_username) and site_account_initialized(site_username) else "closed"
             self.send_json({"user": user, "role": identity["role"] if identity else None, "registrationMode": registration_mode, "accountEnabled": self.site_account_enabled(site_username), "forumPosts": runtime["forumPosts"], "registrations": runtime["registrations"].get(user, []) if user else [], "joined": user in runtime["joinedUsers"] if user else False})
-            return
-        site_match = re.fullmatch(r"/api/site/([A-Za-z0-9_-]{3,32})", parsed.path)
-        if site_match:
-            site_username = site_match.group(1)
-            site_file = PUBLISHED / site_username / "site.json"
-            if not site_file.exists():
-                self.send_json({"error": "尚未发布"}, 404)
-            else:
-                self.send_json(json.loads(site_file.read_text(encoding="utf-8")))
             return
         pages_match = re.match(r"^/pages/([A-Za-z0-9_-]{3,32})(?:/|$)", parsed.path)
         if pages_match:

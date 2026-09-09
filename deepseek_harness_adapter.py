@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -92,6 +93,27 @@ class HarnessRuntimeError(RuntimeError):
     pass
 
 
+# 漏洞（密钥经子进程环境泄露）：原先把整份服务端环境（NEON_DATABASE_URL、SSO_SECRET、
+# EMAIL_PASS、另一家厂商的 API Key）复制给第三方运行时；这里只保留本次任务需要的那一个 Key。
+_SENSITIVE_ENV = re.compile(r"SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|DATABASE_URL|_PASS$|_TOKEN$|API_KEY$")
+
+
+def _child_env(keep_env_name: str) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name == keep_env_name or not _SENSITIVE_ENV.search(name.upper())
+    }
+
+
+def _redact(text: str, secrets: tuple[str, ...]) -> str:
+    # 漏洞（凭据写入日志/错误回显）：运行时输出可能带出 API Key 原文，先逐个替换掉。
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
 def _extract_json_object(text: str) -> dict | None:
     candidate = text.strip()
     if not candidate:
@@ -142,11 +164,12 @@ def harness_status(root: Path) -> dict:
 
 
 class _JsonRpcRuntime:
-    def __init__(self, args: list[str], cwd: Path, env: dict[str, str], timeout: float) -> None:
+    def __init__(self, args: list[str], cwd: Path, env: dict[str, str], timeout: float, secrets: tuple[str, ...] = ()) -> None:
         self.args = args
         self.cwd = cwd
         self.env = env
         self.timeout = timeout
+        self.secrets = secrets
         self.process: subprocess.Popen[str] | None = None
         self.responses: dict[str, queue.Queue] = {}
         self.notifications: queue.Queue = queue.Queue()
@@ -220,7 +243,8 @@ class _JsonRpcRuntime:
         if isinstance(item, BaseException):
             raise item
         if isinstance(item, dict) and isinstance(item.get("error"), dict):
-            message = str(item["error"].get("message", "JSON-RPC error"))
+            # 漏洞（信息泄露）：上游/运行时错误原文会被 server.py 以 502 回显给浏览器，先脱敏并截断。
+            message = _redact(str(item["error"].get("message", "JSON-RPC error")), self.secrets)[:500]
             raise HarnessRuntimeError(f"DeepSeek Harness：{message}{self._diagnostics()}")
         return item.get("result") if isinstance(item, dict) else item
 
@@ -289,12 +313,15 @@ class _JsonRpcRuntime:
         if process is None or process.stderr is None:
             return
         for line in process.stderr:
-            self.stderr.append(line.rstrip())
+            self.stderr.append(_redact(line.rstrip(), self.secrets))
 
     def _diagnostics(self) -> str:
+        # 漏洞（信息泄露）：运行时 stderr（宿主绝对路径、上游响应正文、可能的凭据）原样拼进
+        # HarnessRuntimeError，再被 server.py 以 502 返回给浏览器；改为只写服务端日志。
         if not self.stderr:
             return ""
-        return "\n运行时诊断：\n" + "\n".join(self.stderr)[-4000:]
+        print("[deepseek-harness] 运行时诊断：\n" + "\n".join(self.stderr), file=sys.stderr, flush=True)
+        return "（运行时诊断已写入服务端日志）"
 
 
 class _EventProjector:
@@ -496,7 +523,7 @@ def run_deepseek_harness(
     timeout = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "600"))))
     max_tokens = max(1024, min(131072, int(os.environ.get("DEEPSEEK_MAX_TOKENS", "32768"))))
 
-    env = os.environ.copy()
+    env = _child_env(provider["key_env"])
     env.update(
         {
             "DSH_HOME": str(dsh_home),
@@ -512,7 +539,7 @@ def run_deepseek_harness(
     projector = _EventProjector(progress)
     session_id = f"miaoda-{uuid.uuid4().hex}"
 
-    with _JsonRpcRuntime(args, root, env, timeout) as runtime:
+    with _JsonRpcRuntime(args, root, env, timeout, secrets=(key,)) as runtime:
         initialize: dict = {"cwd": str(root.resolve()), "provider": provider["route"], "model": model, "maxTokens": max_tokens}
         if reasoning:
             initialize["reasoningEffort"] = reasoning

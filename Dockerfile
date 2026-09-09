@@ -16,7 +16,17 @@ COPY deepseek_harness ./deepseek_harness
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
+# 漏洞（容器以 root 运行）：任何写入或命令执行缺陷都直接拿到容器 root，并可改写 /app 下的
+# server.py 等应用源码。改为固定 UID 的非特权用户；运行时目录在构建期就赋好执行位与归属。
+RUN useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin appuser
+RUN find /usr/local/lib/python3.12/site-packages/deepseek_harness_runtime/runtime \
+        -maxdepth 1 -type f -name 'deepseek-harness-sdk-runtime-*' ! -name '*-rg*' \
+        -exec chmod 0755 {} + 2>/dev/null || true
+RUN mkdir -p /app/published /app/sites && chown -R appuser:appuser /app
+USER appuser
+
 # 数据目录（published/、sites/）由卷挂载提供；.env 由 --env-file 注入
+# 用 bind mount 挂载数据目录时，宿主目录需先 chown 10001:10001，容器内才写得进去
 EXPOSE 4173
 
 ENTRYPOINT ["./docker-entrypoint.sh"]
