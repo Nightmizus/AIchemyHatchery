@@ -272,6 +272,13 @@ async function* streamCall(options, connection, resolveApiKey, fetchImpl) {
     })
   }
   if (!response.body) throw llmError('llm-kimi: Kimi API returned no response body', 'EMPTY_RESPONSE')
+  const contentType = String(response.headers.get('content-type') ?? '').toLowerCase()
+  if (!contentType.includes('text/event-stream')) {
+    // HTTP 200 但正文不是 SSE（限流页、WAF 挑战页、透明代理错误页）：直接 JSON.parse 会得到
+    // “Unexpected token '<'” 这种看不懂的报错，这里换成可读提示。
+    const text = (await response.text().catch(() => '')).slice(0, 300)
+    throw llmError(`llm-kimi: 模型服务没有返回流式数据（content-type: ${contentType || '未知'}），可能是限流、网关拦截或 API 地址错误。响应片段：${text}`, 'MALFORMED_RESPONSE')
+  }
   yield* translate(response.body)
 }
 
