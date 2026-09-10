@@ -31,7 +31,8 @@
     try {
       payload = await response.json();
     } catch {
-      payload = { error: '服务返回了无法解析的内容' };
+      // 非 JSON 响应（多半是代理/网关的 HTML 错误页）：带上状态码，方便定位是哪一层出的问题
+      payload = { error: `服务返回了无法解析的内容（HTTP ${response.status}，可能是服务重启中或网关故障）` };
     }
     if (!response.ok) {
       const error = new Error(payload.error || `请求失败（${response.status}）`);
