@@ -530,7 +530,7 @@ let aiAttachments=[];
 const formatAiFileSize=size=>size<1024?`${size} B`:size<1024*1024?`${Math.ceil(size/1024)} KB`:`${(size/1024/1024).toFixed(1)} MB`;
 const aiFileExtension=name=>String(name).split('.').pop().toLowerCase();
 function renderAiAttachments(){updateAiContextRing();
-  const strip=document.querySelector('#aiAttachmentStrip');strip.hidden=!aiAttachments.length;strip.innerHTML=aiAttachments.map(item=>`<article class="ai-attachment-chip">${item.kind==='image'?`<img src="${esc(item.content)}" alt="">`:`<i>${esc(aiFileExtension(item.name).slice(0,4).toUpperCase()||'FILE')}</i>`}<span><b>${esc(item.name)}</b><small>${formatAiFileSize(item.size)}</small></span><button type="button" data-ai-remove-attachment="${esc(item.id)}" aria-label="移除 ${esc(item.name)}">×</button></article>`).join('');document.querySelector('#aiAttachmentMeta').textContent=aiAttachments.length?`${aiAttachments.length}/${AI_ATTACHMENT_LIMIT} · ${formatAiFileSize(aiAttachments.reduce((sum,item)=>sum+item.size,0))}`:'可添加图片或文件';
+  const strip=document.querySelector('#aiAttachmentStrip');strip.hidden=!aiAttachments.length;strip.innerHTML=aiAttachments.map(item=>`<article class="ai-attachment-chip">${item.kind==='image'?`<img src="${esc(item.content)}" alt="">`:`<i>${esc(aiFileExtension(item.name).slice(0,4).toUpperCase()||'FILE')}</i>`}<span><b>${esc(item.name)}</b><small>${formatAiFileSize(item.size)}</small></span><button type="button" data-ai-remove-attachment="${esc(item.id)}" aria-label="移除 ${esc(item.name)}">×</button></article>`).join('');document.querySelector('#aiAttachBtn').title=aiAttachments.length?`已添加 ${aiAttachments.length}/${AI_ATTACHMENT_LIMIT} 个附件 · ${formatAiFileSize(aiAttachments.reduce((sum,item)=>sum+item.size,0))}`:'添加图片或文件';
 }
 async function addAiAttachments(files){
   for(const file of files){
@@ -560,7 +560,7 @@ function aiContextUsage(){
 function updateAiContextRing(){
   const ring=document.querySelector('#aiContextRing');if(!ring)return;
   const used=aiContextUsage();
-  const circumference=125.66;
+  const circumference=113.1;
   ring.style.strokeDashoffset=String(circumference*(1-Math.max(used,0.12)));
   ring.closest('svg')?.classList.toggle('is-visible',used>=0.10);
   const wrap=document.querySelector('#aiSendWrap');
