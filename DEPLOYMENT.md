@@ -30,9 +30,30 @@
 
 ## 更新代码
 
-停止旧进程，保留 `.env`、`alchemy_hatchery.db` 和 `published/`，执行 `git pull --ff-only` 后重新启动。数据库表会在启动时自动补齐，不会覆盖已有账号；旧品牌版本的控制台数据库会在首次启动时自动迁移。
+停止旧进程，保留 `.env`、数据库和 `published/`，执行 `git pull --ff-only` 后重新启动。数据库表会在启动时自动补齐，不会覆盖已有账号；旧品牌版本的控制台数据库会在首次启动时自动迁移。
 
 生产环境建议使用独立的低权限系统用户运行服务，并在 Caddy、Nginx 等反向代理后启用 HTTPS。不要直接公开数据库文件或项目目录的静态文件访问。
+
+## Docker 部署（当前生产形态，2026-09 验证）
+
+镜像自带 Chromium（AI 浏览器验证工具）与 dsh 运行时（`deepseek-harness-runtime-bin` wheel）。构建上下文只需 Dockerfile 里 COPY 的文件：
+
+```bash
+tar czf deploy.tgz server.py deepseek_harness_adapter.py index.html viewer.html \
+  script.js styles.css auth.js viewer.js mica.css ai-chat.css \
+  docker-entrypoint.sh requirements.txt deepseek_harness
+# scp 到目标机后：
+tar xzf deploy.tgz -C ~/hatchery
+docker build -t hatchery ~/hatchery
+docker rm -f hatchery
+docker run -d --name hatchery --restart unless-stopped -p 4173:4173 \
+  -e ALCHEMY_HATCHERY_HOST=0.0.0.0 \
+  --env-file ~/hatchery/.env \
+  -v ~/hatchery/published:/app/published \
+  -v ~/hatchery/sites:/app/sites hatchery
+```
+
+**`-e ALCHEMY_HATCHERY_HOST=0.0.0.0` 不能省**：`.env` 里如果存了 `ALCHEMY_HATCHERY_HOST=127.0.0.1`（裸跑时代留的），入口脚本会尊重它，容器绑定回环后端口映射全部失效（外部 000/502，容器内 curl 127.0.0.1:4173 正常）。`-e` 的优先级高于 `--env-file`，是唯一的无侵入覆盖方式。换容器前先 `tar czf` 备份旧代码。
 
 ## 开放发布（泛域名）
 

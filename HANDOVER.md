@@ -23,10 +23,12 @@
 **网站本体（唯一在用的）**：ruixiuzhang 的 Mac（tailscale 主机名 studio/128.local）上的 colima Docker。容器 `hatchery`，4173 端口，`--restart unless-stopped`，卷挂 `~/hatchery/published` 和 `~/hatchery/sites`，env 来自 `~/hatchery/.env`。
 - 我的 tailnet 里它叫 `100.114.192.6`（共享节点）；ruixiuzhang 自己的 tailnet 里叫 `100.114.192.7`
 
-**公网链路（当前是断的，见待办）**：
+**公网链路（2026-09-13 已恢复，全绿）**：
 ```
 浏览器 → Cloudflare(橙云) → Worker hatchery-proxy → hatchery.groovin.cn → 39.106.77.105 nginx → tailnet → Docker
 ```
+- hatchery.groovin.cn 已是正式 Let's Encrypt 证书（2026-09-03 签发，12-02 到期，certbot 应自动续）
+- 39.106 曾整机假死一次后自愈；Mac 上的 colima VM 也挂死过一次（`colima status` 报 "empty value" 但 `colima list` 说 Running、docker.sock 不存在）——解法：`colima stop` 再 `colima start`，容器靠 restart 策略自愈。公网 502 时先分清是哪一段：Mac 本机 curl 200 → 链路问题；000 → 容器/colima 问题
 
 **其他机器**：
 - `ubuntu-vm 100.102.20.81`：裸机 systemd 部署（`~/hatchery`，hatchery.service），已是冗余备份；它到 60.205 的反向隧道服务（hatchery-tunnel.service）已无意义，可停
@@ -45,7 +47,8 @@ rm -f /tmp/.askpass.sh
 ```
 
 - 跳板：本机 tailnet 够不到 128.local 和 60.205 那个 tailnet——先 ssh 到 `60.205.201.242`，再在它上面用同样模式 ssh 到 `100.114.192.7`。嵌套 ssh 记得加 `-n`（不然 stdin 被吃掉，脚本会莫名其妙死掉）
-- 各机器的账号密码在 `.handover-secrets.local`（本目录，已 gitignore，别提交别外发）
+- 原先的凭据文件 `.handover-secrets.local` 已按用户指示销毁（2026-09-13）；需要时找用户要，别写回仓库目录
+- 本机推 GitHub 直连不通：git 不读 Windows 系统代理，要 `git -c http.proxy=http://127.0.0.1:7890 push`（系统 Clash）
 - Mac 上 SSH 非交互 PATH 不带 `/opt/homebrew/bin`，docker/colima 命令要用全路径 `PATH=/opt/homebrew/bin:$PATH`
 - 杀 Windows 进程别用 Git Bash 的 `kill`（不靠谱），用 `powershell Stop-Process -Id <PID> -Force`
 
@@ -57,34 +60,42 @@ rm -f /tmp/.askpass.sh
 - API 级压测：`.shots-venv/ai-hammer.py`（POST 用 curl 传输，别用 urllib——本机代理环境下 urllib 大 body 会卡）
 - node 在 `~/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe`（系统 PATH 没有）
 
-## 6. 待办清单（按优先级）
+## 6. 待办清单（按优先级，2026-09-13 更新）
 
-1. **公网恢复**：39.106 卡死中，用户去阿里云控制台重启 → 重启后给它配 hatchery.groovin.cn 正式证书（certbot webroot，/var/www/acme 和 :80 server block 已就位）→ 或把 groovin.cn 的 DNS 指回 60.205（用它在 Cloudflare 的备案域名身份）二选一
-2. **踢掉 groovin**：Cloudflare Tunnel（128.local 跑 cloudflared 出站直连，整个阿里云层都不需要了）。需要 CF token 带 `Account.Cloudflare Tunnel Edit`。Worker 代码在本地 `/tmp/worker-classic.js`（会话没了就重写，逻辑见第 3 节链路图）
-3. **本地改动上线到 Docker**：有一批未部署的本地改动（AI 任务排队、dsh 停滞帽+秒表+心跳、pg-scope 固定定位围堵、管理后台真名、发送按钮圆形/未配置态、模块禁拖禁删、ChatGPT 式主页）。流水线：`tar czf`（排除 node_modules/.pgsrv/sites/published/.deepseek-harness/.shots-venv/.git/.env）→ scp 60.205 → scp 128.local → `docker build -t hatchery .` → `docker rm -f hatchery && docker run -d --name hatchery --restart unless-stopped -p 4173:4173 --env-file ~/hatchery/.env -v ~/hatchery/published:/app/published -v ~/hatchery/sites:/app/sites hatchery`
+1. ~~公网恢复~~ ✓ 已恢复（39.106 自愈 + colima 重启，证书已是正式 LE）
+2. **踢掉 groovin**：Cloudflare Tunnel（128.local 跑 cloudflared 出站直连，整个阿里云层都不需要了，还能把首页 3.5~5.5s 的延迟和瞬时 5xx 一起消掉）。需要 CF token 带 `Account.Cloudflare Tunnel Edit`（旧 token 全部被用户吊销，需重新申请）
+3. **本地改动上线到 Docker**：流水线（2026-09-13 实战验证过）：
+   `tar czf`（只打 Dockerfile COPY 的文件：server.py、adapter、前端全家、deepseek_harness/、entrypoint、requirements）→ scp 60.205 → scp 128.local → `tar xzf` 进 `~/hatchery` → `docker build -t hatchery .` →
+   `docker rm -f hatchery && docker run -d --name hatchery --restart unless-stopped -p 4173:4173 -e ALCHEMY_HATCHERY_HOST=0.0.0.0 --env-file ~/hatchery/.env -v ~/hatchery/published:/app/published -v ~/hatchery/sites:/app/sites hatchery`
+   **`-e ALCHEMY_HATCHERY_HOST=0.0.0.0` 不能省**（见雷区）。换容器前先 tar 备份旧代码（现存的：~/hatchery-code-backup-20260913.tgz）
 4. **泛域子域名 HTTPS**:CF 免费版证书不含 `*.hatchery.mizusumi.com`（二级子域），要么买 Advanced Certificate($10/月），要么长期用 `/pages/<slug>` 路径
-5. **提交工作区**：我和 Codex 的大量改动都没提交。提交前逐文件 diff 给用户过目
-6. 老站点 `李紫複`（中文 slug）连 `/pages/` 都 404——历史数据，slug 规则不兼容，用户决定要不要迁
-7. mizusumi.com 的 ICP 备案：要根治阿里云拦截只有这一条正路，域名所有者去办
+5. 老站点 `李紫複`（中文 slug）连 `/pages/` 都 404——历史数据，slug 规则不兼容，用户决定要不要迁
+6. mizusumi.com 的 ICP 备案：要根治阿里云拦截只有这一条正路，域名所有者去办
+7. ubuntu-vm 上废弃的 hatchery-tunnel.service 可停（冗余备份本体保留）
+8. Kimi 是周额度（7 天窗口）：耗尽时编辑器会显示琥珀色横幅（/api/ai/status 的 degraded 字段，任务成功自动清除）。一次从零建站约 5~30 万 input tokens，心里有数
 
 ## 7. 雷区（都踩过，别再踩）
 
 - **AI 文件权限沙盒**是用户钦定的（只能碰 `sites/<uid>/`）；AI 不再能改平台代码，所以"让 AI 加代码级功能"（如论坛新功能）现在做不到，需求来了要说明
+- **Mac `.env` 里存着 `ALCHEMY_HATCHERY_HOST=127.0.0.1`**：入口脚本会尊重它，容器就会绑回环断流——docker run 必须带 `-e ALCHEMY_HATCHERY_HOST=0.0.0.0` 覆盖（不要去改共享的 .env 文件）
+- **Kimi 额度类失败**（周限额 403）后端会记降级状态并透出到 /api/ai/status；别只看 `configured:true` 就以为一切正常
 - Codex 并发改文件：Edit 前必 Read 最新内容，写前先 git status
-- Git Bash 嵌套 ssh 吃 stdin（加 `-n`）；heredoc 里 `\n` 转义会被吃掉一层；python 写 `/tmp` 在 Windows 落到 `C:\tmp`，和 Git Bash 的 /tmp 不是一个地方
+- Git Bash 嵌套 ssh 吃 stdin（加 `-n`）；zsh 把 `===` 和 `?` 当特殊字符，远程命令串里别用；python 写 `/tmp` 在 Windows 落到 `C:\tmp`，和 Git Bash 的 /tmp 不是一个地方
+- 本机代理环境：urllib 带 body 的请求会卡死（用 `ProxyHandler({})` 直连），无头 Chromium 访问公网要 `--no-proxy-server` 且本机 IPv6 出口不通（AAAA 在前会卡死，用 `--host-resolver-rules` 固定 IPv4）；生产 DB 操作在容器里 `docker exec python` 跑，连接串不出机器
+- console_sessions 的 created_at/expires_at 是 TEXT 列且服务端用 ISO 'T' 格式字符串比较——注入测试 session 时必须写 `2026-09-13T12:00:00+00:00` 这种格式，写成 PG timestamp 格式（空格分隔）会被判过期
 - 服务器"自重启"假象：`/api/server/restart` 会让老进程退出、新进程接替——任务系统报 failed 不等于真死，先 curl 验证
 - Windows 上 `http.server` 允许同端口多实例同时 LISTEN（SO_REUSEADDR 语义），杀不干净就分流——起了新实例先 `netstat -ano | grep 4173` 确认只有一个
-- PGlite 被任务系统杀掉过一次（输出超 16MiB）→ 日志写文件；WASM 数据目录被强杀会损坏 → 重置 data 目录后手工重建兼容表（User/CampusUser + test 账号，模板在 secrets 文件里）
-- dsh 运行时偶发"活但不说话"（Kimi 侧问题），现在有 300s 停滞帽兜底+清晰报错，别再往下挖
-- **用户 Kimi 额度有限**，冒烟测试一次真实调用就烧几千到几万 token，测试前先想清楚必要性
+- PGlite 连接池满 16 会给新连接写裸文本（psycopg2 报 "expected authentication request from server, but received T"）——serve.mjs 已加 idleTimeout 自动收割半开死连接，别去掉
+- dsh 运行时偶发"活但不说话"（Kimi 侧问题），有 300s 停滞帽兜底+清晰报错，别再往下挖
+- **用户 Kimi 额度有限**，冒烟测试一次真实调用就烧几万到几十万 token，测试前先想清楚必要性
 - 用户对未经请示的合并/部署/动别人机器**非常敏感**——动任何共享状态前先说
 
 ## 8. 快速自检（接手后 5 分钟）
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4173/          # 本地
-curl -s -o /dev/null -w "%{http_code}\n" http://100.114.192.6:4173/     # Docker(tailnet)
-curl -s -o /dev/null -w "%{http_code}\n" https://hatchery.mizusumi.com/ # 公网（修好前是断的）
+curl -s -o /dev/null -w "%{http_code}\n" http://100.114.192.7:4173/     # Docker（要在 60.205 上跑；本机 tailnet 到共享节点不通）
+curl -s -o /dev/null -w "%{http_code}\n" https://hatchery.mizusumi.com/ # 公网
 ```
 
-三个 200 且 `/api/ai/status` 返回 `configured:true` 就是健康的。
+三个 200 且 `/api/ai/status` 返回 `configured:true` 就是健康的（注意看有没有 `degraded` 字段——有就是上游额度出问题了）。本地 tailscaled 在这台 Windows 上常不在跑，tailnet 相关检查走 60.205。

@@ -36,5 +36,9 @@ Thumbs.db
 .pgsrv/data/
 .pgsrv/data.bak-*/
 
+# Python 运行产物
+__pycache__/
+*.pyc
+
 # 交接手册密钥（本地留存）
 .handover-secrets.local
