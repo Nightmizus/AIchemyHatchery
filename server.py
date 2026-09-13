@@ -133,15 +133,46 @@ def site_slug_from_host(host: str) -> str | None:
     return None
 AI_LOCK = threading.Lock()
 AI_RUN_LOCK = threading.Lock()
-# 任务仍标记 running 的秒数上限（harness 默认 600s 超时 + 余量），超过视为泄漏可被看门狗清理
-AI_JOB_STALE_SECONDS = float(os.environ.get("HATCHERY_AI_JOB_STALE_SECONDS", "720"))
+# 看门狗阈值必须大于 harness 自身超时，否则合法的长跑会被强标失败并强制放锁，
+# 而子进程还在继续跑——后续重试会与它并发写同一个 site.json。跟随 DEEPSEEK_HARNESS_TIMEOUT_SECONDS 推导。
+_HARNESS_TIMEOUT_FOR_STALE = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "1200"))))
+AI_JOB_STALE_SECONDS = float(os.environ.get("HATCHERY_AI_JOB_STALE_SECONDS", _HARNESS_TIMEOUT_FOR_STALE * 1.1 + 60))
+# AI_RUN_LOCK 的当前持有者（job id / sync-<hex>）。threading.Lock 不校验释放者，
+# 看门狗强放后老 worker 的 finally 会把新任务刚拿到的锁放掉，造成多个 dsh 并发写同一工作区；
+# 释放前核对令牌，只放自己持有的锁。
+AI_RUN_LOCK_OWNER: str | None = None
+
+
+def ai_run_lock_acquire(owner: str) -> bool:
+    global AI_RUN_LOCK_OWNER
+    if AI_RUN_LOCK.acquire(blocking=False):
+        with AI_RUN_JOBS_LOCK:
+            AI_RUN_LOCK_OWNER = owner
+        return True
+    if not ai_run_lock_reset_stale(time.time()):
+        return False
+    if AI_RUN_LOCK.acquire(blocking=False):
+        with AI_RUN_JOBS_LOCK:
+            AI_RUN_LOCK_OWNER = owner
+        return True
+    return False
+
+
+def ai_run_lock_release(owner: str) -> None:
+    with AI_RUN_JOBS_LOCK:
+        global AI_RUN_LOCK_OWNER
+        if AI_RUN_LOCK_OWNER == owner:
+            AI_RUN_LOCK_OWNER = None
+            AI_RUN_LOCK.release()
 
 
 def ai_run_lock_reset_stale(now: float) -> int:
     """清理超时仍挂起的 AI 任务：标记失败并强制释放全局锁。返回清理的任务数。
-    锁本身可能被 harness 子进程挂起长期占用；超过 harness 自身超时后仍持有即判定为泄漏。"""
+    锁本身可能被 harness 子进程挂起长期占用；超过 harness 自身超时后仍持有即判定为泄漏。
+    只强放"持有者是本次判定泄漏的任务"的锁，避免误放后来者刚拿到的锁。"""
     released = 0
     with AI_RUN_JOBS_LOCK:
+        global AI_RUN_LOCK_OWNER
         stale_ids = [
             key for key, value in AI_RUN_JOBS.items()
             if value.get("status") == "running" and now - float(value.get("createdAt", now)) > AI_JOB_STALE_SECONDS
@@ -149,15 +180,19 @@ def ai_run_lock_reset_stale(now: float) -> int:
         for key in stale_ids:
             AI_RUN_JOBS[key].update({"status": "failed", "error": "任务超时被系统终止"})
             released += 1
-    if released and AI_RUN_LOCK.locked():
-        try:
-            AI_RUN_LOCK.release()
-        except RuntimeError:
-            pass
+        if released and AI_RUN_LOCK.locked() and (AI_RUN_LOCK_OWNER is None or AI_RUN_LOCK_OWNER in stale_ids):
+            AI_RUN_LOCK_OWNER = None
+            try:
+                AI_RUN_LOCK.release()
+            except RuntimeError:
+                pass
     return released
 AI_RUN_JOBS_LOCK = threading.Lock()
 AI_BACKUPS: dict[str, dict[str, str]] = {}
 AI_RUN_JOBS: dict[str, dict] = {}
+# 上游 AI 当前是否处于"额度耗尽"等降级状态：用户一打开编辑器就该知道，
+# 而不是写完需求点发送、白等几秒才收到失败。任务成功即自动清除。
+AI_UPSTREAM_DEGRADED: dict | None = None
 AI_SOURCE_FILES = ("index.html", "styles.css", "mica.css", "ai-chat.css", "auth.js", "script.js", "viewer.html", "viewer.js", "server.py")
 PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/auth.js", "/script.js", "/viewer.js"))
 
@@ -1475,6 +1510,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             })
         if not prompt:
             raise ValueError("调整描述不能为空")
+        if len(prompt) > 20000:
+            raise ValueError("修改描述过长（最多 2 万字符），请精简后重试")
         if not isinstance(context, dict):
             raise ValueError("站点上下文格式错误")
         if not isinstance(raw_attachments, list) or len(raw_attachments) > 4:
@@ -1513,30 +1550,34 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history
 
     def handle_ai_run(self, user: dict) -> None:
+        global AI_UPSTREAM_DEGRADED
         prompt, context, include_site, attachments, chosen_presets, preset_snippets, history = self.prepare_ai_run()
-        if not AI_RUN_LOCK.acquire(blocking=False):
-            if not ai_run_lock_reset_stale(time.time()) or not AI_RUN_LOCK.acquire(blocking=False):
-                raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
+        if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
+            raise ValueError("AI 任务请求过于频繁，请稍后再试")
+        lock_owner = f"sync-{secrets.token_hex(6)}"
+        if not ai_run_lock_acquire(lock_owner):
+            raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         provider_name, model = current_ai_provider_model()
         try:
             result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history)
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
+            AI_UPSTREAM_DEGRADED = None
         except Exception:
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, None, "failed")
+            if "配额已用尽" in str(sys.exc_info()[1]):
+                AI_UPSTREAM_DEGRADED = {"reason": "quota", "message": str(sys.exc_info()[1])[:300], "since": iso_time()}
             raise
         finally:
-            try:
-                AI_RUN_LOCK.release()
-            except RuntimeError:
-                pass  # 锁可能已被超时看门狗强制释放
+            ai_run_lock_release(lock_owner)
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
         prompt, context, include_site, attachments, chosen_presets, preset_snippets, history = self.prepare_ai_run()
-        if not AI_RUN_LOCK.acquire(blocking=False):
-            if not ai_run_lock_reset_stale(time.time()) or not AI_RUN_LOCK.acquire(blocking=False):
-                raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
+        if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
+            raise ValueError("AI 任务请求过于频繁，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
+        if not ai_run_lock_acquire(job_id):
+            raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         now = time.time()
         with AI_RUN_JOBS_LOCK:
             for stale_id in [key for key, value in AI_RUN_JOBS.items() if now - float(value.get("createdAt", now)) > 3600]:
@@ -1558,32 +1599,33 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     job["events"].append(event)
 
         def worker() -> None:
+            global AI_UPSTREAM_DEGRADED
             provider_name, model = current_ai_provider_model()
             try:
                 result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress=progress)
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
+                AI_UPSTREAM_DEGRADED = None
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
                     if job and job.get("status") == "running":
                         job.update({"status": "completed", "result": result})
             except Exception as error:
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, None, "failed")
+                if "配额已用尽" in str(error):
+                    AI_UPSTREAM_DEGRADED = {"reason": "quota", "message": str(error)[:300], "since": iso_time()}
                 with AI_RUN_JOBS_LOCK:
                     job = AI_RUN_JOBS.get(job_id)
                     if job and job.get("status") == "running":
                         job.update({"status": "failed", "error": str(error)[:1000]})
             finally:
-                try:
-                    AI_RUN_LOCK.release()
-                except RuntimeError:
-                    pass  # 锁可能已被超时看门狗强制释放
+                ai_run_lock_release(job_id)
 
         try:
             threading.Thread(target=worker, name=f"hatchery-ai-{job_id[-6:]}", daemon=True).start()
         except Exception:
             with AI_RUN_JOBS_LOCK:
                 AI_RUN_JOBS.pop(job_id, None)
-            AI_RUN_LOCK.release()
+            ai_run_lock_release(job_id)
             raise
         self.send_json({"jobId": job_id, "status": "running"}, 202)
 
@@ -2413,6 +2455,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/ai/status":
             status = harness_status(ROOT)
             status.update({"filePolicy": "site-workspace-only"})
+            if AI_UPSTREAM_DEGRADED:
+                status["configured"] = True  # Key 和运行时仍在，只是上游额度出了问题
+                status["degraded"] = AI_UPSTREAM_DEGRADED
             self.send_json(status)
             return
         ai_preview_match = re.match(r"^/ai-preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
