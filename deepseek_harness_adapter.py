@@ -260,6 +260,10 @@ class _JsonRpcRuntime:
             raise item
         return item
 
+    def exited(self) -> bool:
+        # 供停滞看门狗区分"卡但活着"和"进程真死了"（后者必须立刻报错，不能等停滞帽）
+        return self.process is None or self.process.poll() is not None
+
     def _write(self, payload: dict) -> None:
         process = self.process
         if process is None or process.stdin is None:
@@ -431,6 +435,24 @@ def _finish_reason(events: list[dict]) -> str | None:
     return None
 
 
+def _upstream_failure(events: list[dict]) -> str:
+    """从 finish chunk 里取上游 API 的失败摘要（如 Kimi 403 限额），没有则空串。
+    之前只报 finish_reason='error' 用户完全看不出是额度耗尽还是别的故障。"""
+    for event in reversed(events):
+        if event.get("type") != "assistant/chunk":
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        chunk = data.get("chunk") if isinstance(data.get("chunk"), dict) else {}
+        if chunk.get("type") != "finish":
+            continue
+        reason = chunk.get("reason") if isinstance(chunk.get("reason"), dict) else {}
+        failure = reason.get("failure") if isinstance(reason.get("failure"), dict) else {}
+        message = str(failure.get("message") or "").strip()
+        if message:
+            return message
+    return ""
+
+
 def _token_usage(events: list[dict]) -> dict:
     """Sum token usage across all LLM turns of a run.
 
@@ -520,7 +542,7 @@ def run_deepseek_harness(
     dsh_home.mkdir(parents=True, exist_ok=True)
     model = os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
     reasoning = os.environ.get(provider["effort_env"], "").strip() or provider["default_effort"]
-    timeout = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "600"))))
+    timeout = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "1200"))))
     max_tokens = max(1024, min(131072, int(os.environ.get("DEEPSEEK_MAX_TOKENS", "32768"))))
 
     env = _child_env(provider["key_env"])
@@ -553,9 +575,34 @@ def run_deepseek_harness(
         if not message_id:
             raise HarnessRuntimeError("DeepSeek Harness 未确认本次网站任务")
         deadline = time.monotonic() + timeout
+        stall_seconds = max(120.0, float(os.environ.get("HATCHERY_AI_STALL_SECONDS", "300")))
+        # 只把"本会话的有效事件"算作活跃：运行时可能持续推其他会话/全局通知，
+        # 那些不算进展，否则卡死的会话会被无关心跳掩盖成"活着"。
+        last_useful = time.monotonic()
         received = False
         while True:
-            notification = runtime.next_notification(deadline)
+            # 15 秒一片轮询：整体超时不变；本会话长时间没有有效事件视为卡死，提前终止，
+            # 不再让用户干等满整个 timeout。切片锚定当前时刻——锚 last_useful 的话静默超过
+            # 一片后 slice_end 恒在过去，next_notification 立即抛错不阻塞，循环会热转。
+            slice_end = min(deadline, time.monotonic() + 15.0)
+            try:
+                notification = runtime.next_notification(slice_end)
+            except HarnessRuntimeError:
+                # 运行时进程已死（含"运行时已退出"错误本体）必须立刻上抛，
+                # 否则真死被吞成切片超时，白等满停滞帽还报误导性的"卡死"。
+                if runtime.exited():
+                    raise
+                now = time.monotonic()
+                if now >= deadline:
+                    raise
+                silent = now - last_useful
+                if silent > stall_seconds:
+                    raise HarnessRuntimeError(f"DeepSeek Harness 长时间没有新进展，判定为卡死，任务已终止；请重试{runtime._diagnostics()}")
+                if silent >= 30:
+                    # 静默心跳：让用户看到任务活着（同一 id 原地更新，不刷屏）
+                    elapsed = int(now - (deadline - timeout))
+                    projector._report("dsh-heartbeat", "tool", "AI 工作中", f"已运行 {elapsed} 秒 · 模型静默 {int(silent)} 秒", "running", "")
+                continue
             method = notification.get("method")
             payload = notification.get("params") if isinstance(notification.get("params"), dict) else {}
             if payload.get("sessionId") != session_id:
@@ -570,6 +617,7 @@ def run_deepseek_harness(
                     if any(isinstance(item, dict) and item.get("id") == message_id for item in inserted):
                         received = True
                 if received:
+                    last_useful = time.monotonic()
                     events.append(event)
                     projector.accept(event)
             elif method == "session.status" and received and payload.get("status") == "idle":
@@ -578,7 +626,13 @@ def run_deepseek_harness(
     response = _final_response(events)
     finish_reason = _finish_reason(events)
     if finish_reason not in {None, "completed", "max-tokens"}:
-        raise HarnessRuntimeError(f"DeepSeek Harness 未正常完成网站任务（{finish_reason}）")
+        failure = _upstream_failure(events)
+        if failure:
+            lowered = failure.lower()
+            if any(keyword in lowered for keyword in ("usage limit", "quota", "insufficient", "balance", "billing", "429", "rate limit", "exceeded")):
+                raise HarnessRuntimeError("AI 服务上游配额已用尽（Kimi 返回额度类错误）：等待配额重置、购买额外用量或更换 API Key 后即可恢复")
+            raise HarnessRuntimeError(f"AI 服务上游调用失败：{_redact(failure[:200], (key,))}{runtime._diagnostics()}")
+        raise HarnessRuntimeError(f"DeepSeek Harness 未正常完成网站任务（{finish_reason}）{runtime._diagnostics()}")
     result = _extract_json_object(response)
     if result is None:
         raise HarnessRuntimeError("DeepSeek Harness 最终输出不是可解析的 JSON")
