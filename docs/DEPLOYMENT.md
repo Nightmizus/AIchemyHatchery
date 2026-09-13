@@ -39,12 +39,12 @@
 镜像自带 Chromium（AI 浏览器验证工具）与 dsh 运行时（`deepseek-harness-runtime-bin` wheel）。构建上下文只需 Dockerfile 里 COPY 的文件：
 
 ```bash
-tar czf deploy.tgz server.py deepseek_harness_adapter.py index.html viewer.html \
-  script.js styles.css auth.js viewer.js mica.css ai-chat.css \
-  docker-entrypoint.sh requirements.txt deepseek_harness
+tar czf deploy.tgz Dockerfile server.py deepseek_harness_adapter.py frontend deepseek_harness \
+  docker-entrypoint.sh requirements.txt
+# Dockerfile 必须随包部署：漏了它就会用目标机上的旧 Dockerfile 静默构建出错结构的镜像（新 server.py + 旧扁平布局 = 全站 404）
 # scp 到目标机后：
 tar xzf deploy.tgz -C ~/hatchery
-docker build -t hatchery ~/hatchery
+docker build -t hatchery ~/hatchery  # 必须带 Dockerfile 一起部署：tar 漏了它就会用旧 Dockerfile 静默构建出错结构的镜像
 docker rm -f hatchery
 docker run -d --name hatchery --restart unless-stopped -p 4173:4173 \
   -e ALCHEMY_HATCHERY_HOST=0.0.0.0 \

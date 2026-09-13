@@ -18,7 +18,7 @@ RUN env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -
 
 # 应用代码
 COPY server.py deepseek_harness_adapter.py ./
-COPY index.html viewer.html script.js styles.css auth.js viewer.js mica.css ai-chat.css ./
+COPY frontend ./frontend
 COPY deepseek_harness ./deepseek_harness
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh

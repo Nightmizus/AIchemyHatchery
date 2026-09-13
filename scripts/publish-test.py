@@ -1,7 +1,7 @@
 """发布流程冒烟测试：登录 → 发布 → 占用冲突 → 改名删旧 → 账号系统 → 清理。
 
 用法（需要本地服务与 PGlite 已启动，且存在 pubtest1/pubtest2 两个控制台账号）：
-    python .publish-test.py
+    python scripts/publish-test.py
 """
 import json, os, subprocess, sys, tempfile
 
@@ -14,7 +14,7 @@ def cleanup():
     if "127.0.0.1" not in BASE and "localhost" not in BASE:
         return
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         import server as srv
         with srv.neon_db() as conn:
             with conn.cursor() as cur:

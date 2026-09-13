@@ -193,7 +193,9 @@ AI_RUN_JOBS: dict[str, dict] = {}
 # 上游 AI 当前是否处于"额度耗尽"等降级状态：用户一打开编辑器就该知道，
 # 而不是写完需求点发送、白等几秒才收到失败。任务成功即自动清除。
 AI_UPSTREAM_DEGRADED: dict | None = None
-AI_SOURCE_FILES = ("index.html", "styles.css", "mica.css", "ai-chat.css", "auth.js", "script.js", "viewer.html", "viewer.js", "server.py")
+# 前端静态文件统一放在 frontend/；对外 URL 仍是根路径（/styles.css…），由 handler 翻译
+FRONTEND_DIR = "frontend"
+AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
 PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/auth.js", "/script.js", "/viewer.js"))
 
 # 写死的站长账号：数字校园号为 20264689 的用户始终是站长（管理员），
@@ -688,11 +690,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self.path = "/index.html"
+            self.path = f"/{FRONTEND_DIR}/index.html"
             super().do_HEAD()
             return
         if parsed.path in PUBLIC_STATIC_PATHS:
-            self.path = parsed.path
+            self.path = f"/{FRONTEND_DIR}{parsed.path}"
             super().do_HEAD()
             return
         self.send_error(404, "Not found")
@@ -2566,11 +2568,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.serve_published(parsed.path, pages_match.group(1))
             return
         if parsed.path == "/":
-            self.path = "/index.html"
+            self.path = f"/{FRONTEND_DIR}/index.html"
             super().do_GET()
             return
         if parsed.path in PUBLIC_STATIC_PATHS:
-            self.path = parsed.path
+            self.path = f"/{FRONTEND_DIR}{parsed.path}"
             super().do_GET()
             return
         self.send_error(404, "Not found")
@@ -2619,7 +2621,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             "previewId": preview_id,
             "basePath": f"/ai-preview/{preview_id}",
         }
-        template = (ROOT / "viewer.html").read_text(encoding="utf-8")
+        template = (ROOT / FRONTEND_DIR / "viewer.html").read_text(encoding="utf-8")
         site_data = json.dumps(site, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
         prefix = f"/ai-preview/{preview_id}"
         page_path = path.removeprefix(prefix).strip("/") if path not in (prefix, f"{prefix}/") else ""
@@ -2636,7 +2638,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def serve_preview(self, path: str, preview_id: str, data_json: str) -> None:
-        template = (ROOT / "viewer.html").read_text(encoding="utf-8")
+        template = (ROOT / FRONTEND_DIR / "viewer.html").read_text(encoding="utf-8")
         site = json.loads(data_json)
         site["username"] = "preview"
         site["previewMode"] = True
@@ -2667,7 +2669,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        template = (ROOT / "viewer.html").read_text(encoding="utf-8")
+        template = (ROOT / FRONTEND_DIR / "viewer.html").read_text(encoding="utf-8")
         site = json.loads(site_file.read_text(encoding="utf-8"))
         site["username"] = site_username
         site["previewMode"] = False
