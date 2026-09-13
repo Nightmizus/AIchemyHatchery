@@ -34,3 +34,7 @@ Thumbs.db
 # 本地开发数据库（PGlite）：只提交 serve.mjs 与依赖清单
 .pgsrv/node_modules/
 .pgsrv/data/
+.pgsrv/data.bak-*/
+
+# 交接手册密钥（本地留存）
+.handover-secrets.local
