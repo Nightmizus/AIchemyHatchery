@@ -342,76 +342,7 @@ body {
 }
 .ai-message.user>div { border-color:rgba(240,246,252,.2);background:rgba(240,246,252,.1);color:#e6edf3 }
 
-/* ChatGPT-style composer: one rounded box holding attachments, textarea
-   and the round send button, floating over the conversation. */
-.ai-composer {
-  position:absolute;
-  left:13px;
-  right:13px;
-  bottom:12px;
-  z-index:2;
-  padding:8px;
-  display:flex;
-  flex-direction:column;
-  gap:4px;
-  border:1px solid var(--mica-stroke);
-  border-radius:18px;
-  background:rgba(48,54,61,.92);
-  box-shadow:0 12px 32px rgba(1,4,9,.45);
-  backdrop-filter:blur(24px);
-  -webkit-backdrop-filter:blur(24px);
-}
-.ai-composer-main { display:flex;align-items:flex-end;gap:8px;min-width:0 }
-.ai-attachment-strip { display:flex;flex-wrap:wrap;gap:6px;padding:2px 4px 0 }
-.ai-attachment-chip { display:flex;align-items:center;gap:7px;padding:5px 7px;border:1px solid var(--mica-stroke);border-radius:9px;background:rgba(1,4,9,.35);color:#b1bac4;font-size:8px }
-.ai-attachment-chip img { width:26px;height:26px;border-radius:6px;object-fit:cover }
-.ai-attachment-chip i { min-width:26px;height:26px;display:grid;place-items:center;border-radius:6px;background:rgba(240,246,252,.1);color:#e6edf3;font-style:normal;font-size:6px }
-.ai-attachment-chip span { display:grid;min-width:0 }
-.ai-attachment-chip b { max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600 }
-.ai-attachment-chip small { color:#6e7681 }
-.ai-attachment-chip button { border:0;background:transparent;color:#6e7681;font-size:11px;cursor:pointer }
-.ai-attachment-chip button:hover { color:#e6edf3 }
-.ai-attach-button {
-  width:34px;
-  height:34px;
-  flex:0 0 auto;
-  display:grid;
-  place-items:center;
-  border:1px solid var(--mica-stroke);
-  border-radius:50%;
-  background:transparent;
-  color:#b1bac4;
-  font-size:15px;
-  cursor:pointer;
-}
-.ai-attach-button:hover { border-color:var(--mica-hover-line);color:#e6edf3 }
-.ai-composer textarea {
-  flex:1;
-  min-width:0;
-  min-height:24px;
-  max-height:140px;
-  padding:7px 2px;
-  border:0;
-  background:transparent;
-  box-shadow:none;
-  color:#e6edf3;
-  font-size:10px;
-  line-height:1.5;
-}
-.ai-composer textarea:focus { border:0;box-shadow:none }
-.ai-chat-panel .ai-run {
-  width:34px;
-  height:34px;
-  flex:0 0 auto;
-  display:grid;
-  place-items:center;
-  border:0;
-  border-radius:50%;
-  background:#e6edf3;
-  color:#0d1117;
-}
-.ai-chat-panel .ai-run em { color:#0d1117 }
-.ai-composer-meta { display:flex;justify-content:space-between;padding:0 8px 2px;color:#6e7681;font-size:6px }
+/* ChatGPT-style composer 的全部样式已收敛到 ai-chat.css（mica 玻璃层与实色 pill 叠加会造成拼色双框） */
 
 /* Dark Mica authentication surface. */
 .auth-gate { background:#0d1117;color:#e6edf3 }
@@ -490,9 +421,6 @@ body {
 .ai-typing b { font-size:9px }
 .ai-chat-panel .ai-result { font-size:10px }
 .ai-proposal>p,.ai-proposal .ai-change { font-size:10px }
-.ai-composer textarea { font-size:12px }
-.ai-composer-meta { font-size:8px }
-.ai-attachment-chip { font-size:9px }
 .auth-field>span { font-size:11px }
 .auth-form input { font-size:12px }
 .auth-tabs button { font-size:11px }
@@ -512,9 +440,6 @@ body {
 .ai-proposal>header span { font-size:9px }
 .ai-proposal>p { font-size:12px }
 .ai-change { font-size:11px }
-.ai-composer textarea { font-size:13px }
-.ai-composer-meta { font-size:9px }
-.ai-attachment-chip { font-size:10px }
 .ai-message-files span { font-size:10px }
 .ai-chat-panel .ai-undo { font-size:11px }
 /* VSCode-style activity bar on the far left. */
