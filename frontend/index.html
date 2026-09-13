@@ -7,7 +7,7 @@
   <title>炼丹社Hatchery｜页面编辑器</title>
   <link rel="stylesheet" href="/styles.css?v=20260910-1">
   <link rel="stylesheet" href="/mica.css?v=20260909-1">
-  <link rel="stylesheet" href="/ai-chat.css?v=20260913-1">
+  <link rel="stylesheet" href="/ai-chat.css?v=20260913-2">
 </head>
 <body>
   <section class="auth-gate" id="authGate" data-state="checking" aria-label="炼丹社Hatchery账号登录">
@@ -75,13 +75,27 @@
             <div class="ai-examples"><button>帮我做一个社团招新网站</button><button>做一个摄影作品展示主页</button><button>给班级做一个活动公告页</button></div>
           </div>
           <div class="ai-composer" id="aiComposer">
-            <div class="ai-service-notice" id="aiServiceNotice" hidden></div>
-            <div class="ai-attachment-strip" id="aiAttachmentStrip" aria-label="已添加附件" hidden></div>
-            <div class="ai-composer-main">
-              <button class="ai-attach-button" id="aiAttachBtn" type="button" aria-label="添加图片或文件" title="添加图片或文件">＋</button>
-              <input id="aiFileInput" type="file" multiple hidden accept="image/*,.txt,.md,.json,.csv,.html,.css,.js,.mjs,.ts,.tsx,.jsx,.py,.yml,.yaml,.xml,.svg">
-              <textarea id="aiPrompt" rows="1" aria-label="发送给 AI 的修改要求" placeholder="告诉 AI 你想怎么改…"></textarea>
-              <button class="ai-run" id="aiAdjustBtn" aria-label="发送修改要求"><span>✦</span><b>发送</b><em>↑</em></button>
+            <div class="ai-composer-pill">
+              <div class="ai-service-notice" id="aiServiceNotice" hidden></div>
+              <div class="ai-attachment-strip" id="aiAttachmentStrip" aria-label="已添加附件" hidden></div>
+              <div class="ai-composer-main">
+                <button class="ai-attach-button" id="aiAttachBtn" type="button" aria-label="添加图片或文件" title="添加图片或文件">＋</button>
+                <input id="aiFileInput" type="file" multiple hidden accept="image/*,.txt,.md,.json,.csv,.html,.css,.js,.mjs,.ts,.tsx,.jsx,.py,.yml,.yaml,.xml,.svg">
+                <textarea id="aiPrompt" rows="1" aria-label="发送给 AI 的修改要求" placeholder="询问任何网站改动，或描述你想做的站点…"></textarea>
+                <div class="ai-send-wrap" id="aiSendWrap">
+                  <svg class="ai-context-ring" viewBox="0 0 44 44" aria-hidden="true">
+                    <defs>
+                      <linearGradient id="aiRingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stop-color="#3b82f6"></stop>
+                        <stop offset="100%" stop-color="#10b981"></stop>
+                      </linearGradient>
+                    </defs>
+                    <circle class="ai-ring-track" cx="22" cy="22" r="20"></circle>
+                    <circle class="ai-ring-value" id="aiContextRing" cx="22" cy="22" r="20"></circle>
+                  </svg>
+                  <button class="ai-run" id="aiAdjustBtn" aria-label="发送修改要求"><span>✦</span><b>发送</b><em>↑</em></button>
+                </div>
+              </div>
             </div>
             <div class="ai-composer-meta"><span>Enter 发送 · Shift + Enter 换行</span><span id="aiAttachmentMeta">可添加图片或文件</span></div>
           </div>
@@ -175,6 +189,6 @@
     <button data-context-action="edit">编辑</button>
   </div>
   <script src="/auth.js?v=20260909-1"></script>
-  <script src="/script.js?v=20260913-3"></script>
+  <script src="/script.js?v=20260913-4"></script>
 </body>
 </html>

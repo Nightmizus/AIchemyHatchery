@@ -529,7 +529,7 @@ const AI_TEXT_EXTENSIONS=new Set(['txt','md','json','csv','html','css','js','mjs
 let aiAttachments=[];
 const formatAiFileSize=size=>size<1024?`${size} B`:size<1024*1024?`${Math.ceil(size/1024)} KB`:`${(size/1024/1024).toFixed(1)} MB`;
 const aiFileExtension=name=>String(name).split('.').pop().toLowerCase();
-function renderAiAttachments(){
+function renderAiAttachments(){updateAiContextRing();
   const strip=document.querySelector('#aiAttachmentStrip');strip.hidden=!aiAttachments.length;strip.innerHTML=aiAttachments.map(item=>`<article class="ai-attachment-chip">${item.kind==='image'?`<img src="${esc(item.content)}" alt="">`:`<i>${esc(aiFileExtension(item.name).slice(0,4).toUpperCase()||'FILE')}</i>`}<span><b>${esc(item.name)}</b><small>${formatAiFileSize(item.size)}</small></span><button type="button" data-ai-remove-attachment="${esc(item.id)}" aria-label="移除 ${esc(item.name)}">×</button></article>`).join('');document.querySelector('#aiAttachmentMeta').textContent=aiAttachments.length?`${aiAttachments.length}/${AI_ATTACHMENT_LIMIT} · ${formatAiFileSize(aiAttachments.reduce((sum,item)=>sum+item.size,0))}`:'可添加图片或文件';
 }
 async function addAiAttachments(files){
@@ -548,7 +548,24 @@ document.querySelector('#aiAttachBtn').addEventListener('click',()=>document.que
 document.querySelector('#aiFileInput').addEventListener('change',async event=>{try{await addAiAttachments([...event.target.files])}catch(error){showToast(error.message)}finally{event.target.value=''}});
 document.querySelector('#aiAttachmentStrip').addEventListener('click',event=>{const button=event.target.closest('[data-ai-remove-attachment]');if(!button)return;aiAttachments=aiAttachments.filter(item=>item.id!==button.dataset.aiRemoveAttachment);renderAiAttachments()});
 const aiComposer=document.querySelector('#aiComposer');aiComposer.addEventListener('dragover',event=>{if([...(event.dataTransfer?.types||[])].includes('Files')){event.preventDefault();aiComposer.classList.add('is-file-over')}});aiComposer.addEventListener('dragleave',()=>aiComposer.classList.remove('is-file-over'));aiComposer.addEventListener('drop',async event=>{if(!event.dataTransfer?.files?.length)return;event.preventDefault();aiComposer.classList.remove('is-file-over');try{await addAiAttachments([...event.dataTransfer.files])}catch(error){showToast(error.message)}});
-document.querySelector('#aiPrompt').addEventListener('input',event=>{event.target.style.height='auto';event.target.style.height=`${Math.min(event.target.scrollHeight,120)}px`});
+document.querySelector('#aiPrompt').addEventListener('input',event=>{event.target.style.height='auto';event.target.style.height=`${Math.min(event.target.scrollHeight,180)}px`;updateAiContextRing()});
+function aiContextUsage(){
+  // 粗估本轮会进模型的上下文体量：站点快照 + 已输入 prompt + 对话历史 + 附件文本
+  let chars=0;try{chars+=JSON.stringify(aiSafeSnapshot()).length}catch{}
+  chars+=(document.querySelector('#aiPrompt')?.value||'').length;
+  chars+=aiChatHistoryForContext().reduce((sum,item)=>sum+(item.text||'').length,0);
+  chars+=aiAttachments.reduce((sum,item)=>sum+(item.kind==='text'?(item.content||'').length:4000),0);
+  return Math.min(1,chars/120000);
+}
+function updateAiContextRing(){
+  const ring=document.querySelector('#aiContextRing');if(!ring)return;
+  const used=aiContextUsage();
+  const circumference=125.66;
+  ring.style.strokeDashoffset=String(circumference*(1-Math.max(used,0.12)));
+  ring.closest('svg')?.classList.toggle('is-visible',used>=0.10);
+  const wrap=document.querySelector('#aiSendWrap');
+  if(wrap)wrap.title=used>=0.10?`本轮上下文约占 ${Math.round(used*100)}%`:'';
+}
 document.querySelector('#aiPrompt').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();document.querySelector('#aiAdjustBtn').click()}});
 document.querySelector('#undoBtn').addEventListener('click',undoState);document.querySelector('#redoBtn').addEventListener('click',redoState);
 document.querySelectorAll('[data-preview-device]').forEach(button=>button.addEventListener('click',()=>{previewDevice=button.dataset.previewDevice;sessionStorage.setItem('alchemyhatchery:preview-device',previewDevice);renderCanvas();showToast(`已切换到${button.textContent}预览`)}));
@@ -715,7 +732,7 @@ function renderAiRunResult(run){
   const changes=[...(run.changedFiles||[]).map(name=>`已修改文件：${name}`),...(run.siteOperations||[]).map(item=>describeAiOperation(item))];document.querySelector('#aiRunChecks').innerHTML=changes.length?changes.map(item=>`<div class="ai-change">${esc(item)}</div>`).join(''):'<div class="ai-change">未产生文件或站点改动</div>';scrollAiConversation(true);
 }
 async function waitForAiRun(jobId){let badPolls=0;for(let attempt=0;attempt<4000;attempt++){let snapshot=null;let failure=null;try{const response=await fetch(`/api/ai/run/status?id=${encodeURIComponent(jobId)}&ts=${Date.now()}`,{cache:'no-store'});const text=await response.text();try{snapshot=text?JSON.parse(text):null}catch{snapshot=null}if(!response.ok){if(response.status===404)failure=new Error(snapshot?.error||'AI 任务不存在或已过期（可能刚重启过服务）');else if(!snapshot)failure='transient';else failure=new Error(snapshot.error||'无法读取 AI 执行状态')}else if(!snapshot){failure='transient'}}catch{failure='transient'}if(failure==='transient'){/* 公网链路（CF/网关）偶发返回 HTML 错误页或瞬断：单次抖动不该判死整个任务 */if(++badPolls>=10)throw new Error('与任务状态接口连续失联（网络或网关抖动）；任务可能仍在后台执行，刷新页面可尝试恢复进度');await new Promise(resolve=>setTimeout(resolve,1000));continue}if(failure)throw failure;badPolls=0;renderAiRunProgress(snapshot);if(snapshot.status==='completed'){return {...snapshot.result,events:snapshot.events||[]}}if(snapshot.status==='failed')throw new Error(snapshot.error||'AI 自动任务失败');await new Promise(resolve=>setTimeout(resolve,500))}throw new Error('AI 执行超时，请稍后重试')}
-async function loadAiStatus(){try{const response=await fetch('/api/ai/status',{cache:'no-store'});const status=await response.json();const button=document.querySelector('#aiAdjustBtn');button.disabled=!status.configured;button.classList.toggle('ai-unavailable',!status.configured);button.title=status.configured?'发送修改要求':'AI 尚未配置：服务器缺少 API Key 或运行时';const notice=document.querySelector('#aiServiceNotice');if(notice){if(status.degraded){notice.hidden=false;notice.innerHTML=`<b>AI 服务暂不可用</b> · ${esc(status.degraded.message||'上游额度或配额异常')}（恢复后此提示自动消失，仍可提交任务重试）`}else notice.hidden=true}}catch{/* 请求时再显示具体错误 */}}
+async function loadAiStatus(){updateAiContextRing();try{const response=await fetch('/api/ai/status',{cache:'no-store'});const status=await response.json();const button=document.querySelector('#aiAdjustBtn');button.disabled=!status.configured;button.classList.toggle('ai-unavailable',!status.configured);button.title=status.configured?'发送修改要求':'AI 尚未配置：服务器缺少 API Key 或运行时';const notice=document.querySelector('#aiServiceNotice');if(notice){if(status.degraded){notice.hidden=false;notice.innerHTML=`<b>AI 服务暂不可用</b> · ${esc(status.degraded.message||'上游额度或配额异常')}（恢复后此提示自动消失，仍可提交任务重试）`}else notice.hidden=true}}catch{/* 请求时再显示具体错误 */}}
 function saveDraftNow(){clearTimeout(draftSaveTimer);if(!currentConsoleUser)return;try{const snapshot=JSON.stringify(state);void persistDraftSnapshot(snapshot).catch(()=>setSaveState('同步失败',false))}catch{}}
 function persistAiUndo(){try{if(lastAiUndo)sessionStorage.setItem(AI_UNDO_KEY,JSON.stringify(lastAiUndo));else sessionStorage.removeItem(AI_UNDO_KEY)}catch{}}
 function persistAiPendingRun(jobId){try{if(jobId)sessionStorage.setItem(AI_RUN_KEY,JSON.stringify({jobId}));else sessionStorage.removeItem(AI_RUN_KEY)}catch{}}
@@ -736,7 +753,7 @@ async function resumeAiRun(){
     showToast(payload.restartRequired?'AI 已完成修改并重启服务':'刷新前开始的 AI 任务已完成');
   }catch(error){
     if(stateBackup)restoreState(stateBackup);persistAiPendingRun(null);showAiError(`刷新前开始的 AI 任务未能恢复：${error.message}`);
-  }finally{setAiRunActive(false);scrollAiConversation();const next=aiRunQueue.shift();if(next)runQueuedAiTask(next)}
+  }finally{setAiRunActive(false);updateAiContextRing();scrollAiConversation();const next=aiRunQueue.shift();if(next)runQueuedAiTask(next)}
 }
 function notifyPublishedReload(reason){try{const channel=new BroadcastChannel('alchemyhatchery-live-preview');channel.postMessage({type:'reload',reason,at:Date.now()});channel.close()}catch{}try{localStorage.setItem('alchemyhatchery:published-reload',JSON.stringify({reason,at:Date.now()}))}catch{}}
 function refreshAiChangedFiles(files=[]){
@@ -831,7 +848,7 @@ async function startAiRun(prompt,requestAttachments=[],chosenPresets=[],presetSn
   }catch(error){
     persistAiPendingRun(null);if(stateBackup)restoreState(stateBackup);if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}lastAiUndo=null;persistAiUndo();const failText=String(error.message||'');showAiError(failText.includes('配额已用尽')?failText:`自动执行失败，修改已回滚：${failText}`);loadAiStatus();
     if(String(error?.message||'').includes('尚未结束')){aiRunQueue.forEach(item=>{if(item.tag)item.tag.textContent='已取消'});aiRunQueue=[]}
-  }finally{setAiRunActive(false);scrollAiConversation();const next=aiRunQueue.shift();if(next)runQueuedAiTask(next)}
+  }finally{setAiRunActive(false);updateAiContextRing();scrollAiConversation();const next=aiRunQueue.shift();if(next)runQueuedAiTask(next)}
 }
 const TEMPLATE_GROUPS=[
   {title:'页面结构',en:'STRUCTURE',items:['nav','hero','footer','cta']},
