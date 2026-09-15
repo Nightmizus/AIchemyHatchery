@@ -145,7 +145,17 @@ function stringOutput(render) {
   }
 }
 
+// 权限模式（MIAODA_TOOLS_MODE）：chat 只读三个查询工具；plan 追加浏览器预览查看；
+// full 注册全部（含 replace_file）。未识别按 full，与系统提示词和服务器端兜底共同生效。
+const toolsMode = (process.env.MIAODA_TOOLS_MODE || 'full').toLowerCase()
+const TOOL_ALLOW = {
+  chat: new Set(['list_files', 'read_file', 'search_files']),
+  plan: new Set(['list_files', 'read_file', 'search_files', 'browser_open', 'browser_screenshot']),
+}
+
 function register(ctx, definition) {
+  const allow = TOOL_ALLOW[toolsMode]
+  if (allow && !allow.has(definition.name)) return
   ctx.tools.register(definition)
 }
 

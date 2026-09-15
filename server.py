@@ -97,6 +97,9 @@ LOGIN_ATTEMPTS_LOCK = threading.Lock()
 # 通用限流桶（按 "用途:标识" 计数），供验证码发送/校验等敏感接口使用
 RATE_BUCKETS: dict[str, list[float]] = {}
 RATE_BUCKETS_LOCK = threading.Lock()
+# 管理员在面板里改 AI Key 时，.env 写入与 os.environ 更新必须串行
+AI_CONFIG_LOCK = threading.Lock()
+KIMI_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{6,199}$")
 PASSWORD_ITERATIONS = 310_000
 CONSOLE_SESSION_DAYS = 7
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
@@ -538,6 +541,42 @@ def current_ai_provider_model() -> tuple[str, str]:
         return provider_name, os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
     except Exception:
         return "", ""
+
+
+def ai_config_snapshot() -> dict:
+    """管理面板展示的 AI 配置状态；只回传 Key 末 4 位，绝不回传完整内容。"""
+    provider_name, provider = resolve_llm_provider()
+    kimi_key = os.environ.get("KIMI_API_KEY", "").strip()
+    return {
+        "provider": provider_name,
+        "providerLabel": provider["label"],
+        "model": os.environ.get(provider["model_env"], "").strip() or provider["default_model"],
+        "explicitProvider": os.environ.get("MIAODA_LLM", "").strip().lower(),
+        "kimiKeySet": bool(kimi_key),
+        "kimiKeyMask": f"···{kimi_key[-4:]}" if kimi_key else "",
+        "deepseekKeySet": bool(os.environ.get("DEEPSEEK_API_KEY", "").strip()),
+    }
+
+
+def persist_env_value(key: str, value: str) -> None:
+    """原子更新项目 .env 中的某个键（保留其他行与注释）；值须已确认为无空白的安全字符。"""
+    env_file = ROOT / ".env"
+    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        if not line.lstrip().startswith("#") and pattern.match(line):
+            out.append(f"{key}={value}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"{key}={value}")
+    tmp_file = env_file.parent / (env_file.name + ".tmp")
+    write_text_exact(tmp_file, "\n".join(out) + "\n")
+    os.chmod(tmp_file, 0o600)
+    os.replace(tmp_file, env_file)
 
 
 def initialize_site_account(site_username: str, owner_username: str) -> dict | None:
@@ -1175,6 +1214,23 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 audit_event(cur, str(admin["id"]), "admin.user_status", {"username": target["name"], "status": status})
         self.send_json({"ok": True, "username": target["name"], "status": status})
 
+    def handle_admin_ai_config_update(self) -> None:
+        # 改 AI Key 影响全站 AI 服务，只有管理员可用；Key 本身永远不进日志与审计
+        admin = self.require_console_user(admin=True)
+        if not admin:
+            return
+        data = self.read_json()
+        key = str(data.get("kimiApiKey", "")).strip()
+        if key and not KIMI_KEY_PATTERN.fullmatch(key):
+            raise ValueError("Key 格式无效：应为 7 位以上的字母数字串（可含 -、_、.），Kimi Key 一般以 sk- 开头")
+        with AI_CONFIG_LOCK:
+            persist_env_value("KIMI_API_KEY", key)
+            os.environ["KIMI_API_KEY"] = key
+            with neon_db() as conn:
+                with conn.cursor() as cur:
+                    audit_event(cur, str(admin["id"]), "admin.ai_config", {"kimiKeySet": bool(key)})
+        self.send_json({"ok": True, **ai_config_snapshot()})
+
     def handle_save_draft(self) -> None:
         user = self.require_console_user()
         if not user:
@@ -1210,6 +1266,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_change_password()
             elif path == "/api/admin/users/status":
                 self.handle_admin_user_status()
+            elif path == "/api/admin/ai-config":
+                self.handle_admin_ai_config_update()
             elif path == "/api/auth/sessions/revoke-others":
                 self.handle_revoke_other_sessions()
             elif path == "/api/console/draft":
@@ -1283,8 +1341,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     # DeepSeek Harness is the only automatic execution engine. Its file access is
     # confined to the current website's own folder (sites/<user_id>/); the AI may
     # not read or modify anything else on the host.
-    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None) -> dict:
+    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None, mode: str = "full") -> dict:
         run_id = f"run-{secrets.token_hex(10)}"
+        if mode not in ("chat", "plan", "full"):
+            mode = "full"
         if history:
             lines = ["对话历史（帮助理解上下文，按时间先后；当前请求见末尾）："]
             for item in history:
@@ -1294,18 +1354,27 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if not isinstance(site_state, dict) or not isinstance(site_state.get("pages"), list):
             raise ValueError("缺少当前网站数据，无法启动 AI 任务")
         if chosen_presets:
-            prompt = prompt + "\n\n用户已确认选用这些预设模块：" + "、".join(chosen_presets) + "。请直接开始制作网站，把它们融入设计，不要再询问。"
-        if preset_snippets:
+            if mode == "full":
+                prompt = prompt + "\n\n用户已确认选用这些预设模块：" + "、".join(chosen_presets) + "。请直接开始制作网站，把它们融入设计，不要再询问。"
+            elif mode == "plan":
+                prompt = prompt + "\n\n用户想选用这些预设模块：" + "、".join(chosen_presets) + "。请把它们纳入实施计划。"
+        if preset_snippets and mode != "chat":
             blocks = "\n\n".join(f"【{item['name']} / {item['type']}】\n{item['html']}" for item in preset_snippets)
-            prompt = prompt + "\n\n用户手动选用了以下模块。请读取它们的代码并嵌入到整页代码中（可自由改写文案与样式以融入整体设计，但保留模块的结构意图）：\n\n" + blocks
+            if mode == "full":
+                prompt = prompt + "\n\n用户手动选用了以下模块。请读取它们的代码并嵌入到整页代码中（可自由改写文案与样式以融入整体设计，但保留模块的结构意图）：\n\n" + blocks
+            else:
+                prompt = prompt + "\n\n用户手动选用了以下模块，请把它们的结构意图纳入实施计划：\n\n" + blocks
         total_elements = sum(len(page.get("elements", [])) for page in site_state.get("pages", []) if isinstance(page, dict))
-        if not chosen_presets and total_elements == 0:
+        if mode == "full" and not chosen_presets and total_elements == 0:
             style_seed = secrets.choice(SITE_STYLE_SEEDS)
             prompt = prompt + f"\n\n本次是从零建站。如果用户没有透露社团、项目或爱好等风格线索，参考这个随机风格方向：{style_seed}；如果用户给了线索，以用户线索为准。"
         workspace = ai_site_workspace(user["id"])
         workspace.mkdir(parents=True, exist_ok=True)
         preview_url = f"/ai-preview/{user_preview_id(user['id'])}"
-        prompt = prompt + f"\n\n本次改动的工作区实时预览地址：{preview_url}（它实时渲染你改完后的 site.json。用浏览器工具打开它验证改动效果，不要打开控制台首页——那是登录页，看不到任何东西）。"
+        if mode == "full":
+            prompt = prompt + f"\n\n本次改动的工作区实时预览地址：{preview_url}（它实时渲染你改完后的 site.json。用浏览器工具打开它验证改动效果，不要打开控制台首页——那是登录页，看不到任何东西）。"
+        elif mode == "plan":
+            prompt = prompt + f"\n\n当前网站的实时预览地址：{preview_url}（实时渲染当前 site.json。可用浏览器工具打开查看现状，不要打开控制台首页——那是登录页，看不到任何东西）。"
         site_json_path = workspace / "site.json"
         original_site_json = json.dumps(site_state, ensure_ascii=False, indent=2)
         write_text_exact(site_json_path, original_site_json)
@@ -1318,6 +1387,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             workspace=workspace,
             preview_port=PORT,
             progress=progress,
+            mode=mode,
         )
 
         site_replace = None
@@ -1350,6 +1420,15 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             context,
         )
         proposal = self.constrain_instance_intent(proposal, prompt, context)
+        if mode != "full":
+            # 只读模式硬兜底：即便模型越权改了 site.json 或返回了站点操作，也一律丢弃并还原
+            if site_replace is not None or proposal["siteOperations"]:
+                proposal["checks"].append(f"{'仅聊天' if mode == 'chat' else 'plan模式'}为只读模式，已丢弃模型的越权改动")
+            if site_replace is not None:
+                write_text_exact(site_json_path, original_site_json)
+            site_replace = None
+            proposal["siteOperations"] = []
+            changed_files = []
         if site_replace is not None and proposal["siteOperations"]:
             # site.json 已包含全部改动。模型常把同样的改动又在 siteOperations 里重复描述，
             # 再应用一次会重复元素，或指向替换后已不存在的页面/ID（整批回滚的直接原因）。
@@ -1370,6 +1449,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
 
         return {
             "runId": run_id,
+            "mode": mode,
+            "plan": str(result.get("plan") or "")[:8000] if mode == "plan" else "",
             "summary": proposal["summary"],
             "risk": proposal["risk"],
             "siteOperations": proposal["siteOperations"],
@@ -1481,11 +1562,14 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         proposal["checks"] = ["检查当前模块实例立即变化", "检查同类模块与后续新增模块保持默认样式"]
         return proposal
 
-    def prepare_ai_run(self) -> tuple[str, dict, bool, list[dict], list[str], list[dict]]:
+    def prepare_ai_run(self) -> tuple[str, dict, bool, list[dict], list[str], list[dict], str]:
         payload = self.read_json()
         prompt = str(payload.get("prompt", "")).strip()
         context = payload.get("context", {})
         include_site = bool(payload.get("includeSite", True))
+        mode = str(payload.get("mode", "full")).strip().lower()
+        if mode not in ("chat", "plan", "full"):
+            raise ValueError("AI 权限模式无效（可选：chat / plan / full）")
         raw_attachments = payload.get("attachments", [])
         raw_presets = payload.get("chosenPresets", [])
         if not isinstance(raw_presets, list) or len(raw_presets) > 20:
@@ -1549,11 +1633,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 text = str(item.get("text", "")).strip()[:1000]
                 if text:
                     history.append({"role": item["role"], "text": text})
-        return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history
+        return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode
 
     def handle_ai_run(self, user: dict) -> None:
         global AI_UPSTREAM_DEGRADED
-        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode = self.prepare_ai_run()
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
         lock_owner = f"sync-{secrets.token_hex(6)}"
@@ -1561,7 +1645,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         provider_name, model = current_ai_provider_model()
         try:
-            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history)
+            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode=mode)
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
             AI_UPSTREAM_DEGRADED = None
         except Exception:
@@ -1574,7 +1658,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
-        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode = self.prepare_ai_run()
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
@@ -1604,7 +1688,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             global AI_UPSTREAM_DEGRADED
             provider_name, model = current_ai_provider_model()
             try:
-                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress=progress)
+                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress=progress, mode=mode)
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
                 AI_UPSTREAM_DEGRADED = None
                 with AI_RUN_JOBS_LOCK:
@@ -2335,6 +2419,12 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 for row in rows
             ]
             self.send_json({"users": users, "total": len(users)})
+            return
+        if parsed.path == "/api/admin/ai-config":
+            admin = self.require_console_user(admin=True)
+            if not admin:
+                return
+            self.send_json(ai_config_snapshot())
             return
         if parsed.path == "/api/admin/ai-usage":
             admin = self.require_console_user(admin=True)

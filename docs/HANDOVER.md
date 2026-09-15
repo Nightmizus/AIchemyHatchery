@@ -15,7 +15,7 @@
 - `server.py`：单文件 Python 后端（http.server + ThreadingHTTPServer），端口 4173。`python server.py serve` 启动
 - 前端（都在 `frontend/` 目录）：`index.html`（编辑器）、`viewer.html/viewer.js`（发布站运行时）、`script.js`、`auth.js`；样式 `styles.css` + `mica.css`（深色 GitHub 风）+ `ai-chat.css`（聊天区）。对外 URL 仍是根路径，server.py 做翻译
 - 数据库：**生产用 Neon**（托管 PG，连接串在 .env 的 `NEON_DATABASE_URL`）；**本地开发用 PGlite**（`.pgsrv/serve.mjs`，127.0.0.1:5433，postgres/postgres）。共享表 `"User"`/`"CampusUser"` 是 sdszwebsite 的，**只读写、绝不 CREATE/ALTER**；读可选列一律走 `user_column_name()`/`row_value()` 列探测（生产表列不齐，硬读会 500）。`hatchery_*` 表启动自建
-- AI 子系统（dsh）：`deepseek_harness_adapter.py` 用 JSON-RPC 驱动官方运行时；`deepseek_harness/site-tools.mjs` 是文件工具插件，**沙盒在 `sites/<user_id>/`**（AI 只能读写当前网站的文件夹，平台源码它碰不到——这是用户定的策略，别放开）；`llm-kimi.mjs` 注册 kimi provider（KIMI_API_KEY → k3）；运行时二进制 Windows 在 `.deepseek-harness/runtime/`，Linux 用 pip 包 `deepseek-harness-runtime-bin`（Docker 镜像内置，entrypoint 自动定位）
+- AI 子系统（dsh）：`deepseek_harness_adapter.py` 用 JSON-RPC 驱动官方运行时；`deepseek_harness/site-tools.mjs` 是文件工具插件，**沙盒在 `sites/<user_id>/`**（AI 只能读写当前网站的文件夹，平台源码它碰不到——这是用户定的策略，别放开）；`llm-kimi.mjs` 注册 kimi provider（KIMI_API_KEY → k3）；运行时二进制 Windows 在 `.deepseek-harness/runtime/`，Linux 用 pip 包 `deepseek-harness-runtime-bin`（Docker 镜像内置，entrypoint 自动定位）。管理员可在「账号菜单 → 管理后台 → AI 服务配置」在线查看/更换/清除 KIMI_API_KEY（`/api/admin/ai-config`，写 .env 并即时生效，只回显末 4 位，Key 不进日志与审计）
 - 账号：注册已迁移到 SDSZ 统一账号（登录页有 SSO 按钮，`SSO_SECRET`/`SDSZ_BASE_URL` 走 env；**sdsz 侧的 SSO 端点还没实现**，目前只有单边）。写死站长：campusId `20264689` 永远是管理员
 
 ## 3. 部署拓扑（现状）
