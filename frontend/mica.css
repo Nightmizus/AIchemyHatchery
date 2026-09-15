@@ -442,14 +442,42 @@ body {
 .ai-change { font-size:11px }
 .ai-message-files span { font-size:10px }
 .ai-chat-panel .ai-undo { font-size:11px }
-/* VSCode-style activity bar on the far left. */
-.activity-bar { position:fixed;z-index:40;left:0;top:0;bottom:0;width:48px;padding:10px 0;display:flex;flex-direction:column;align-items:center;gap:6px;background:#0d1117;border-right:1px solid rgba(240,246,252,.09) }
+/* VSCode-style activity bar on the far left; expands into a ChatGPT-like sidebar when the preview is hidden. */
+.activity-bar { position:fixed;z-index:40;left:0;top:0;bottom:0;width:48px;padding:10px 0;display:flex;flex-direction:column;align-items:center;gap:6px;background:#0d1117;border-right:1px solid rgba(240,246,252,.09);transition:width .28s cubic-bezier(.22,.9,.3,1) }
+.activity-brand { display:none }
+.activity-items { display:contents }
 .activity-item { position:relative;width:46px;height:46px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:#6e7681;font-size:19px;cursor:pointer;transition:color .15s,background .15s }
+.activity-item em { display:none }
 .activity-item:hover { color:#e6edf3;background:rgba(240,246,252,.06) }
 .activity-item.active { color:#f0f6fc }
 .activity-item.active::before { content:"";position:absolute;left:0;top:9px;bottom:9px;width:2px;border-radius:2px;background:#58a6ff }
-.app-shell { margin-left:48px }
-@media(max-width:680px){ .activity-bar { display:none } .app-shell { margin-left:0 } }
+.activity-bar .console-account-wrap { margin-top:auto;position:relative;display:flex;align-items:center;justify-content:center }
+.activity-bar .console-account { width:34px;height:34px;padding:0;display:grid;place-items:center;border:1px solid var(--mica-stroke);border-radius:50%;background:var(--mica-card);cursor:pointer }
+.activity-bar .console-avatar { width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#e6edf3;color:#0d1117;font:700 12px/1 sans-serif }
+.activity-account-name { display:none }
+.activity-bar .console-account-menu { position:absolute;left:calc(100% + 8px);right:auto;top:auto;bottom:0 }
+.app-shell { margin-left:48px;transition:margin-left .28s cubic-bezier(.22,.9,.3,1) }
+.sidebar { grid-template-rows:minmax(0,1fr)!important }
+/* 预览收回：左侧栏展开为 ChatGPT 式侧栏（品牌在最上面，账号在底部） */
+.app-shell.preview-hidden { margin-left:240px }
+.app-shell.preview-hidden .activity-bar { width:240px;padding:14px 10px;align-items:stretch }
+.app-shell.preview-hidden .activity-brand { margin:2px 2px 14px;display:flex;align-items:center;gap:10px;text-decoration:none }
+.app-shell.preview-hidden .activity-brand span { width:30px;height:30px;display:grid;place-items:center;flex:0 0 auto;border-radius:6px;background:#e6edf3;color:#0d1117;font-size:14px }
+.app-shell.preview-hidden .activity-brand b { color:#e6edf3;font-size:14px }
+.app-shell.preview-hidden .activity-items { display:grid;gap:4px }
+.app-shell.preview-hidden .activity-item { width:100%;height:40px;padding:0 10px;grid-template-columns:22px minmax(0,1fr);justify-items:start;gap:8px;font-size:17px }
+.app-shell.preview-hidden .activity-item em { display:block;font-size:12px;font-style:normal;white-space:nowrap }
+.app-shell.preview-hidden .activity-bar .console-account-wrap { justify-content:flex-start;gap:10px;padding:10px 4px 0;border-top:1px solid rgba(240,246,252,.09) }
+.app-shell.preview-hidden .activity-account-name { display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e6edf3;font-size:12px }
+.app-shell.preview-hidden .activity-bar .console-account-menu { left:0 }
+@media(max-width:680px){
+  .activity-bar { left:0;right:0;top:auto;bottom:0;width:auto;height:52px;padding:0 8px;flex-direction:row;align-items:center;border-right:0;border-top:1px solid rgba(240,246,252,.09) }
+  .activity-brand { display:none!important }
+  .activity-items { display:flex;gap:6px }
+  .activity-bar .console-account-wrap { margin:0 0 0 auto;border-top:0;padding:0 }
+  .activity-bar .console-account-menu { left:auto;right:0 }
+  .app-shell,.app-shell.preview-hidden { margin-left:0;margin-bottom:52px }
+}
 /* Vulnerability test panel. */
 .security-panel { height:100%;min-height:540px;padding:0;position:relative;background:#0d1117;color:#e6edf3;overflow:hidden }
 .security-panel[hidden] { display:none }
@@ -486,3 +514,79 @@ body {
 .app-shell.preview-hidden .preview-expand-fab { animation:sidebarSettle .3s cubic-bezier(.22,.9,.3,1) both }
 @keyframes sidebarSettle { 0% { opacity:.35;transform:translateX(-18px) } 100% { opacity:1;transform:translateX(0) } }
 @media(prefers-reduced-motion:reduce){ .app-shell,.workspace{transition:none}.app-shell.preview-settling .sidebar,.app-shell.preview-hidden .preview-expand-fab{animation:none} }
+/* ===== Dark theme for the console modal (was the last light-themed surface). ===== */
+.preview-dialog{border-color:var(--mica-stroke);border-radius:12px;background:#161b22;color:var(--ink);box-shadow:0 24px 80px rgba(1,4,9,.65)}
+.preview-dialog header{border-bottom-color:var(--soft-line)}
+.preview-dialog header span{color:var(--muted)}
+.preview-dialog header button{color:var(--muted)}
+.preview-dialog header button:hover{color:var(--ink)}
+.modal-body h2{color:var(--ink)}
+.modal-body p{color:var(--muted)}
+.preview-dialog ::-webkit-scrollbar{width:8px}
+.preview-dialog ::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+/* runtime forum form & replies */
+.preview-dialog .runtime-form input,.preview-dialog .runtime-form textarea{border-color:var(--mica-stroke);background:#0d1117;color:var(--ink)}
+.preview-dialog .runtime-form input:focus,.preview-dialog .runtime-form textarea:focus{border-color:var(--mica-hover-line);outline:0}
+.preview-dialog .runtime-form button,.preview-dialog .modal-action{background:#e6edf3;color:#0d1117}
+.preview-dialog .runtime-form button:hover,.preview-dialog .modal-action:hover{background:#fff}
+.preview-dialog .reply-list,.preview-dialog .reply{border-color:var(--soft-line)}
+/* account security */
+.preview-dialog .account-security>header{background:rgba(240,246,252,.05)}
+.preview-dialog .account-security>header small{color:var(--muted)}
+.preview-dialog .account-security>section{border-color:var(--soft-line)}
+.preview-dialog .account-security section>p,.preview-dialog .security-title p{color:var(--muted)}
+.preview-dialog .account-settings-form input{border-color:var(--mica-stroke);background:#0d1117;color:var(--ink)}
+.preview-dialog .account-settings-form input:focus{border-color:var(--mica-hover-line);outline:0}
+.preview-dialog .account-settings-form button{background:#e6edf3;color:#0d1117}
+.preview-dialog .account-settings-form button:hover{background:#fff}
+.preview-dialog .security-title>button{border-color:var(--line);background:transparent;color:#c9d1d9}
+.preview-dialog .security-title>button:hover{border-color:var(--mica-hover-line);color:var(--ink)}
+.preview-dialog .security-session{background:rgba(240,246,252,.04)}
+.preview-dialog .security-session small{color:var(--muted)}
+.preview-dialog .security-session>span{background:rgba(240,246,252,.08);color:var(--muted)}
+.preview-dialog .security-session.current{background:rgba(63,185,80,.1)}
+.preview-dialog .security-session.current>span{background:rgba(63,185,80,.2);color:#3fb950}
+/* admin console */
+.preview-dialog .admin-console>section{border-color:var(--soft-line)}
+.preview-dialog .admin-console>section>header{background:rgba(240,246,252,.045)}
+.preview-dialog .admin-console>section>header small{color:#6e7681}
+.preview-dialog .admin-console>section>header>b{color:var(--ink)}
+.preview-dialog .admin-user-row{border-top-color:var(--soft-line)}
+.preview-dialog .admin-user-row>div small{color:var(--muted)}
+.preview-dialog .admin-user-row>em.active{background:rgba(63,185,80,.16);color:#3fb950}
+.preview-dialog .admin-user-row>em.disabled{background:rgba(248,81,73,.14);color:#f85149}
+.preview-dialog .admin-user-row>button{border-color:var(--line);background:transparent;color:#c9d1d9}
+.preview-dialog .admin-user-row>button:hover{border-color:var(--mica-hover-line);color:var(--ink)}
+.preview-dialog .admin-user-row>i{border-color:transparent;background:transparent;color:var(--muted)}
+.preview-dialog .admin-console>.ai-usage-manager>p{color:var(--muted)}
+.preview-dialog .admin-console>.ai-usage-manager>header>button{border-color:var(--line);background:transparent;color:#c9d1d9}
+.preview-dialog .admin-usage-head,.preview-dialog .admin-usage-row{border-top-color:var(--soft-line)}
+.preview-dialog .admin-usage-head{color:#6e7681}
+.preview-dialog .admin-usage-row span small{color:var(--muted)}
+.preview-dialog .admin-usage-row em{color:#c9d1d9}
+.preview-dialog .admin-usage-row>button{border-color:var(--line);background:transparent;color:#c9d1d9}
+.preview-dialog .admin-usage-row>button:hover{border-color:var(--mica-hover-line);color:var(--ink)}
+.preview-dialog .invite-empty{color:var(--muted)}
+/* AI key manager (inside admin console) */
+.preview-dialog .ai-key-status span{color:#c9d1d9}
+.preview-dialog .ai-key-form input{border-color:var(--mica-stroke);background:#0d1117;color:var(--ink)}
+.preview-dialog .ai-key-form input:focus{border-color:var(--mica-hover-line);outline:0}
+.preview-dialog .ai-key-form button{border-color:#e6edf3;background:#e6edf3;color:#0d1117}
+.preview-dialog .ai-key-form button:hover{background:#fff}
+.preview-dialog .ai-key-form button[data-ai-key-clear]{border-color:var(--line);background:transparent;color:#f85149}
+.preview-dialog .ai-key-form button[data-ai-key-clear]:hover{border-color:#f85149}
+.preview-dialog .admin-console>.ai-key-manager>p{color:var(--muted)}
+/* AI chats manager */
+.preview-dialog .ai-chat-back{border-color:var(--line);background:transparent;color:#c9d1d9}
+.preview-dialog .ai-chat-back:hover{border-color:var(--mica-hover-line);color:var(--ink)}
+.preview-dialog .ai-chat-item{border-color:var(--soft-line)}
+.preview-dialog .ai-chat-item header span{color:var(--muted)}
+.preview-dialog .ai-chat-atts i{background:rgba(240,246,252,.08);color:var(--muted)}
+/* publish form & site admin credential */
+.preview-dialog .publish-domain{color:var(--ink)}
+.preview-dialog .publish-form label small{color:var(--muted)}
+.preview-dialog .publish-warning{border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.1);color:#ffa198}
+.preview-dialog .site-admin-credential,.preview-dialog .site-account-existing{border-color:var(--soft-line);background:rgba(240,246,252,.045)}
+.preview-dialog .site-admin-credential small{color:var(--muted)}
+.preview-dialog .site-admin-credential button{background:#e6edf3;color:#0d1117}
+.preview-dialog .site-account-existing button{border-color:var(--line);background:transparent;color:#c9d1d9}
