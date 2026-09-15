@@ -1,5 +1,5 @@
 const elementCatalog = {
-  nav:{name:'导航栏'}, hero:{name:'首页大字'}, game:{name:'方块沙盒'}, projects:{name:'作品展示卡片栏'}, blog:{name:'文章列表'}, gallery:{name:'图片画廊'}, stats:{name:'数据栏'}, team:{name:'成员展示'}, timeline:{name:'活动时间线'}, forum:{name:'论坛板块'}, account:{name:'账号登录'}, notice:{name:'公告栏'}, links:{name:'链接集合'}, cta:{name:'行动区域'}, footer:{name:'页脚'}, detail:{name:'详情正文'}
+  nav:{name:'导航栏'}, hero:{name:'首页大字'}, projects:{name:'作品展示卡片栏'}, blog:{name:'文章列表'}, gallery:{name:'图片画廊'}, stats:{name:'数据栏'}, team:{name:'成员展示'}, timeline:{name:'活动时间线'}, profile:{name:'个人名片'}, schedule:{name:'课程表'}, countdown:{name:'目标倒计时'}, skills:{name:'技能进度'}, awards:{name:'荣誉墙'}, departments:{name:'部门介绍'}, steps:{name:'招新流程'}, faq:{name:'常见问题'}, downloads:{name:'资料下载'}, poll:{name:'投票'}, forum:{name:'论坛板块'}, account:{name:'账号登录'}, notice:{name:'公告栏'}, links:{name:'链接集合'}, cta:{name:'行动区域'}, footer:{name:'页脚'}, detail:{name:'详情正文'}
 };
 
 const INITIAL_STATE = {
@@ -175,52 +175,70 @@ function blockContent(type,element={},editing=true){
     const coverKey='setting:image';const cover=settings.image?`<div class="detail-cover ${editing?'editor-object image-object':'published-object published-image'}"${objectDataAttrs(element,coverKey,'image',editing)}><img src="${esc(settings.image)}" alt="${esc(settings.title||page.name)}"></div>`:(!editing&&buildingPreviewHtml?'<div class="detail-cover detail-cover-empty"><small class="image-hint">请使用AI助手编辑图片</small></div>':'');
     return `<article class="detail-block">${parent?`<button class="detail-back" data-preview-action="navigate" data-page-id="${parent.id}">← 返回 ${esc(parent.name)}</button>`:''}<span class="block-kicker">${direct('eyebrow',settings.detailType==='project'?'PROJECT DETAIL':'ARTICLE DETAIL',false,'详情类型')}</span><h1 style="--detail-title-size:${esc(cssSize(settings.titleSize,'clamp(48px,8vw,105px)'))}">${title(page.name)}</h1><p class="detail-lead">${direct('description','在这里填写详情摘要。',true,'点击编辑摘要')}</p>${cover}${detailBodyMarkup}</article>`;
   }
-  if(type==='game')return `<section class="mc-game" data-mc-game><header class="block-head"><div><span class="block-kicker">${direct('description','MINICRAFT SANDBOX',false,'栏目眉题')}</span><h2>${title('方块世界 · 一起来搭建')}</h2></div><span class="block-link">${direct('button','左键放置 · 右键挖掘',false,'玩法提示')}</span></header><div class="mc-toolbar"><div class="mc-palette" data-mc-palette></div><div class="mc-actions"><button type="button" data-mc-mode="place" class="active">▣ 放置模式</button><button type="button" data-mc-mode="dig">✕ 挖除模式</button><button type="button" data-mc-reset>↺ 重新生成</button></div></div><div class="mc-world" data-mc-world role="application" aria-label="方块沙盒世界"></div><p class="mc-hint">先从上方挑选方块，再在世界中点击或按住拖动建造；单击右键或切换到“挖除模式”即可拆除方块，点“重新生成”换一片新大陆。</p></section>`;
+  if(type==='profile'){const tags=['编程','摄影','篮球'],labels=['学校','年级','坐标','邮箱'],values=['示例中学','高二','杭州','hi@example.com'];return `<section class="profile-block"><div class="profile-side"><div class="profile-avatar">${direct('avatar','林',false,'头像字符')}</div><h2>${title('林小满')}</h2><p class="profile-tagline">${direct('tagline','高二学生 · 喜欢用代码解决小问题',false,'一句话介绍')}</p><div class="profile-tags">${tags.map((_,index)=>`<span>${directList('tags',tags,index,'标签')}</span>`).join('')}</div></div><div class="profile-main"><span class="block-kicker">${direct('description','ABOUT ME',false,'栏目眉题')}</span><p class="profile-bio">${direct('bio','你好，我是林小满。白天上课，晚上写点小程序；最近在用 AI 帮社团做招新网站。我相信工具能放大好奇心，也相信把作品做出来给别人用，是最好的学习方式。',true,'自我介绍')}</p><dl class="profile-info">${labels.map((_,index)=>`<div><dt>${directList('infoLabels',labels,index,'项目')}</dt><dd>${directList('infoValues',values,index,'内容')}</dd></div>`).join('')}</dl></div></section>`}
+  if(type==='schedule'){const days=['周一','周二','周三','周四','周五'],times=['08:00','10:00','14:00','16:00'],cellDefaults=['语文','数学','英语','物理','体育','化学','生物','历史','地理','自习','数学','英语','政治','音乐','社团活动','物理','化学','美术','信息技术','班会'];return `<section class="block-section schedule-section"><header class="block-head"><div><span class="block-kicker">${direct('description','MY TIMETABLE',false,'栏目眉题')}</span><h2>${title('本学期课程表')}</h2></div><span class="block-link">${direct('button','点击课程名可直接修改',false,'提示文字')}</span></header><div class="schedule-grid"><span class="schedule-corner">TIME</span>${days.map((_,index)=>`<b class="schedule-day">${directList('days',days,index,'星期')}</b>`).join('')}${times.map((time,row)=>`<span class="schedule-time">${directList('times',times,row,'时间')}</span>${days.map((_,col)=>`<i class="schedule-cell">${directList('cells',cellDefaults,row*5+col,'课程')}</i>`).join('')}`).join('')}</div></section>`}
+  if(type==='countdown')return `<section class="countdown-block" data-countdown data-target="${setting('target','2027-06-07 09:00')}"><span class="block-kicker">${direct('description','COUNTDOWN',false,'栏目眉题')}</span><h2>${title('距离高考')}</h2><div class="cd-grid">${[['days','天'],['hours','时'],['mins','分'],['secs','秒']].map(unit=>`<div class="cd-cell"><b data-cd-${unit[0]}>--</b><small>${unit[1]}</small></div>`).join('')}</div><p class="cd-target">目标时间：${direct('target','2027-06-07 09:00',false,'格式 2027-06-07 09:00')}</p></section>`;
+  if(type==='skills'){const names=['Python / 编程','摄影与剪辑','英语演讲','篮球'],percents=['85','70','60','75'];const currentPercents=raw('percents',percents.join('|')).split('|');return `<section class="block-section skills-section"><header class="block-head"><div><span class="block-kicker">${direct('description','MY SKILLS',false,'栏目眉题')}</span><h2>${title('我会这些')}</h2></div></header><div class="skill-list">${names.map((_,index)=>{const pct=Math.max(0,Math.min(100,Number(currentPercents[index])||0));return `<div class="skill-row"><b>${directList('skillNames',names,index,'技能名称')}</b><div class="skill-track"><i style="width:${pct}%"></i></div><span>${directList('percents',percents,index,'0-100')}%</span></div>`}).join('')}</div></section>`}
+  if(type==='awards'){const years=['2026','2025','2025'],names=['信息学奥赛 · 省级二等奖','校英语演讲比赛 · 一等奖','青少年科技创新大赛 · 市级三等奖'],notes=['CSP-J/S 提高组，全省前 15%','从 120 名选手中晋级，演讲主题“AI 与我”','作品：基于图像识别的图书整理机器人'];return `<section class="block-section awards-section"><header class="block-head"><div><span class="block-kicker">${direct('description','HONORS',false,'栏目眉题')}</span><h2>${title('荣誉与奖项')}</h2></div></header><div class="award-list">${years.map((_,index)=>`<article class="award-row"><span class="award-year">${directList('awardYears',years,index,'年份')}</span><div class="award-main"><b>${directList('awardNames',names,index,'奖项名称')}</b><p>${directList('awardNotes',notes,index,'补充说明')}</p></div><i class="award-medal">★</i></article>`).join('')}</div></section>`}
+  if(type==='departments'){const names=['技术部','设计部','活动部'],duties=['开发社团工具与网站，带新成员入门编程','负责海报、周边与每场活动的视觉','策划工作坊、Hackathon 与社团团建'],counts=['12 人','8 人','10 人'];return `<section class="block-section depts-section"><header class="block-head"><div><span class="block-kicker">${direct('description','DEPARTMENTS',false,'栏目眉题')}</span><h2>${title('部门介绍')}</h2></div><span class="block-link">${direct('button','总有一款适合你',false,'引导文字')}</span></header><div class="dept-list">${names.map((_,index)=>`<article class="dept-row"><span class="dept-index">0${index+1}</span><div class="dept-main"><b>${directList('deptNames',names,index,'部门名称')}</b><p>${directList('deptDuties',duties,index,'部门职责')}</p></div><span class="dept-count">${directList('deptCounts',counts,index,'人数')}</span></article>`).join('')}</div></section>`}
+  if(type==='steps'){const names=['线上报名','见面会','部门面试','正式入社'],descs=['填写报名表，告诉我们你的兴趣和想做的事','和现任成员面对面聊聊社团日常与项目','聊聊你想尝试的方向，没有标准答案','领取新人礼包，参加第一次共创活动'],dates=['9.1 – 9.10','9.12','9.15 – 9.16','9.20'];return `<section class="block-section steps-section"><header class="block-head"><div><span class="block-kicker">${direct('description','HOW TO JOIN',false,'栏目眉题')}</span><h2>${title('招新流程')}</h2></div></header><div class="step-grid">${names.map((_,index)=>`<article class="step-card"><span class="step-num">0${index+1}</span><b>${directList('stepNames',names,index,'环节名称')}</b><p>${directList('stepDescs',descs,index,'环节说明')}</p><small>${directList('stepDates',dates,index,'时间')}</small></article>`).join('')}</div></section>`}
+  if(type==='faq'){const questions=['没有基础可以加入吗？','每周需要投入多少时间？','可以中途换部门吗？','社团收费吗？'],answers=['完全可以。大部分活动都从零基础开始设计，老成员会一对一带新，一个学期就能独立完成小项目。','核心活动每周 1–2 小时，项目冲刺期自愿加时，学业优先。','可以，每学期初开放一次部门调整，也鼓励跨部门参与项目。','不收费。活动物料与场地由学校社团经费支持。'];return `<section class="block-section faq-section"><header class="block-head"><div><span class="block-kicker">${direct('description','FAQ',false,'栏目眉题')}</span><h2>${title('常见问题')}</h2></div></header><div class="faq-list">${questions.map((_,index)=>`<details class="faq-item"${index===0?' open':''}><summary>${directList('faqQuestions',questions,index,'问题')}<i>+</i></summary><p>${directList('faqAnswers',answers,index,'回答')}</p></details>`).join('')}</div></section>`}
+  if(type==='downloads'){const names=['2026 秋季招新简章.pdf','社团章程与管理制度.docx','历届活动照片包.zip'],metas=['2.4 MB · 09.01 更新','186 KB · 08.20 更新','512 MB · 07.15 更新'],tags=['PDF','DOC','ZIP'];const currentNames=raw('fileNames',names.join('|')).split('|');const urls=raw('urls','#|#|#').split('|');return `<section class="block-section downloads-section"><header class="block-head"><div><span class="block-kicker">${direct('description','RESOURCES',false,'栏目眉题')}</span><h2>${title('资料下载')}</h2></div></header><div class="download-list">${names.map((_,index)=>`<button class="download-row" data-preview-action="link" data-title="${esc(currentNames[index]||names[index])}" data-url="${esc(urls[index]||'')}"><i class="dl-tag">${directList('fileTags',tags,index,'类型')}</i><div class="dl-main"><b>${directList('fileNames',names,index,'文件名称')}</b><p>${directList('fileMetas',metas,index,'大小与日期')}</p></div><span class="dl-arrow">↓</span></button>`).join('')}</div></section>`}
+  if(type==='poll'){const options=['电竞友谊赛','露天电影夜','桌游马拉松'],votes=['18','24','9'];return `<section class="block-section poll-section"><header class="block-head"><div><span class="block-kicker">${direct('description','VOTE',false,'栏目眉题')}</span><h2>${title('社团之夜办什么？')}</h2></div><span class="block-link">${direct('button','每人一票，实时统计',false,'提示文字')}</span></header><div class="poll-box" data-poll><div class="poll-options">${options.map((_,index)=>`<button type="button" class="poll-option" data-poll-option="${index}"><b>${directList('pollOptions',options,index,'选项')}</b><i class="poll-track"><i class="poll-fill"></i></i><span class="poll-num" data-poll-num>${directList('pollVotes',votes,index,'票数')}</span></button>`).join('')}</div><p class="poll-hint">${direct('hint','点击选项即可投票，再点一次取消。',false,'投票提示')}</p></div></section>`}
   return `<footer class="b-footer"><div><b>${direct('title',state.siteName||'未命名网站',false,'点击编辑页脚名称')}</b>${linkedPages()}</div><small>${direct('description','© 2026 · 由 AIchemyHatchery 搭建',false,'点击编辑版权文字')}</small></footer>`;
 }
 
-function initMcGames(rootNode){
+function initTemplateWidgets(rootNode){
   if(!rootNode)return;
-  const MC_BLOCKS=[['grass','草方块'],['dirt','泥土'],['stone','石头'],['wood','木头'],['leaves','树叶'],['sand','沙子'],['brick','砖块'],['glass','玻璃']];
-  const MC_COLS=28,MC_ROWS=16;
-  rootNode.querySelectorAll('[data-mc-game]').forEach(game=>{
-    if(game.dataset.mcReady)return;game.dataset.mcReady='1';
-    const world=game.querySelector('[data-mc-world]'),palette=game.querySelector('[data-mc-palette]');if(!world||!palette)return;
-    let selected='grass',mode='place',painting=false,data=[];
-    palette.innerHTML=MC_BLOCKS.map((block,index)=>`<button type="button" class="mc-block${index===0?' active':''}" data-mc-block="${block[0]}" title="${block[1]}"><i class="mc-b" data-b="${block[0]}"></i><span>${block[1]}</span></button>`).join('');
-    world.style.setProperty('--mc-cols',MC_COLS);
-    world.innerHTML='';const cells=[];
-    for(let r=0;r<MC_ROWS;r++)for(let c=0;c<MC_COLS;c++){const cell=document.createElement('div');cell.className='mc-b';cell.dataset.b='air';cell.dataset.r=r;cell.dataset.c=c;world.appendChild(cell);cells.push(cell)}
-    const buildWorld=()=>{
-      const heights=[];let level=7;
-      for(let c=0;c<MC_COLS;c++){if(Math.random()<.4)level=Math.max(4,Math.min(9,level+(Math.random()<.5?-1:1)));heights.push(level)}
-      const grid=[];
-      for(let r=0;r<MC_ROWS;r++){const row=[];for(let c=0;c<MC_COLS;c++){const h=heights[c];row.push(r<h?'air':r===h?'grass':r<h+3?'dirt':'stone')}grid.push(row)}
-      let lastTree=-6;
-      for(let c=2;c<MC_COLS-2;c++){
-        if(c-lastTree<4||Math.random()>=.16)continue;lastTree=c;const h=heights[c];if(h<5)continue;
-        for(let t=1;t<=3;t++)grid[h-t][c]='wood';
-        for(let dr=-2;dr<=0;dr++)for(let dc=-2;dc<=2;dc++){const rr=h-3+dr,cc=c+dc;if(rr<0||cc<0||cc>=MC_COLS)continue;if(Math.abs(dc)===2&&dr===-2)continue;if(grid[rr][cc]==='air')grid[rr][cc]='leaves'}
-        if(h-6>=0&&grid[h-6][c]==='air')grid[h-6][c]='leaves';
-      }
-      return grid;
+  rootNode.querySelectorAll('[data-countdown]').forEach(block=>{
+    if(block.dataset.cdReady)return;block.dataset.cdReady='1';
+    const cells={days:block.querySelector('[data-cd-days]'),hours:block.querySelector('[data-cd-hours]'),mins:block.querySelector('[data-cd-mins]'),secs:block.querySelector('[data-cd-secs]')};
+    const pad=value=>String(Math.max(0,value)).padStart(2,'0');
+    const tick=()=>{
+      const raw=String(block.dataset.target||'').trim().replace(/\//g,'-').replace(' ','T');
+      const target=new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw)?`${raw}T00:00`:raw).getTime();
+      if(!Number.isFinite(target)){if(cells.days)cells.days.textContent='—';return}
+      const diff=target-Date.now();const total=Math.max(0,Math.floor(diff/1000));
+      if(cells.days)cells.days.textContent=String(Math.floor(total/86400));
+      if(cells.hours)cells.hours.textContent=pad(Math.floor(total%86400/3600));
+      if(cells.mins)cells.mins.textContent=pad(Math.floor(total%3600/60));
+      if(cells.secs)cells.secs.textContent=pad(total%60);
+      block.classList.toggle('cd-done',diff<=0);
     };
-    const paint=()=>{for(let r=0;r<MC_ROWS;r++)for(let c=0;c<MC_COLS;c++)cells[r*MC_COLS+c].dataset.b=data[r][c]};
-    const dig=cell=>{const r=Number(cell.dataset.r),c=Number(cell.dataset.c);if(data[r][c]!=='air'){data[r][c]='air';cell.dataset.b='air'}};
-    const place=cell=>{const r=Number(cell.dataset.r),c=Number(cell.dataset.c);if(data[r][c]==='air'){data[r][c]=selected;cell.dataset.b=selected}};
-    data=buildWorld();paint();
-    world.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation()});
-    world.addEventListener('pointerdown',event=>{const cell=event.target.closest('.mc-b');if(!cell)return;event.preventDefault();event.stopPropagation();painting=event.button===2||mode==='dig'?'dig':'place';(painting==='dig'?dig:place)(cell)});
-    world.addEventListener('pointerover',event=>{if(!painting)return;const cell=event.target.closest('.mc-b');if(!cell)return;(painting==='dig'?dig:place)(cell)});
-    window.addEventListener('pointerup',()=>{painting=false});
-    world.addEventListener('pointerleave',()=>{painting=false});
-    palette.addEventListener('click',event=>{const button=event.target.closest('[data-mc-block]');if(!button)return;event.stopPropagation();selected=button.dataset.mcBlock;mode='place';game.querySelectorAll('[data-mc-mode]').forEach(item=>item.classList.toggle('active',item.dataset.mcMode==='place'));palette.querySelectorAll('.mc-block').forEach(item=>item.classList.toggle('active',item===button))});
-    game.querySelectorAll('[data-mc-mode]').forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();mode=button.dataset.mcMode;game.querySelectorAll('[data-mc-mode]').forEach(item=>item.classList.toggle('active',item===button))}));
-    game.querySelector('[data-mc-reset]')?.addEventListener('click',event=>{event.stopPropagation();data=buildWorld();paint()});
+    tick();setInterval(tick,1000);
+  });
+  rootNode.querySelectorAll('[data-poll]').forEach(box=>{
+    if(box.dataset.pollReady)return;box.dataset.pollReady='1';
+    const question=(box.closest('section')?.querySelector('h2')?.textContent||'poll').trim();
+    const key=`hatchery:poll:${question}`;
+    const options=[...box.querySelectorAll('[data-poll-option]')];
+    const seeds=options.map(option=>Number(option.querySelector('[data-poll-num]')?.textContent)||0);
+    let saved=null;try{saved=JSON.parse(localStorage.getItem(key)||'null')}catch{}
+    const deltas=options.map((_,index)=>Number(saved?.d?.[index])||0);
+    let voted=Number.isInteger(saved?.v)?saved.v:null;
+    const persist=()=>{try{localStorage.setItem(key,JSON.stringify({v:voted,d:deltas}))}catch{}};
+    const render=()=>{
+      const counts=seeds.map((seed,index)=>seed+deltas[index]);
+      const total=counts.reduce((sum,value)=>sum+value,0)||1;
+      options.forEach((option,index)=>{
+        const num=option.querySelector('[data-poll-num]'),fill=option.querySelector('.poll-fill');
+        if(num&&num.textContent!==String(counts[index]))num.textContent=String(counts[index]);
+        if(fill)fill.style.width=`${Math.round(counts[index]/total*100)}%`;
+        option.classList.toggle('voted',voted===index);
+      });
+      box.classList.toggle('has-voted',voted!==null);
+    };
+    options.forEach((option,index)=>option.addEventListener('click',event=>{
+      event.preventDefault();event.stopPropagation();
+      if(voted===index){deltas[index]=Math.max(0,deltas[index]-1);voted=null}
+      else{if(voted!==null)deltas[voted]=Math.max(0,deltas[voted]-1);deltas[index]+=1;voted=index}
+      persist();render();
+    }));
+    render();
   });
 }
 function editDefaults(element){
-  const defaults={nav:{title:state.siteName,description:'',button:''},hero:{title:'把想法，\n变成真正的作品。',description:state.description,button:'开始了解',titleSize:'clamp(48px,7vw,102px)'},game:{title:'方块世界 · 一起来搭建',description:'MINICRAFT SANDBOX',button:'左键放置 · 右键挖掘'},projects:{title:'最近的作品',description:'SELECTED WORK',button:'点击卡片查看详情'},blog:{title:'最新文章',description:'JOURNAL',button:'进入文章'},gallery:{title:'活动瞬间',description:'MOMENTS',button:''},stats:{title:'86|24|12',description:'社团成员|开源项目|本学期活动',button:''},team:{title:'认识成员',description:'OUR TEAM',button:''},timeline:{title:'活动安排',description:'UPCOMING',button:''},forum:{title:'大家都在聊',description:'',button:'发布话题'},account:{title:'登录你的账号',description:'登录后即可查看成员内容与参与社区互动。',button:'登录账号'},notice:{title:'秋季招新开始啦 · 9 月 5 日活动中心见',description:'',button:'查看详情',background:'var(--page-accent)',color:'#141510'},links:{title:'加入交流群|查看 GitHub|关注公众号',description:'#group|https://github.com|#wechat',button:''},cta:{title:'一起把下一个好点子做出来。',description:'',button:'现在加入'},footer:{title:state.siteName,description:'© 2026 · 由 AIchemyHatchery 搭建',button:''},detail:{title:activePage().name,description:'在这里填写详情摘要。',body:'在这里填写详情正文。',button:''}};
+  const defaults={nav:{title:state.siteName,description:'',button:''},hero:{title:'把想法，\n变成真正的作品。',description:state.description,button:'开始了解',titleSize:'clamp(48px,7vw,102px)'},projects:{title:'最近的作品',description:'SELECTED WORK',button:'点击卡片查看详情'},blog:{title:'最新文章',description:'JOURNAL',button:'进入文章'},gallery:{title:'活动瞬间',description:'MOMENTS',button:''},stats:{title:'86|24|12',description:'社团成员|开源项目|本学期活动',button:''},team:{title:'认识成员',description:'OUR TEAM',button:''},timeline:{title:'活动安排',description:'UPCOMING',button:''},profile:{title:'林小满',description:'ABOUT ME',button:'',avatar:'林',tagline:'高二学生 · 喜欢用代码解决小问题',bio:'你好，我是林小满。白天上课，晚上写点小程序；最近在用 AI 帮社团做招新网站。我相信工具能放大好奇心，也相信把作品做出来给别人用，是最好的学习方式。'},schedule:{title:'本学期课程表',description:'MY TIMETABLE',button:'点击课程名可直接修改'},countdown:{title:'距离高考',description:'COUNTDOWN',target:'2027-06-07 09:00',button:''},skills:{title:'我会这些',description:'MY SKILLS',button:''},awards:{title:'荣誉与奖项',description:'HONORS',button:''},departments:{title:'部门介绍',description:'DEPARTMENTS',button:'总有一款适合你'},steps:{title:'招新流程',description:'HOW TO JOIN',button:''},faq:{title:'常见问题',description:'FAQ',button:''},downloads:{title:'资料下载',description:'RESOURCES',button:''},poll:{title:'社团之夜办什么？',description:'VOTE',button:'每人一票，实时统计',hint:'点击选项即可投票，再点一次取消。'},forum:{title:'大家都在聊',description:'',button:'发布话题'},account:{title:'登录你的账号',description:'登录后即可查看成员内容与参与社区互动。',button:'登录账号'},notice:{title:'秋季招新开始啦 · 9 月 5 日活动中心见',description:'',button:'查看详情',background:'var(--page-accent)',color:'#141510'},links:{title:'加入交流群|查看 GitHub|关注公众号',description:'#group|https://github.com|#wechat',button:''},cta:{title:'一起把下一个好点子做出来。',description:'',button:'现在加入'},footer:{title:state.siteName,description:'© 2026 · 由 AIchemyHatchery 搭建',button:''},detail:{title:activePage().name,description:'在这里填写详情摘要。',body:'在这里填写详情正文。',button:''}};
   return {...defaults[element.type],...(element.settings||{})};
 }
 function inlineEditorMarkup(element){
@@ -275,7 +293,7 @@ function renderCanvas(){
   const legacyImages=(page.elements||[]).filter(element=>element.type==='image');if(legacyImages.length){legacyImages.forEach((element,index)=>pageObjects(page).push({id:uid('obj'),kind:'image',settings:{image:element.settings?.image||'',alt:element.settings?.alt||'插入的图片'},objectStyles:{image:{width:element.objectStyles?.image?.width||360,height:element.objectStyles?.image?.height||230,objectFit:element.objectStyles?.image?.objectFit||'contain',x:element.objectStyles?.image?.x||60+index*24,y:element.objectStyles?.image?.y||70+index*24,rotation:element.objectStyles?.image?.rotation||0}}}));page.elements=page.elements.filter(element=>element.type!=='image')}
   ensurePageCode(page);
   const content=document.querySelector('#canvasContent');const flow=page.code.trim()||pageObjects(page).length?page.code:`<div class="empty-canvas" data-empty-drop><div><i>＋</i><b>这是一个空白页面</b><small>在左侧告诉 AI 你想做什么，让它帮你搭建</small></div></div>`;content.innerHTML=isolatePageCode(flow)+floatingObjectLayer(page,true);
-  refreshMobileFontScaling(canvas);bindCanvasEvents();initMcGames(content);enforceElementHeightLimits();ensureObjectEditorChrome();restoreSelectedObject();restoreTextSelectionBookmark();const selected=editingElementId?getElementById(editingElementId):null;const hasContent=page.code.trim().length||pageObjects(page).length;document.querySelector('#selectionState').textContent=selected?`已打开设置：${elementCatalog[selected.type]?.name||selected.type}`:selectedObjectRef?(selectedObjectRef.kind==='text'?'可直接输入文字':'拖动边框移动 · 拖动控制点缩放'):hasContent?'页面为整页代码，由 AI 直接修改':'空白页面';document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));scheduleDraftSave();updatePreviewVisibility();
+  refreshMobileFontScaling(canvas);bindCanvasEvents();initTemplateWidgets(content);enforceElementHeightLimits();ensureObjectEditorChrome();restoreSelectedObject();restoreTextSelectionBookmark();const selected=editingElementId?getElementById(editingElementId):null;const hasContent=page.code.trim().length||pageObjects(page).length;document.querySelector('#selectionState').textContent=selected?`已打开设置：${elementCatalog[selected.type]?.name||selected.type}`:selectedObjectRef?(selectedObjectRef.kind==='text'?'可直接输入文字':'拖动边框移动 · 拖动控制点缩放'):hasContent?'页面为整页代码，由 AI 直接修改':'空白页面';document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));scheduleDraftSave();updatePreviewVisibility();
 }
 
 function renderPages(){
@@ -890,11 +908,13 @@ async function startAiRun(prompt,requestAttachments=[],chosenPresets=[],presetSn
 }
 const TEMPLATE_GROUPS=[
   {title:'页面结构',en:'STRUCTURE',items:['nav','hero','footer','cta']},
-  {title:'内容展示',en:'CONTENT',items:['projects','blog','gallery','stats','team','timeline','game']},
+  {title:'内容展示',en:'CONTENT',items:['projects','blog','gallery','stats','team','timeline']},
+  {title:'个人必备',en:'PERSONAL',items:['profile','schedule','countdown','skills','awards']},
+  {title:'社团运营',en:'CLUB',items:['departments','steps','faq','downloads','poll']},
   {title:'社区功能',en:'COMMUNITY',items:['forum','account','notice','links']},
 ];
-const TEMPLATE_DESCRIPTIONS={nav:'LOGO 与页面链接',hero:'主标题与行动按钮',footer:'联系与版权信息',cta:'一句话与主按钮',projects:'三列项目作品',blog:'日期、标题与摘要',gallery:'错落图片网格',stats:'关键数字与指标',team:'头像、名字与分工',timeline:'日期与活动安排',game:'可交互的方块沙盒',forum:'板块导航、话题列表与回复数量',account:'登录状态、账号信息与退出',notice:'招新与活动通知',links:'社群与相关站点'};
-const TEMPLATE_VISUALS={nav:'<span></span><span></span><span></span>',hero:'<strong>Aa</strong><span></span>',footer:'<span></span><span></span>',cta:'<strong>→</strong><span></span>',projects:'<span></span><span></span><span></span>',blog:'<span></span><span></span><span></span>',gallery:'<span></span><span></span><span></span>',stats:'<strong>24</strong><strong>08</strong><strong>16</strong>',team:'<span></span><span></span><span></span>',timeline:'<span></span><span></span><span></span>',game:'<span></span><span></span><span></span><span></span>',forum:'<span></span><div><b></b><b></b><b></b></div>',account:'<span>AD</span><b></b>',notice:'<strong>!</strong><span></span>',links:'<span>↗</span><span>↗</span>'};
+const TEMPLATE_DESCRIPTIONS={nav:'LOGO 与页面链接',hero:'主标题与行动按钮',footer:'联系与版权信息',cta:'一句话与主按钮',projects:'三列项目作品卡',blog:'日期、标题与摘要',gallery:'错落图片网格',stats:'关键数字与指标',team:'头像、名字与分工',timeline:'日期与活动安排',profile:'头像、简介与联系方式',schedule:'一周五天的课程网格',countdown:'高考或活动倒计天数',skills:'技能条与百分比',awards:'年份、奖项与说明',departments:'部门职责与人数',steps:'报名到入社的指引',faq:'折叠式问答列表',downloads:'文件清单与下载按钮',poll:'选项投票与实时占比',forum:'板块导航、话题列表与回复数量',account:'登录状态、账号信息与退出',notice:'招新与活动通知',links:'社群与相关站点'};
+const TEMPLATE_VISUALS={nav:'<span></span><span></span><span></span>',hero:'<strong>Aa</strong><span></span>',footer:'<span></span><span></span>',cta:'<strong>→</strong><span></span>',projects:'<span></span><span></span><span></span>',blog:'<span></span><span></span><span></span>',gallery:'<span></span><span></span><span></span>',stats:'<strong>24</strong><strong>08</strong><strong>16</strong>',team:'<span></span><span></span><span></span>',timeline:'<span></span><span></span><span></span>',profile:'<span></span><span></span>',schedule:'<span></span><span></span><span></span><span></span>',countdown:'<strong>07</strong><span></span>',skills:'<span></span><span></span><span></span>',awards:'<strong>★</strong><span></span>',departments:'<span></span><span></span><span></span>',steps:'<b>1</b><b>2</b><b>3</b>',faq:'<strong>?</strong><span></span>',downloads:'<span>↓</span><span>↓</span>',poll:'<span></span><span></span>',forum:'<span></span><div><b></b><b></b><b></b></div>',account:'<span>AD</span><b></b>',notice:'<strong>!</strong><span></span>',links:'<span>↗</span><span>↗</span>'};
 function closeTemplatePicker(){
   document.querySelector('#templatePicker')?.remove();
   document.querySelector('[data-template-open]')?.classList.remove('active');
@@ -913,6 +933,7 @@ function openTemplatePicker(){
   picker.querySelectorAll('[data-template-type]').forEach(card=>card.addEventListener('click',()=>{
     card.setAttribute('aria-pressed',String(card.getAttribute('aria-pressed')!=='true'));
     const chosen=picker.querySelectorAll('[data-template-type][aria-pressed="true"]').length;
+    if(chosen>8){card.setAttribute('aria-pressed','false');showToast('一次最多添加 8 个模块，可分多次添加');return}
     count.textContent=chosen?`已选 ${chosen} 个模块`:'未选择模块';confirm.disabled=!chosen;
   }));
   confirm.addEventListener('click',async()=>{

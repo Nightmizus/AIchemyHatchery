@@ -32,7 +32,7 @@ root.style.background=site.background||'#fff';
 root.style.color='var(--page-fg)';
 if(isPreviewMode)document.querySelector('#sitePreviewNotice').hidden=false;
 root.innerHTML=isAdminRoute?'<main class="site-admin"><div class="forum-page-loading">正在加载站点后台…</div></main>':isForumRoute?'<main class="forum-page"><div class="forum-page-loading">正在加载社区…</div></main>':current.html||'<div class="empty-canvas"><div><b>这个页面还是空白的</b></div></div>';
-initMcGames(root);
+initTemplateWidgets(root);
 new MutationObserver(schedulePublishedMobileFonts).observe(root,{childList:true,subtree:true});window.addEventListener('resize',schedulePublishedMobileFonts,{passive:true});schedulePublishedMobileFonts();
 document.title=isAdminRoute?`站点后台｜${site.siteName}`:isForumRoute?`社区论坛｜${site.siteName}`:`${current.name}｜${site.siteName}`;
 
@@ -153,44 +153,53 @@ async function submitRuntimeForm(form){const data=new FormData(form);const butto
 document.querySelector('#previewModal').addEventListener('click',event=>{const actionButton=event.target.closest('[data-modal-action]');if(actionButton){const action=actionButton.dataset.modalAction;if(action==='close')closeModal();if(action==='register'){void toggleRegistration(actionButton.dataset.event).then(done=>{if(done)closeModal()}).catch(error=>showToast(error.message))}if(action==='copy'){navigator.clipboard?.writeText(actionButton.dataset.copy||'');showToast('已复制')}return}if(event.target.id==='previewModal')closeModal()});
 document.querySelector('#closeModalBtn').addEventListener('click',closeModal);
 document.querySelector('#toast button').addEventListener('click',()=>document.querySelector('#toast').hidden=true);
-function initMcGames(rootNode){
+function initTemplateWidgets(rootNode){
   if(!rootNode)return;
-  const MC_BLOCKS=[['grass','草方块'],['dirt','泥土'],['stone','石头'],['wood','木头'],['leaves','树叶'],['sand','沙子'],['brick','砖块'],['glass','玻璃']];
-  const MC_COLS=28,MC_ROWS=16;
-  rootNode.querySelectorAll('[data-mc-game]').forEach(game=>{
-    if(game.dataset.mcReady)return;game.dataset.mcReady='1';
-    const world=game.querySelector('[data-mc-world]'),palette=game.querySelector('[data-mc-palette]');if(!world||!palette)return;
-    let selected='grass',mode='place',painting=false,data=[];
-    palette.innerHTML=MC_BLOCKS.map((block,index)=>`<button type="button" class="mc-block${index===0?' active':''}" data-mc-block="${block[0]}" title="${block[1]}"><i class="mc-b" data-b="${block[0]}"></i><span>${block[1]}</span></button>`).join('');
-    world.style.setProperty('--mc-cols',MC_COLS);
-    world.innerHTML='';const cells=[];
-    for(let r=0;r<MC_ROWS;r++)for(let c=0;c<MC_COLS;c++){const cell=document.createElement('div');cell.className='mc-b';cell.dataset.b='air';cell.dataset.r=r;cell.dataset.c=c;world.appendChild(cell);cells.push(cell)}
-    const buildWorld=()=>{
-      const heights=[];let level=7;
-      for(let c=0;c<MC_COLS;c++){if(Math.random()<.4)level=Math.max(4,Math.min(9,level+(Math.random()<.5?-1:1)));heights.push(level)}
-      const grid=[];
-      for(let r=0;r<MC_ROWS;r++){const row=[];for(let c=0;c<MC_COLS;c++){const h=heights[c];row.push(r<h?'air':r===h?'grass':r<h+3?'dirt':'stone')}grid.push(row)}
-      let lastTree=-6;
-      for(let c=2;c<MC_COLS-2;c++){
-        if(c-lastTree<4||Math.random()>=.16)continue;lastTree=c;const h=heights[c];if(h<5)continue;
-        for(let t=1;t<=3;t++)grid[h-t][c]='wood';
-        for(let dr=-2;dr<=0;dr++)for(let dc=-2;dc<=2;dc++){const rr=h-3+dr,cc=c+dc;if(rr<0||cc<0||cc>=MC_COLS)continue;if(Math.abs(dc)===2&&dr===-2)continue;if(grid[rr][cc]==='air')grid[rr][cc]='leaves'}
-        if(h-6>=0&&grid[h-6][c]==='air')grid[h-6][c]='leaves';
-      }
-      return grid;
+  rootNode.querySelectorAll('[data-countdown]').forEach(block=>{
+    if(block.dataset.cdReady)return;block.dataset.cdReady='1';
+    const cells={days:block.querySelector('[data-cd-days]'),hours:block.querySelector('[data-cd-hours]'),mins:block.querySelector('[data-cd-mins]'),secs:block.querySelector('[data-cd-secs]')};
+    const pad=value=>String(Math.max(0,value)).padStart(2,'0');
+    const tick=()=>{
+      const raw=String(block.dataset.target||'').trim().replace(/\//g,'-').replace(' ','T');
+      const target=new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw)?`${raw}T00:00`:raw).getTime();
+      if(!Number.isFinite(target)){if(cells.days)cells.days.textContent='—';return}
+      const diff=target-Date.now();const total=Math.max(0,Math.floor(diff/1000));
+      if(cells.days)cells.days.textContent=String(Math.floor(total/86400));
+      if(cells.hours)cells.hours.textContent=pad(Math.floor(total%86400/3600));
+      if(cells.mins)cells.mins.textContent=pad(Math.floor(total%3600/60));
+      if(cells.secs)cells.secs.textContent=pad(total%60);
+      block.classList.toggle('cd-done',diff<=0);
     };
-    const paint=()=>{for(let r=0;r<MC_ROWS;r++)for(let c=0;c<MC_COLS;c++)cells[r*MC_COLS+c].dataset.b=data[r][c]};
-    const dig=cell=>{const r=Number(cell.dataset.r),c=Number(cell.dataset.c);if(data[r][c]!=='air'){data[r][c]='air';cell.dataset.b='air'}};
-    const place=cell=>{const r=Number(cell.dataset.r),c=Number(cell.dataset.c);if(data[r][c]==='air'){data[r][c]=selected;cell.dataset.b=selected}};
-    data=buildWorld();paint();
-    world.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation()});
-    world.addEventListener('pointerdown',event=>{const cell=event.target.closest('.mc-b');if(!cell)return;event.preventDefault();event.stopPropagation();painting=event.button===2||mode==='dig'?'dig':'place';(painting==='dig'?dig:place)(cell)});
-    world.addEventListener('pointerover',event=>{if(!painting)return;const cell=event.target.closest('.mc-b');if(!cell)return;(painting==='dig'?dig:place)(cell)});
-    window.addEventListener('pointerup',()=>{painting=false});
-    world.addEventListener('pointerleave',()=>{painting=false});
-    palette.addEventListener('click',event=>{const button=event.target.closest('[data-mc-block]');if(!button)return;event.stopPropagation();selected=button.dataset.mcBlock;mode='place';game.querySelectorAll('[data-mc-mode]').forEach(item=>item.classList.toggle('active',item.dataset.mcMode==='place'));palette.querySelectorAll('.mc-block').forEach(item=>item.classList.toggle('active',item===button))});
-    game.querySelectorAll('[data-mc-mode]').forEach(button=>button.addEventListener('click',event=>{event.stopPropagation();mode=button.dataset.mcMode;game.querySelectorAll('[data-mc-mode]').forEach(item=>item.classList.toggle('active',item===button))}));
-    game.querySelector('[data-mc-reset]')?.addEventListener('click',event=>{event.stopPropagation();data=buildWorld();paint()});
+    tick();setInterval(tick,1000);
+  });
+  rootNode.querySelectorAll('[data-poll]').forEach(box=>{
+    if(box.dataset.pollReady)return;box.dataset.pollReady='1';
+    const question=(box.closest('section')?.querySelector('h2')?.textContent||'poll').trim();
+    const key=`hatchery:poll:${question}`;
+    const options=[...box.querySelectorAll('[data-poll-option]')];
+    const seeds=options.map(option=>Number(option.querySelector('[data-poll-num]')?.textContent)||0);
+    let saved=null;try{saved=JSON.parse(localStorage.getItem(key)||'null')}catch{}
+    const deltas=options.map((_,index)=>Number(saved?.d?.[index])||0);
+    let voted=Number.isInteger(saved?.v)?saved.v:null;
+    const persist=()=>{try{localStorage.setItem(key,JSON.stringify({v:voted,d:deltas}))}catch{}};
+    const render=()=>{
+      const counts=seeds.map((seed,index)=>seed+deltas[index]);
+      const total=counts.reduce((sum,value)=>sum+value,0)||1;
+      options.forEach((option,index)=>{
+        const num=option.querySelector('[data-poll-num]'),fill=option.querySelector('.poll-fill');
+        if(num&&num.textContent!==String(counts[index]))num.textContent=String(counts[index]);
+        if(fill)fill.style.width=`${Math.round(counts[index]/total*100)}%`;
+        option.classList.toggle('voted',voted===index);
+      });
+      box.classList.toggle('has-voted',voted!==null);
+    };
+    options.forEach((option,index)=>option.addEventListener('click',event=>{
+      event.preventDefault();event.stopPropagation();
+      if(voted===index){deltas[index]=Math.max(0,deltas[index]-1);voted=null}
+      else{if(voted!==null)deltas[voted]=Math.max(0,deltas[voted]-1);deltas[index]+=1;voted=index}
+      persist();render();
+    }));
+    render();
   });
 }
 renderRuntime();
