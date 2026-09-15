@@ -6,8 +6,8 @@
   <meta name="description" content="炼丹社Hatchery——面向校园个人与社团的模块化 AI 建站控制台。">
   <title>炼丹社Hatchery｜页面编辑器</title>
   <link rel="stylesheet" href="/styles.css?v=20260915-1">
-  <link rel="stylesheet" href="/mica.css?v=20260915-3">
-  <link rel="stylesheet" href="/ai-chat.css?v=20260915-5">
+  <link rel="stylesheet" href="/mica.css?v=20260915-4">
+  <link rel="stylesheet" href="/ai-chat.css?v=20260915-7">
 </head>
 <body>
   <section class="auth-gate" id="authGate" data-state="checking" aria-label="炼丹社Hatchery账号登录">
@@ -95,6 +95,10 @@
                     </div>
                   </div>
                   <div class="ai-toolbar-right">
+                    <div class="ai-mode-wrap ai-model-wrap">
+                      <button class="ai-model-chip" id="aiModelBtn" type="button" aria-haspopup="true" aria-expanded="false" title="模型与推理档位"><span id="aiModelLabel">k3</span><small id="aiEffortLabel">高</small><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.8 6 7.8 9 4.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                      <div class="ai-mode-menu ai-model-menu" id="aiModelMenu" hidden></div>
+                    </div>
                     <svg class="ai-context-ring" id="aiContextRingSvg" viewBox="0 0 44 44" aria-hidden="true">
                       <defs>
                         <linearGradient id="aiRingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -203,6 +207,6 @@
     <button data-context-action="edit">编辑</button>
   </div>
   <script src="/auth.js?v=20260909-1"></script>
-  <script src="/script.js?v=20260915-1"></script>
+  <script src="/script.js?v=20260915-3"></script>
 </body>
 </html>
