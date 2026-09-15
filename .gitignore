@@ -42,3 +42,6 @@ __pycache__/
 
 # 交接手册密钥（本地留存）
 .handover-secrets.local
+
+# 用户表导出快照（含口令哈希等敏感数据，禁止提交）
+hatchery-users-*.sql
