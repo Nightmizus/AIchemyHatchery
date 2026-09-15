@@ -40,6 +40,8 @@ PROVIDERS = {
         "default_model": DEFAULT_MODEL,
         "default_effort": "",
         "label": "DeepSeek Harness",
+        "models": [{"id": DEFAULT_MODEL, "name": "DeepSeek V4 Flash"}],
+        "efforts": [{"id": "off", "name": "关闭"}, {"id": "low", "name": "低"}, {"id": "high", "name": "高"}],
     },
     "kimi": {
         "route": "kimi",
@@ -49,6 +51,8 @@ PROVIDERS = {
         "default_model": "k3",
         "default_effort": "high",
         "label": "Kimi (Harness)",
+        "models": [{"id": "k3", "name": "Kimi K3"}, {"id": "kimi-k2.6", "name": "Kimi K2.6"}],
+        "efforts": [{"id": "off", "name": "关闭"}, {"id": "low", "name": "低"}, {"id": "high", "name": "高"}],
     },
 }
 
@@ -65,6 +69,11 @@ def resolve_llm_provider() -> tuple[str, dict]:
 
 SYSTEM_PROMPT = """你是秒哒网站平台中负责自动修改网站的代码代理，执行内核是 DeepSeek Harness。
 你的权限只有本次运行中列出的六个网站工具。你只能完成网站制作、网站内容调整、网站样式、前端交互和本地预览验证相关任务；其他任务必须拒绝。
+
+意图判断（优先于其他一切规则）：
+- 先判断用户消息是不是在要求改动网站。寒暄、闲聊、一般性提问（例如"你好""你是谁""你能做什么"）都不是改动要求：不要调用任何工具，不要改动网站，像普通助手一样在最终 JSON 的 summary 里直接回答或聊天，siteOperations 和 checks 留空。
+- 关于当前网站的提问（结构、内容、代码、哪里可以怎么改）：可以用 list_files、read_file、search_files 查看后回答，但不得调用 replace_file、不得改动 site.json；summary 写你的回答，siteOperations 和 checks 留空。
+- 只有用户明确要求制作、新建、修改、删除、调整网站（或其中某个页面、模块、样式、内容）时，才进入下面的改动流程。
 
 硬性边界：
 1. 文件权限只有当前网站的内部文件夹：list_files 列出的就是你能读写的全部文件，网站数据在 site.json 里。文件夹之外的一切（平台源码、系统文件、其他网站、其他用户数据）你都没有权限，也不得尝试访问。site.json 结构：siteName、description、theme、background、contentWidth、pages[]；每个 page 有 id、name、path、parentId、kind、code——code 就是整页 HTML，页面渲染与模块体系无关，直接把 code 当作完整页面代码来写。
@@ -102,6 +111,7 @@ site.json 结构：siteName、description、theme、background、contentWidth、
 # plan模式：只读 + 浏览器预览，产出实施计划，不写文件。
 PLAN_SYSTEM_PROMPT = """你是秒哒网站平台里负责规划网站改动的 AI 规划师，执行内核是 DeepSeek Harness，本轮为「plan模式」。
 你的任务是读懂当前网站和用户需求，产出一份可执行的实施计划；本轮禁止修改任何文件（你没有写入工具）。
+意图判断：如果用户消息只是寒暄、闲聊或一般性提问，并不是要求规划网站改动，就不要制定计划——用 list_files、read_file、search_files 了解后像普通助手一样在 summary 里直接回答，plan 留空，checks 留空。只有用户确实想改动网站时才输出计划。
 可用工具：list_files、read_file、search_files 查看网站文件，browser_open、browser_screenshot 打开用户消息里的"工作区预览地址"查看当前网站效果（它实时渲染当前 site.json；不要打开控制台首页，那里未登录只能看到登录页）。
 site.json 结构：siteName、description、theme、background、contentWidth、pages[]；每个 page 有 id、name、path、parentId、kind、code（整页 HTML，页面间链接用 <a href="#" data-preview-action="navigate" data-page-id="目标页面id">）。
 计划要求：按编号分步写清要改哪些页面、增删什么模块与内容、版式与配色方向、需要新建页面时的 id/name/path 规划；计划要具体到可以直接照做，但不要写出整页代码。
@@ -201,6 +211,8 @@ def harness_status(root: Path) -> dict:
         "model": os.environ.get(provider["model_env"], "").strip() or provider["default_model"],
         "reasoningEffort": os.environ.get(provider["effort_env"], "").strip() or provider["default_effort"] or None,
         "mode": "auto",
+        "models": provider.get("models", []),
+        "efforts": provider.get("efforts", []),
         "tools": list(TOOL_LABELS),
     }
 
@@ -567,6 +579,8 @@ def run_deepseek_harness(
     preview_port: int,
     progress: ProgressCallback | None = None,
     mode: str = "full",
+    model: str | None = None,
+    reasoning: str | None = None,
 ) -> dict:
     provider_name, provider = resolve_llm_provider()
     key = os.environ.get(provider["key_env"], "").strip()
@@ -585,8 +599,8 @@ def run_deepseek_harness(
     system_prompt = SYSTEM_PROMPT if mode == "full" else (CHAT_SYSTEM_PROMPT if mode == "chat" else PLAN_SYSTEM_PROMPT)
     dsh_home = (root / ".deepseek-harness" / "home").resolve()
     dsh_home.mkdir(parents=True, exist_ok=True)
-    model = os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
-    reasoning = os.environ.get(provider["effort_env"], "").strip() or provider["default_effort"]
+    model = (model or "").strip() or os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
+    reasoning = (reasoning or "").strip() or os.environ.get(provider["effort_env"], "").strip() or provider["default_effort"]
     timeout = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "1200"))))
     max_tokens = max(1024, min(131072, int(os.environ.get("DEEPSEEK_MAX_TOKENS", "32768"))))
 

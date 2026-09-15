@@ -1341,7 +1341,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     # DeepSeek Harness is the only automatic execution engine. Its file access is
     # confined to the current website's own folder (sites/<user_id>/); the AI may
     # not read or modify anything else on the host.
-    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None, mode: str = "full") -> dict:
+    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None, mode: str = "full", model_override: str = "", effort_override: str = "") -> dict:
         run_id = f"run-{secrets.token_hex(10)}"
         if mode not in ("chat", "plan", "full"):
             mode = "full"
@@ -1388,6 +1388,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             preview_port=PORT,
             progress=progress,
             mode=mode,
+            model=model_override or None,
+            reasoning=effort_override or None,
         )
 
         site_replace = None
@@ -1570,6 +1572,12 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         mode = str(payload.get("mode", "full")).strip().lower()
         if mode not in ("chat", "plan", "full"):
             raise ValueError("AI 权限模式无效（可选：chat / plan / full）")
+        chosen_model = str(payload.get("model", "")).strip()[:64]
+        if chosen_model and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-]*", chosen_model):
+            raise ValueError("模型选择无效")
+        chosen_effort = str(payload.get("reasoningEffort", "")).strip().lower()
+        if chosen_effort and chosen_effort not in ("off", "low", "high"):
+            raise ValueError("推理档位无效（可选：off / low / high）")
         raw_attachments = payload.get("attachments", [])
         raw_presets = payload.get("chosenPresets", [])
         if not isinstance(raw_presets, list) or len(raw_presets) > 20:
@@ -1633,19 +1641,20 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 text = str(item.get("text", "")).strip()[:1000]
                 if text:
                     history.append({"role": item["role"], "text": text})
-        return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode
+        return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort
 
     def handle_ai_run(self, user: dict) -> None:
         global AI_UPSTREAM_DEGRADED
-        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort = self.prepare_ai_run()
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
         lock_owner = f"sync-{secrets.token_hex(6)}"
         if not ai_run_lock_acquire(lock_owner):
             raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
         provider_name, model = current_ai_provider_model()
+        model = chosen_model or model
         try:
-            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode=mode)
+            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode=mode, model_override=chosen_model, effort_override=chosen_effort)
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
             AI_UPSTREAM_DEGRADED = None
         except Exception:
@@ -1658,7 +1667,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
-        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort = self.prepare_ai_run()
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
@@ -1687,8 +1696,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         def worker() -> None:
             global AI_UPSTREAM_DEGRADED
             provider_name, model = current_ai_provider_model()
+            model = chosen_model or model
             try:
-                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress=progress, mode=mode)
+                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress=progress, mode=mode, model_override=chosen_model, effort_override=chosen_effort)
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
                 AI_UPSTREAM_DEGRADED = None
                 with AI_RUN_JOBS_LOCK:
