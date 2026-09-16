@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import html
 import json
 import hashlib
 import hmac
@@ -348,6 +349,31 @@ def new_preview_id(cur) -> str:
             return preview_id
 
 
+def published_site_meta(slug: str) -> tuple[str, str]:
+    """读取已发布站点的 site.json，返回 (站点名, 简介)；文件缺失或损坏时返回空串。"""
+    try:
+        data = json.loads((PUBLISHED / slug / "site.json").read_text(encoding="utf-8"))
+    except Exception:
+        return "", ""
+    return str(data.get("siteName") or ""), str(data.get("description") or "")
+
+
+def published_site_slugs_on_disk() -> dict[str, str]:
+    """磁盘上实际可访问的已发布站点：slug -> site.json 修改时间（ISO）。
+    服务以文件系统为准，历史遗留站点可能没有数据库行，列表/Gallery 要并上它们。"""
+    found: dict[str, str] = {}
+    try:
+        for entry in PUBLISHED.iterdir():
+            if not entry.is_dir():
+                continue
+            site_file = entry / "site.json"
+            if site_file.is_file():
+                found[entry.name] = iso_time(datetime.fromtimestamp(site_file.stat().st_mtime, tz=timezone.utc))
+    except Exception:
+        pass
+    return found
+
+
 def initialize_database() -> None:
     if not NEON_DATABASE_URL:
         sys.exit("缺少 Neon 连接串：请设置 NEON_DATABASE_URL 环境变量，或在 ~/Project/sdszwebsite/.env 写入 DATABASE_URL=...")
@@ -471,6 +497,7 @@ def initialize_database() -> None:
         updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS hatchery_ai_chat_sessions_user_idx ON hatchery_ai_chat_sessions(user_id, updated_at DESC);
+    ALTER TABLE hatchery_published_sites ADD COLUMN IF NOT EXISTS listed_in_gallery BOOLEAN NOT NULL DEFAULT TRUE;
     """
     with neon_db() as conn:
         with conn.cursor() as cur:
@@ -887,10 +914,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             with conn.cursor() as cur:
                 cur.execute("SELECT preview_id FROM hatchery_user_extras WHERE user_id = %s", (str(user_id),))
                 row = cur.fetchone()
-                cur.execute("SELECT slug FROM hatchery_published_sites WHERE user_id = %s", (str(user_id),))
+                cur.execute("SELECT slug, listed_in_gallery FROM hatchery_published_sites WHERE user_id = %s", (str(user_id),))
                 site = cur.fetchone()
         payload["previewId"] = row[0] if row else None
         payload["publishSlug"] = site[0] if site else None
+        payload["publishListed"] = bool(site[1]) if site else None
         payload["publishDomain"] = SITE_BASE_DOMAIN
         return payload
 
@@ -1939,6 +1967,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return
         data = self.read_json()
         slug = str(data.pop("slug", "") or "").strip().lower()
+        listed_in_gallery = bool(data.pop("listed", True))
         if not SITE_SLUG_PATTERN.fullmatch(slug):
             raise ValueError("发布路径需为 3–32 位小写字母、数字或短横线，且不能以短横线开头或结尾")
         if slug in RESERVED_SITE_SLUGS:
@@ -1962,11 +1991,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                         delete_site_records(cur, old_slug)
                     now = iso_time()
                     if old_slug == slug:
-                        cur.execute("UPDATE hatchery_published_sites SET updated_at = %s WHERE slug = %s", (now, slug))
+                        cur.execute("UPDATE hatchery_published_sites SET updated_at = %s, listed_in_gallery = %s WHERE slug = %s", (now, listed_in_gallery, slug))
                     else:
                         cur.execute(
-                            "INSERT INTO hatchery_published_sites(slug,user_id,created_at,updated_at) VALUES(%s,%s,%s,%s)",
-                            (slug, user_id, now, now),
+                            "INSERT INTO hatchery_published_sites(slug,user_id,created_at,updated_at,listed_in_gallery) VALUES(%s,%s,%s,%s,%s)",
+                            (slug, user_id, now, now, listed_in_gallery),
                         )
                     audit_event(cur, user_id, "site.published", {"slug": slug, "replaced": old_slug if old_slug != slug else None})
         except psycopg2.IntegrityError:
@@ -2536,6 +2565,59 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json(ai_config_snapshot())
             return
+        if parsed.path == "/api/admin/sites":
+            admin = self.require_console_user(admin=True)
+            if not admin:
+                return
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        SELECT p.slug, p.created_at, p.updated_at, p.listed_in_gallery,
+                               u.name AS owner_name, u."campusId" AS owner_campus_id
+                        FROM hatchery_published_sites p
+                        LEFT JOIN "User" u ON u.id = p.user_id
+                        ORDER BY p.updated_at DESC
+                        LIMIT 500
+                        """
+                    )
+                    rows = cur.fetchall()
+            sites = []
+            seen_slugs = set()
+            for row in rows:
+                slug = str(row["slug"])
+                seen_slugs.add(slug)
+                site_name, description = published_site_meta(slug)
+                sites.append({
+                    "slug": slug,
+                    "siteName": site_name,
+                    "description": description,
+                    "owner": row["owner_name"] or "",
+                    "ownerCampusId": row["owner_campus_id"] or "",
+                    "listed": bool(row["listed_in_gallery"]),
+                    "createdAt": row["created_at"],
+                    "updatedAt": row["updated_at"],
+                    "publicUrl": f"https://{slug}.{SITE_BASE_DOMAIN}",
+                })
+            # 服务以文件系统为准：磁盘上有但数据库缺行的历史站点也并入（默认收录）
+            for slug, mtime in published_site_slugs_on_disk().items():
+                if slug in seen_slugs:
+                    continue
+                site_name, description = published_site_meta(slug)
+                sites.append({
+                    "slug": slug,
+                    "siteName": site_name,
+                    "description": description,
+                    "owner": "",
+                    "ownerCampusId": "",
+                    "listed": True,
+                    "createdAt": mtime,
+                    "updatedAt": mtime,
+                    "publicUrl": f"https://{slug}.{SITE_BASE_DOMAIN}",
+                })
+            sites.sort(key=lambda item: str(item["updatedAt"]), reverse=True)
+            self.send_json({"sites": sites, "total": len(sites)})
+            return
         if parsed.path == "/api/admin/ai-usage":
             admin = self.require_console_user(admin=True)
             if not admin:
@@ -2812,6 +2894,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if pages_match:
             self.serve_published(parsed.path, pages_match.group(1))
             return
+        # Hatchery Gallery：收录所有发布的网站（/Gallery 大小写同进）
+        if parsed.path.lower() == "/gallery":
+            self.serve_gallery()
+            return
         if parsed.path == "/":
             self.path = f"/{FRONTEND_DIR}/index.html"
             super().do_GET()
@@ -2826,6 +2912,87 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             super().do_GET()
             return
         self.send_error(404, "Not found")
+
+    def serve_gallery(self) -> None:
+        """Hatchery Gallery：公开页面，收录所有发布时勾选“收录进 Gallery”的网站。"""
+        with neon_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT p.slug, p.updated_at, u.name AS owner_name
+                    FROM hatchery_published_sites p
+                    LEFT JOIN "User" u ON u.id = p.user_id
+                    WHERE p.listed_in_gallery
+                    ORDER BY p.updated_at DESC
+                    LIMIT 500
+                    """
+                )
+                rows = cur.fetchall()
+        # 磁盘上有但数据库缺行的历史站点一并收录（数据库行的收录标记优先）
+        known = {str(row["slug"]) for row in rows}
+        for slug, mtime in published_site_slugs_on_disk().items():
+            if slug not in known:
+                rows.append({"slug": slug, "updated_at": mtime, "owner_name": ""})
+        rows.sort(key=lambda row: str(row["updated_at"]), reverse=True)
+        cards = []
+        for row in rows:
+            slug = str(row["slug"])
+            site_name, description = published_site_meta(slug)
+            url = f"https://{slug}.{SITE_BASE_DOMAIN}"
+            updated = str(row["updated_at"])[:10]
+            cards.append(
+                f'<a class="card" href="{html.escape(url, quote=True)}" target="_blank" rel="noopener">'
+                f"<b>{html.escape(site_name or slug)}</b>"
+                f"<p>{html.escape(description or '这个网站还没有写介绍。')}</p>"
+                f"<small>{html.escape(str(row['owner_name'] or '匿名'))} · 更新于 {html.escape(updated)}</small>"
+                f'<span class="host">{html.escape(slug)}.{html.escape(SITE_BASE_DOMAIN)} ↗</span></a>'
+            )
+        grid = "".join(cards) or '<p class="empty">还没有收录的网站。发布你的网站时勾选「收录进 Hatchery Gallery」，就会出现在这里。</p>'
+        page = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Hatchery Gallery｜炼丹社Hatchery</title>
+<style>
+*{{margin:0;box-sizing:border-box}}
+body{{min-height:100vh;padding:56px 24px 80px;background:#0d1117;color:#e6edf3;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color-scheme:dark}}
+.wrap{{max-width:960px;margin:0 auto}}
+header.top{{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:8px}}
+h1{{font-size:clamp(26px,4vw,36px);letter-spacing:-.02em}}
+.sub{{color:#9aa7b1;font-size:13px;margin-bottom:34px}}
+.back{{flex:0 0 auto;padding:8px 14px;border:1px solid rgba(240,246,252,.22);border-radius:99px;color:#c9d1d9;font-size:12px;text-decoration:none}}
+.back:hover{{background:rgba(240,246,252,.08);color:#f0f6fc}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}}
+.card{{display:flex;flex-direction:column;gap:8px;padding:18px;border:1px solid rgba(240,246,252,.14);border-radius:14px;background:rgba(240,246,252,.03);color:inherit;text-decoration:none;transition:border-color .16s,background .16s,transform .16s}}
+.card:hover{{border-color:rgba(240,246,252,.32);background:rgba(240,246,252,.06);transform:translateY(-2px)}}
+.card b{{font-size:16px}}
+.card p{{color:#9aa7b1;font-size:12px;flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
+.card small{{color:#6e7681;font-size:11px}}
+.card .host{{color:#8b949e;font:11px Consolas,monospace}}
+.card:hover .host{{color:#c9d1d9}}
+.empty{{padding:60px 0;color:#6e7681;font-size:13px;text-align:center}}
+.count{{color:#6e7681;font-size:12px;margin-bottom:16px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top"><h1>Hatchery Gallery</h1><a class="back" href="/">← 回到控制台</a></header>
+<p class="sub">这里收录了用炼丹社Hatchery创建并发布的网站。发布时可以选择不收录。</p>
+<p class="count">共收录 {len(cards)} 个网站</p>
+<div class="grid">{grid}</div>
+</div>
+</body>
+</html>"""
+        body = page.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_workspace_preview(self, path: str, preview_id: str) -> None:
         """AI 工作区实时预览：按随机预览 id 读取对应用户工作区的 site.json，把 pages[].code 直接渲染出来。"""

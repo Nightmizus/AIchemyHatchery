@@ -574,6 +574,28 @@ body {
 .preview-dialog .ai-chat-item{border-color:var(--soft-line)}
 .preview-dialog .ai-chat-item header span{color:var(--muted)}
 .preview-dialog .ai-chat-atts i{background:rgba(240,246,252,.08);color:var(--muted)}
+/* 发布弹窗：Gallery 收录开关 */
+.preview-dialog .publish-gallery-opt{display:grid;gap:5px;padding:10px 12px;border:1px solid var(--soft-line);border-radius:8px;background:rgba(240,246,252,.03)}
+.preview-dialog .publish-gallery-opt label{display:flex;align-items:center;gap:8px;font-size:9px;font-weight:700;color:var(--ink);cursor:pointer}
+.preview-dialog .publish-gallery-opt input{width:14px;height:14px;accent-color:#e6edf3}
+.preview-dialog .publish-gallery-opt small{color:var(--muted);font-size:8px;line-height:1.55}
+.preview-dialog .publish-gallery-opt small a{color:#8ab4f8;text-decoration:none}
+.preview-dialog .publish-gallery-opt small a:hover{text-decoration:underline}
+/* 管理后台：已发布网站列表 */
+.admin-site-list{max-height:260px;overflow:auto}
+.admin-site-row{padding:11px 13px;display:grid;grid-template-columns:30px minmax(0,1fr) auto auto;align-items:center;gap:9px;border-top:1px solid var(--soft-line)}
+.admin-site-row:first-child{border-top:0}
+.admin-site-row>div b,.admin-site-row>div small{display:block}
+.admin-site-row>div b{font-size:9px;color:var(--ink)}
+.admin-site-row>div small{margin-top:4px;color:var(--muted);font-size:7px}
+.admin-site-row .admin-site-url{color:#6e7681;font:7px Consolas,monospace}
+.admin-site-row>em{padding:5px 7px;border-radius:99px;font-size:7px;font-style:normal}
+.admin-site-row>em.active{background:rgba(63,185,80,.16);color:#3fb950}
+.admin-site-row>em.disabled{background:rgba(240,246,252,.08);color:#8b949e}
+.admin-site-row>a{min-width:45px;padding:6px;border:1px solid var(--line);border-radius:5px;background:transparent;color:#c9d1d9;font-size:7px;text-align:center;text-decoration:none;white-space:nowrap}
+.admin-site-row>a:hover{border-color:var(--mica-hover-line);color:var(--ink)}
+.admin-console section>header>a{color:#8ab4f8;font-size:8px;text-decoration:none}
+.admin-console section>header>a:hover{text-decoration:underline}
 /* publish form & site admin credential */
 .preview-dialog .publish-domain{color:var(--ink)}
 .preview-dialog .publish-form label small{color:var(--muted)}
