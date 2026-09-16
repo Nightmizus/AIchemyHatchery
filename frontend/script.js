@@ -839,7 +839,7 @@ function showAuthGate(message=''){
 }
 function updateConsoleAccount(){
   if(!currentConsoleUser)return;const username=currentConsoleUser.username;const initial=username.slice(0,1).toUpperCase();
-  document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#menuUsername').textContent=username;const railName=document.querySelector('#activityAccountName');if(railName)railName.textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPreviewPath').textContent=currentConsoleUser.previewId?`/preview/${currentConsoleUser.previewId}`:'首次预览后生成';document.querySelector('#accountPublishPath').textContent=currentConsoleUser.publishSlug?`${currentConsoleUser.publishSlug}.hatchery.mizusumi.com`:'未发布';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
+  document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#menuUsername').textContent=username;const railName=document.querySelector('#activityAccountName');if(railName)railName.textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPreviewPath').textContent=currentConsoleUser.previewId?`/preview/${currentConsoleUser.previewId}`:'首次预览后生成';document.querySelector('#accountPublishPath').textContent=currentConsoleUser.publishSlug?`${currentConsoleUser.publishSlug}.${currentConsoleUser.publishDomain||'hatchery.mizusumi.com'}`:'未发布';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
 }
 async function enterConsole(user){
   currentConsoleUser=user;const username=user.username;DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_UNDO_KEY=`alchemyhatchery:${username}:ai-undo:v2`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;AI_RUN_KEY=`alchemyhatchery:${username}:ai-run:v1`;AI_MODE_KEY=`alchemyhatchery:${username}:ai-mode:v1`;AI_MODEL_KEY=`alchemyhatchery:${username}:ai-model:v1`;
@@ -999,9 +999,10 @@ function siteAdminCredentialMarkup(admin){return `<div class="site-admin-credent
 function openPublishModal(){
   if(!currentConsoleUser){showAuthGate('请先登录');return}
   const current=String(currentConsoleUser.publishSlug||'');
-  openModal('发布网站',`<form class="account-settings-form publish-form" data-console-form="publish"><p>输入发布路径，网站将发布在 <b class="publish-domain" data-publish-domain>${esc(current||'xxx')}.hatchery.mizusumi.com</b>。</p><label>发布路径<input name="slug" required minlength="3" maxlength="32" pattern="[a-z0-9](-?[a-z0-9])+" placeholder="例如 campus-news" value="${esc(current)}" autocomplete="off" spellcheck="false"><small>3–32 位小写字母、数字或短横线；已被他人占用的路径不能取。</small></label>${current?`<p class="publish-warning" data-publish-warning hidden>更改路径后，旧地址 <b>${esc(current)}.hatchery.mizusumi.com</b> 的页面（含论坛、成员账号数据）会被删除。</p>`:''}<button>确认发布</button></form>`);
+  const publishDomain=String(currentConsoleUser.publishDomain||'hatchery.mizusumi.com');
+  openModal('发布网站',`<form class="account-settings-form publish-form" data-console-form="publish"><p>输入发布路径，网站将发布在 <b class="publish-domain" data-publish-domain>${esc(current||'xxx')}.${esc(publishDomain)}</b>。</p><label>发布路径<input name="slug" required minlength="3" maxlength="32" pattern="[a-z0-9](-?[a-z0-9])+" placeholder="例如 campus-news" value="${esc(current)}" autocomplete="off" spellcheck="false"><small>3–32 位小写字母、数字或短横线；已被他人占用的路径不能取。</small></label>${current?`<p class="publish-warning" data-publish-warning hidden>更改路径后，旧地址 <b>${esc(current)}.${esc(publishDomain)}</b> 的页面（含论坛、成员账号数据）会被删除。</p>`:''}<button>确认发布</button></form>`);
   const form=document.querySelector('#previewModal [data-console-form="publish"]');if(!form)return;const input=form.elements.slug,domain=form.querySelector('[data-publish-domain]'),warning=form.querySelector('[data-publish-warning]');
-  const sync=()=>{const value=input.value.trim().toLowerCase();if(input.value!==value)input.value=value;if(domain)domain.textContent=`${value||'xxx'}.hatchery.mizusumi.com`;if(warning)warning.hidden=!value||value===current};
+  const sync=()=>{const value=input.value.trim().toLowerCase();if(input.value!==value)input.value=value;if(domain)domain.textContent=`${value||'xxx'}.${publishDomain}`;if(warning)warning.hidden=!value||value===current};
   input.addEventListener('input',sync);sync();input.focus();
 }
 async function submitPublish(slug){
@@ -1009,7 +1010,7 @@ async function submitPublish(slug){
   const payload=await consoleRequest('/api/publish',{method:'POST',body:{...buildPublishPayload(),slug}});
   currentConsoleUser.publishSlug=payload.slug;updateConsoleAccount();notifyPublishedReload('站点已重新发布');
   const credential=payload.siteAdmin?siteAdminCredentialMarkup(payload.siteAdmin):payload.accountEnabled?'<div class="site-account-existing"><p>本站独立账号数据已保留，重新发布不会覆盖用户和登录密码。</p><button type="button" data-site-account-reset>忘记站长密码？重置密码</button></div>':'';
-  const replaced=payload.replacedSlug?`<p class="publish-warning">旧地址 ${esc(payload.replacedSlug)}.hatchery.mizusumi.com 的页面已删除。</p>`:'';
+  const replaced=payload.replacedSlug?`<p class="publish-warning">旧地址 ${esc(payload.replacedSlug)}.${esc(currentConsoleUser.publishDomain||'hatchery.mizusumi.com')} 的页面已删除。</p>`:'';
   openModal('发布成功',`<p>网站已发布到 <b>${esc(payload.publicUrl)}</b>，已经打开的发布页面会自动刷新。</p>${replaced}${credential}<a class="modal-action" href="${esc(payload.url)}" target="_blank">打开 ${esc(payload.url)} ↗</a>`);
 }
 document.querySelector('#publishBtn').addEventListener('click',openPublishModal);

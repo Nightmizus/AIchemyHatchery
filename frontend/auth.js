@@ -169,7 +169,7 @@
       '#menuUsername': username,
       '#accountUsername': username,
       '#accountPreviewPath': user.previewId ? `/preview/${user.previewId}` : '首次预览后生成',
-      '#accountPublishPath': user.publishSlug ? `${user.publishSlug}.hatchery.mizusumi.com` : '未发布',
+      '#accountPublishPath': user.publishSlug ? `${user.publishSlug}.${user.publishDomain || 'hatchery.mizusumi.com'}` : '未发布',
     };
     Object.entries(values).forEach(([selector, value]) => {
       const node = document.querySelector(selector);

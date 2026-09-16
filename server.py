@@ -119,20 +119,21 @@ def rate_limit_hit(scope: str, identity: str, limit: int, window: float) -> bool
             for stale in [name for name, items in RATE_BUCKETS.items() if not items or items[-1] <= now - window]:
                 RATE_BUCKETS.pop(stale, None)
         return len(recent) > limit
-# 发布路径会作为 xxx.hatchery.mizusumi.com 的子域名，必须是 DNS label 安全的小写形式（不允许连续短横线）
+# 发布路径会作为站点子域名（如 xxx.aichemy.club），必须是 DNS label 安全的小写形式（不允许连续短横线）
 SITE_SLUG_PATTERN = re.compile(r"^(?=.{3,32}$)[a-z0-9]+(?:-[a-z0-9]+)*$")
 RESERVED_SITE_SLUGS = frozenset({
     "www", "api", "app", "mail", "smtp", "admin", "console", "pages", "preview",
-    "static", "assets", "hatchery", "mizusumi", "localhost", "ftp", "ns1", "ns2",
+    "static", "assets", "hatchery", "mizusumi", "aichemy", "localhost", "ftp", "ns1", "ns2",
 })
-SITE_HOST_PATTERN = re.compile(r"^(?=.{3,32}\.hatchery\.mizusumi\.com$)([a-z0-9]+(?:-[a-z0-9]+)*)\.hatchery\.mizusumi\.com$")
 
 
 def site_slug_from_host(host: str) -> str | None:
-    """从 Host 头解析发布站点子域名，如 campus-news.hatchery.mizusumi.com → campus-news。"""
-    match = SITE_HOST_PATTERN.fullmatch(host.split(":", 1)[0].strip().lower())
-    if match and match.group(1) not in RESERVED_SITE_SLUGS:
-        return match.group(1)
+    """从 Host 头解析发布站点子域名，如 campus-news.aichemy.club → campus-news。"""
+    name = host.split(":", 1)[0].strip().lower()
+    for pattern in SITE_HOST_PATTERNS:
+        match = pattern.fullmatch(name)
+        if match and match.group(1) not in RESERVED_SITE_SLUGS:
+            return match.group(1)
     return None
 AI_LOCK = threading.Lock()
 AI_RUN_LOCK = threading.Lock()
@@ -663,11 +664,25 @@ if not NEON_DATABASE_URL:
     NEON_DATABASE_URL = os.environ.get("NEON_DATABASE_URL", "")
 HOST = os.environ.get("ALCHEMY_HATCHERY_HOST", "127.0.0.1").strip() or "127.0.0.1"
 SECURE_COOKIES = os.environ.get("ALCHEMY_HATCHERY_SECURE_COOKIES", "false").strip().lower() in ("1", "true", "yes", "on")
+# 发布站点的域名体系：SITE_BASE_DOMAIN 是新发布链接使用的主域名；
+# SITE_HOST_DOMAINS 是接受“子域名即站点”路由的全部域名（旧域名保留其中，已发布链接不会断）。
+SITE_BASE_DOMAIN = os.environ.get("ALCHEMY_HATCHERY_SITE_BASE_DOMAIN", "hatchery.mizusumi.com").strip().lower() or "hatchery.mizusumi.com"
+SITE_HOST_DOMAINS = tuple(dict.fromkeys(
+    item.strip().lower()
+    for item in os.environ.get(
+        "ALCHEMY_HATCHERY_SITE_HOST_DOMAINS", f"{SITE_BASE_DOMAIN},hatchery.mizusumi.com"
+    ).split(",")
+    if item.strip()
+))
+SITE_HOST_PATTERNS = tuple(
+    re.compile(rf"^(?=.{{3,32}}\.{re.escape(domain)}$)([a-z0-9]+(?:-[a-z0-9]+)*)\.{re.escape(domain)}$")
+    for domain in SITE_HOST_DOMAINS
+)
 # 允许被当作自身地址反射（SSO 回调 URL）的 Host，防止 Host 头注入把授权码送到攻击者域名
 ALLOWED_HOSTS = tuple(
     item.strip().lower()
     for item in os.environ.get(
-        "ALCHEMY_HATCHERY_ALLOWED_HOSTS", "hatchery.mizusumi.com,localhost,127.0.0.1"
+        "ALCHEMY_HATCHERY_ALLOWED_HOSTS", f"{SITE_BASE_DOMAIN},hatchery.mizusumi.com,localhost,127.0.0.1"
     ).split(",")
     if item.strip()
 )
@@ -701,8 +716,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         return self.headers.get("Host", "").split(",")[0].strip().lower()
 
     def same_origin_request(self) -> bool:
-        """CSRF 防护：Cookie 虽是 SameSite=Strict，但用户发布的站点位于同站子域
-        （*.hatchery.mizusumi.com），能借浏览器带上控制台 Cookie 发起写请求。"""
+        """CSRF 防护：Cookie 虽是 SameSite=Strict，但用户发布的站点位于站点子域名下，
+        能借浏览器带上控制台 Cookie 发起写请求。"""
         host = self.request_host()
         origin = self.headers.get("Origin", "").strip()
         if origin:
@@ -866,6 +881,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 site = cur.fetchone()
         payload["previewId"] = row[0] if row else None
         payload["publishSlug"] = site[0] if site else None
+        payload["publishDomain"] = SITE_BASE_DOMAIN
         return payload
 
     def validate_credentials(self, username: object, password: object) -> tuple[str, str]:
@@ -1891,7 +1907,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             "ok": True,
             "url": f"/pages/{slug}",
             "slug": slug,
-            "publicUrl": f"https://{slug}.hatchery.mizusumi.com",
+            "publicUrl": f"https://{slug}.{SITE_BASE_DOMAIN}",
             "accountEnabled": has_account,
             "siteAdmin": site_admin,
             "replacedSlug": old_slug if old_slug and old_slug != slug else None,
@@ -2762,7 +2778,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     def serve_published(self, path: str, site_username: str) -> None:
         site_file = PUBLISHED / site_username / "site.json"
         if not site_file.exists():
-            body = f"<meta charset='utf-8'><title>尚未发布</title><p style='font:16px sans-serif;padding:40px'>{site_username}.hatchery.mizusumi.com 尚未发布网站。</p>".encode("utf-8")
+            body = f"<meta charset='utf-8'><title>尚未发布</title><p style='font:16px sans-serif;padding:40px'>{site_username}.{SITE_BASE_DOMAIN} 尚未发布网站。</p>".encode("utf-8")
             self.send_response(404)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
