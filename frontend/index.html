@@ -6,7 +6,7 @@
   <meta name="description" content="炼丹社Hatchery——面向校园个人与社团的模块化 AI 建站控制台。">
   <title>炼丹社Hatchery｜页面编辑器</title>
   <link rel="stylesheet" href="/styles.css?v=20260915-2">
-  <link rel="stylesheet" href="/mica.css?v=20260916-6">
+  <link rel="stylesheet" href="/mica.css?v=20260916-7">
   <link rel="stylesheet" href="/ai-chat.css?v=20260916-8">
   <link rel="stylesheet" href="/motion.css?v=20260916-1">
 </head>
@@ -152,43 +152,7 @@
         </div>
       </header>
 
-      <div class="word-toolbar" id="wordToolbar" data-has-selection="false" aria-label="文字与图片编辑工具栏">
-        <div class="toolbar-group toolbar-sitename" aria-label="站点名称">
-          <input id="siteName" maxlength="60" autocomplete="off" spellcheck="false" aria-label="站点名称" title="站点名称" placeholder="站点名称">
-        </div>
-        <div class="toolbar-group toolbar-font" aria-label="字体">
-          <select id="toolbarFontFamily" title="字体">
-            <option value="Arial, 'PingFang SC', sans-serif">等线 / Arial</option>
-            <option value="Georgia, 'Songti SC', serif">宋体 / Georgia</option>
-            <option value="'Microsoft YaHei', sans-serif">微软雅黑</option>
-            <option value="Consolas, monospace">等宽 / Consolas</option>
-          </select>
-          <label title="字号"><input id="toolbarFontSize" type="number" min="8" max="160" step="1" value="16"><span>px</span></label>
-        </div>
-        <div class="toolbar-group toolbar-emphasis" aria-label="文字样式">
-          <button type="button" data-format="fontWeight" data-value="700" title="加粗"><b>B</b></button>
-          <button type="button" data-format="fontStyle" data-value="italic" title="斜体"><i>I</i></button>
-          <button type="button" data-decoration="underline" title="下划线"><u>U</u></button>
-          <button type="button" data-decoration="line-through" title="删除线"><s>S</s></button>
-          <label class="toolbar-color" title="文字颜色"><span>A</span><input id="toolbarTextColor" type="color" value="#151610"></label>
-          <label class="toolbar-color highlight" title="文字底色"><span>▰</span><input id="toolbarHighlight" type="color" value="#ffffff"></label>
-        </div>
-        <div class="toolbar-group toolbar-paragraph" aria-label="段落">
-          <button type="button" data-align="left" title="左对齐">≡</button>
-          <button type="button" data-align="center" title="居中对齐">≡</button>
-          <button type="button" data-align="right" title="右对齐">≡</button>
-          <button type="button" data-align="justify" title="两端对齐">☷</button>
-          <select id="toolbarLineHeight" title="行距"><option value="1">1.0</option><option value="1.25">1.25</option><option value="1.5" selected>1.5</option><option value="1.75">1.75</option><option value="2">2.0</option></select>
-        </div>
-        <div class="toolbar-group toolbar-image" aria-label="图片">
-          <input id="replaceImageInput" type="file" accept="image/*" hidden>
-          <select id="toolbarImageFit" title="图片适应方式"><option value="contain">适应</option><option value="cover">填充</option></select>
-          <button type="button" data-image-action="rotate-left" title="向左旋转">↶90°</button>
-          <button type="button" data-image-action="rotate-right" title="向右旋转">↷90°</button>
-          <button type="button" data-toolbar-action="delete-object" class="toolbar-delete" title="删除所选图片或重置所选文字布局">×</button>
-        </div>
-        <div class="toolbar-status" id="toolbarStatus"><b>未选择对象</b><small></small></div>
-      </div>
+      <input id="replaceImageInput" type="file" accept="image/*" hidden>
 
       <div class="canvas-scroll" id="canvasScroll">
         <div class="site-canvas theme-minimal" id="siteCanvas">
