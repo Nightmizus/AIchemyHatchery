@@ -190,12 +190,32 @@
     if (hadSensitive) authError('已从地址栏移除不安全的账号参数，请在下方重新登录。');
   }
 
+  // 登录门显隐动画：入场由 motion.css 自动播放，退场先挂 .is-closing 播完再隐藏
+  let gateHideTimer = null;
+  function revealGate(gate) {
+    clearTimeout(gateHideTimer);
+    gate.classList.remove('is-closing');
+    gate.hidden = false;
+  }
+  function dismissGate(gate) {
+    if (gate.hidden || gate.classList.contains('is-closing')) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      gate.hidden = true;
+      return;
+    }
+    gate.classList.add('is-closing');
+    gateHideTimer = setTimeout(() => {
+      gate.classList.remove('is-closing');
+      gate.hidden = true;
+    }, 340);
+  }
+
   function showGate(message = '') {
     authState.user = null;
     const gate = document.querySelector('#authGate');
     if (gate) {
       gate.dataset.state = 'form';
-      gate.hidden = false;
+      revealGate(gate);
     }
     if (message) authError(message);
     window.dispatchEvent(new CustomEvent('alchemyhatchery:logged-out', { detail: { reason: message } }));
@@ -205,7 +225,7 @@
     authState.user = user;
     updateAccountUI(user);
     const gate = document.querySelector('#authGate');
-    if (gate) gate.hidden = true;
+    if (gate) dismissGate(gate);
     authError();
     const returnTarget = safeReturnTarget();
     if (returnTarget) {

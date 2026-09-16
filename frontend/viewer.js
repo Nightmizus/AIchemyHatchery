@@ -37,9 +37,14 @@ new MutationObserver(schedulePublishedMobileFonts).observe(root,{childList:true,
 document.title=isAdminRoute?`站点后台｜${site.siteName}`:isForumRoute?`社区论坛｜${site.siteName}`:`${current.name}｜${site.siteName}`;
 
 const esc=value=>String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
-function showToast(message){const toast=document.querySelector('#toast');toast.querySelector('span').textContent=message;toast.hidden=false;clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>toast.hidden=true,3000)}
-function openModal(title,html){document.querySelector('#modalBody').innerHTML=`<h2>${esc(title)}</h2>${html}`;document.querySelector('#previewModal').hidden=false}
-function closeModal(){document.querySelector('#previewModal').hidden=true}
+// 平滑显隐：入场交给 motion.css（解除 hidden 时自动播放），退场先挂 .is-closing 播完再隐藏
+const uiMotionOK=()=>!window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function uiReplay(node){if(!node)return;node.style.animation='none';void node.offsetWidth;node.style.animation=''}
+function uiShow(node){if(!node)return;clearTimeout(node._uiHideTimer);const wasClosing=node.classList.contains('is-closing');node.classList.remove('is-closing');node.hidden=false;if(wasClosing)uiReplay(node)}
+function uiHide(node,onDone){if(!node)return;if(node.hidden){clearTimeout(node._uiHideTimer);onDone&&onDone();return}if(node.classList.contains('is-closing'))return;if(!uiMotionOK()){node.hidden=true;onDone&&onDone();return}node.classList.add('is-closing');const duration=Math.max(120,(parseFloat(getComputedStyle(node).animationDuration)||0)*1000);node._uiHideTimer=setTimeout(()=>{node.classList.remove('is-closing');node.hidden=true;onDone&&onDone()},duration+40)}
+function showToast(message){const toast=document.querySelector('#toast');toast.querySelector('span').textContent=message;const wasVisible=!toast.hidden&&!toast.classList.contains('is-closing');uiShow(toast);if(wasVisible)uiReplay(toast);clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>uiHide(toast),3000)}
+function openModal(title,html){uiShow(document.querySelector('#previewModal'));const body=document.querySelector('#modalBody');body.innerHTML=`<h2>${esc(title)}</h2>${html}`;body.classList.remove('modal-swap');void body.offsetWidth;body.classList.add('modal-swap')}
+function closeModal(){uiHide(document.querySelector('#previewModal'))}
 function pageUrl(id){const page=site.pages.find(item=>item.id===id);if(!page)return siteBase;return page===site.pages[0]?siteBase:`${siteBase}/${page.path}`}
 function forumUrl(path=''){return `${siteBase}/forum${path?`/${encodeURIComponent(path)}`:''}`}
 function consoleLoginUrl(){const returnTo=`${location.pathname}${location.search}${location.hash}`;return `/?returnTo=${encodeURIComponent(returnTo)}`}
@@ -152,7 +157,7 @@ async function submitRuntimeForm(form){const data=new FormData(form);const butto
 
 document.querySelector('#previewModal').addEventListener('click',event=>{const actionButton=event.target.closest('[data-modal-action]');if(actionButton){const action=actionButton.dataset.modalAction;if(action==='close')closeModal();if(action==='register'){void toggleRegistration(actionButton.dataset.event).then(done=>{if(done)closeModal()}).catch(error=>showToast(error.message))}if(action==='copy'){navigator.clipboard?.writeText(actionButton.dataset.copy||'');showToast('已复制')}return}if(event.target.id==='previewModal')closeModal()});
 document.querySelector('#closeModalBtn').addEventListener('click',closeModal);
-document.querySelector('#toast button').addEventListener('click',()=>document.querySelector('#toast').hidden=true);
+document.querySelector('#toast button').addEventListener('click',()=>uiHide(document.querySelector('#toast')));
 function initTemplateWidgets(rootNode){
   if(!rootNode)return;
   rootNode.querySelectorAll('[data-countdown]').forEach(block=>{

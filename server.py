@@ -199,8 +199,8 @@ AI_RUN_JOBS: dict[str, dict] = {}
 AI_UPSTREAM_DEGRADED: dict | None = None
 # 前端静态文件统一放在 frontend/；对外 URL 仍是根路径（/styles.css…），由 handler 翻译
 FRONTEND_DIR = "frontend"
-AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
-PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/auth.js", "/script.js", "/viewer.js"))
+AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/motion.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
+PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js"))
 
 # 写死的站长账号：数字校园号为 20264689 的用户始终是站长（管理员），
 # 不依赖数据库里的 isAdmin 标记，也不能被停用。
@@ -2358,7 +2358,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
 
     def _do_GET(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/styles.css", "/mica.css", "/auth.js", "/script.js", "/viewer.html", "/viewer.js"):
+        if parsed.path in ("/", "/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.html", "/viewer.js"):
             for header in ("If-Modified-Since", "If-None-Match"):
                 if header in self.headers:
                     del self.headers[header]

@@ -1,0 +1,100 @@
+/* ===== 全站平滑切换动画层（motion.css，需最后加载） =====
+   入场动画由 CSS 自动播放（解除 hidden 即重新渲染并播放）；
+   退场动画由 script.js / viewer.js 的 uiHide() 挂 .is-closing 播完后再隐藏，
+   避免 [hidden]{display:none} 把动画截断。
+   本文件在其它样式表之后加载：同等特异性下 .is-closing 规则覆盖入场规则。 */
+
+/* 发布站跨页面导航使用浏览器原生 View Transition（支持的浏览器自动获得淡入淡出） */
+@view-transition { navigation: auto; }
+
+/* ---- 通用关键帧 ---- */
+@keyframes uiFadeIn{from{opacity:0}to{opacity:1}}
+@keyframes uiFadeOut{to{opacity:0}}
+@keyframes uiFadeSlideIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes uiPopIn{from{opacity:0;transform:translateY(6px) scale(.96)}to{opacity:1;transform:none}}
+@keyframes uiPopOut{to{opacity:0;transform:translateY(4px) scale(.97)}}
+@keyframes uiRiseIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+@keyframes uiRiseOut{to{opacity:0;transform:translateY(6px)}}
+
+/* ---- 全局微交互：交互控件统一缓动（元素自身已声明的 transition 优先级更高，不受影响） ---- */
+button,a,input,select,textarea,label{transition:background-color .16s ease,border-color .16s ease,color .16s ease,box-shadow .16s ease,opacity .16s ease,transform .16s ease}
+
+/* ---- Toast 通知 ---- */
+@keyframes uiToastIn{from{opacity:0;transform:translateY(14px) scale(.98)}to{opacity:1;transform:none}}
+@keyframes uiToastOut{to{opacity:0;transform:translateY(10px) scale(.98)}}
+.toast:not([hidden]){animation:uiToastIn .32s cubic-bezier(.22,.9,.3,1) both}
+.toast.is-closing{animation:uiToastOut .24s cubic-bezier(.4,0,1,1) both}
+
+/* ---- 控制台弹窗（预览 / 发布 / 账号设置） ---- */
+@keyframes uiModalIn{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:none}}
+@keyframes uiModalOut{to{opacity:0;transform:translateY(8px) scale(.98)}}
+.preview-modal:not([hidden]){animation:uiFadeIn .24s ease both}
+.preview-modal.is-closing{animation:uiFadeOut .2s ease both}
+.preview-dialog{animation:uiModalIn .32s cubic-bezier(.22,.9,.3,1) both}
+.preview-modal.is-closing .preview-dialog{animation:uiModalOut .2s ease both}
+.modal-body.modal-swap{animation:uiFadeSlideIn .26s ease both}
+
+/* ---- 模块右键菜单 ---- */
+.element-context{transform-origin:top left}
+.element-context:not([hidden]){animation:uiPopIn .18s cubic-bezier(.22,.9,.3,1) both}
+.element-context.is-closing{animation:uiPopOut .14s ease both}
+
+/* ---- 控制台账号下拉菜单（活动栏内锚定左下角，其余锚定右上角） ---- */
+.console-account-menu{transform-origin:top right}
+.activity-bar .console-account-menu{transform-origin:bottom left}
+.console-account-menu:not([hidden]){animation:uiPopIn .2s cubic-bezier(.22,.9,.3,1) both}
+.console-account-menu.is-closing{animation:uiPopOut .16s ease both}
+
+/* ---- AI 权限 / 模型菜单（自输入框向上展开） ---- */
+.ai-mode-menu{transform-origin:bottom left}
+.ai-mode-menu:not([hidden]){animation:uiRiseIn .2s cubic-bezier(.22,.9,.3,1) both}
+.ai-mode-menu.is-closing{animation:uiRiseOut .15s ease both}
+
+/* ---- 左侧工具面板切换（AI 对话 ↔ 漏洞测试） ---- */
+@keyframes uiPanelIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.tool-panel:not([hidden]){animation:uiPanelIn .3s cubic-bezier(.22,.9,.3,1) both}
+
+/* ---- 模板选择器浮层 ---- */
+@keyframes uiSheetIn{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+@keyframes uiSheetOut{to{opacity:0;transform:translateY(12px)}}
+.template-picker{animation:uiSheetIn .3s cubic-bezier(.22,.9,.3,1) both}
+.template-picker.is-closing{animation:uiSheetOut .22s ease both}
+
+/* ---- 登录门：卡片入场、checking→form 内容揭示、登录成功整体退场 ---- */
+@keyframes uiCardIn{from{opacity:0;transform:translateY(18px) scale(.98)}to{opacity:1;transform:none}}
+@keyframes uiCardOut{to{opacity:0;transform:translateY(-10px) scale(.99)}}
+.auth-gate:not([hidden]){animation:uiFadeIn .26s ease both}
+.auth-gate .auth-card{animation:uiCardIn .48s cubic-bezier(.22,.9,.3,1) .04s both}
+.auth-gate.is-closing{animation:uiFadeOut .3s ease both}
+.auth-gate.is-closing .auth-card{animation:uiCardOut .3s ease both}
+#authGate[data-state="form"] .auth-copy{animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) both}
+#authGate[data-state="form"] .auth-tabs{animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) .05s both}
+#authGate[data-state="form"] .auth-form:not([hidden]){animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) .1s both}
+#authGate[data-state="form"] .auth-sso-divider{animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) .14s both}
+#authGate[data-state="form"] .auth-sso-btn{animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) .18s both}
+
+/* ---- 画布页面切换（编辑器内跳转页面时整页轻入） ---- */
+@keyframes uiPageIn{from{opacity:.35;transform:translateY(10px)}to{opacity:1;transform:none}}
+.site-canvas.page-enter{animation:uiPageIn .32s cubic-bezier(.22,.9,.3,1)}
+
+/* ---- 各类状态条 / 提示块的揭示动画 ---- */
+.ai-result:not([hidden]),
+.ai-undo:not([hidden]),
+.ai-plan-box:not([hidden]),
+.ai-service-notice:not([hidden]),
+.ai-attachment-strip:not([hidden]),
+.security-summary:not([hidden]),
+.auth-error:not([hidden]),
+.field-error:not([hidden]){animation:uiFadeSlideIn .28s cubic-bezier(.22,.9,.3,1) both}
+.empty-canvas{animation:uiFadeIn .4s ease both}
+.page-element:hover .block-tools{animation:uiFadeIn .18s ease both}
+
+/* ---- 发布站 / 预览站：整页内容与加载占位的轻入 ---- */
+#publishedSite>*{animation:uiFadeIn .3s ease both}
+.forum-page-loading{animation:uiFadeIn .2s ease both}
+
+/* ---- 减少动态效果（系统偏好）：所有动画瞬时完成 ---- */
+@media(prefers-reduced-motion:reduce){
+  @view-transition{navigation:none}
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
+}
