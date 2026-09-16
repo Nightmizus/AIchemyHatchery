@@ -273,7 +273,41 @@ async function persistDraftSnapshot(snapshot){
   if(response.status===401){showAuthGate('登录已过期，请重新登录');throw new Error('登录已过期')}
   if(!response.ok){let payload={};try{payload=await response.json()}catch{}throw new Error(payload.error||'云端草稿保存失败')}
 }
-function scheduleDraftSave(){if(!currentConsoleUser)return;setSaveState('保存中…',true);clearTimeout(draftSaveTimer);draftSaveTimer=setTimeout(async()=>{try{const snapshot=JSON.stringify(state);await persistDraftSnapshot(snapshot);const time=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});setSaveState(`已同步 · ${time}`,false)}catch{setSaveState('同步失败',false)}},350);scheduleHistoryCapture()}
+function scheduleDraftSave(){if(!currentConsoleUser)return;setSaveState('保存中…',true);clearTimeout(draftSaveTimer);draftSaveTimer=setTimeout(async()=>{try{const snapshot=JSON.stringify(state);await persistDraftSnapshot(snapshot);const time=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});setSaveState(`已同步 · ${time}`,false)}catch{setSaveState('同步失败',false)}},350);scheduleHistoryCapture();schedulePreviewPush()}
+// 预览实时化：编辑防抖后持续把整站预览负载推到服务端，预览按钮与已打开页面始终是当前内容
+let previewPushTimer=null,previewPushInFlight=false,previewPushPending=false,previewPushHash='';
+function previewPayloadHash(text){let hash=5381;for(let i=0;i<text.length;i++)hash=((hash<<5)+hash+text.charCodeAt(i))>>>0;return hash.toString(36)}
+function schedulePreviewPush(){if(!currentConsoleUser?.previewId)return;clearTimeout(previewPushTimer);previewPushTimer=setTimeout(()=>void pushPreviewSnapshot(),1500)}
+async function pushPreviewSnapshot(allowCreate=false){
+  if(!currentConsoleUser)return null;
+  if(!allowCreate&&!currentConsoleUser.previewId)return null;// 没用过预览的账号不主动创建，首次点击按钮时再生成
+  if(previewPushInFlight){previewPushPending=true;return null}
+  let payloadObj=null,body='';
+  try{payloadObj=buildPublishPayload(true);body=JSON.stringify(payloadObj)}catch{return null}
+  const hash=previewPayloadHash(body);
+  if(hash===previewPushHash)return currentConsoleUser.previewId?{previewId:currentConsoleUser.previewId,url:`/preview/${currentConsoleUser.previewId}`}:null;// 内容没变就不重复写库、不打扰已打开的页面
+  previewPushInFlight=true;
+  try{
+    const payload=await consoleRequest('/api/preview',{method:'POST',body:payloadObj});
+    previewPushHash=hash;
+    const firstTime=!currentConsoleUser.previewId;
+    currentConsoleUser.previewId=payload.previewId;
+    if(firstTime)updateConsoleAccount();
+    notifyPreviewTabsReload(payload.previewId);
+    return payload;
+  }catch(error){
+    if(error.status!==401)previewPushHash='';// 下次编辑重试
+    return null;
+  }finally{
+    previewPushInFlight=false;
+    if(previewPushPending){previewPushPending=false;schedulePreviewPush()}
+  }
+}
+function notifyPreviewTabsReload(previewId){
+  const previewPath=`/preview/${previewId}`;
+  try{const channel=new BroadcastChannel('alchemyhatchery-live-preview');channel.postMessage({type:'reload',reason:'预览内容已更新',previewPath,at:Date.now()});channel.close()}catch{}
+  try{localStorage.setItem('alchemyhatchery:preview-reload',JSON.stringify({previewPath,at:Date.now()}))}catch{}
+}
 function restoreHistory(index){if(index<0||index>=historyStack.length)return;const message=index<historyIndex?'已撤销':'已重做';historyIndex=index;const snapshot=JSON.parse(historyStack[index]);Object.keys(state).forEach(key=>delete state[key]);Object.assign(state,snapshot);editingElementId=null;editingItemId=null;renderPages();syncFields();renderCanvas();updateHistoryButtons();showToast(message)}
 function undoState(){captureHistoryNow();if(historyIndex>0)restoreHistory(historyIndex-1)}
 function redoState(){if(historyIndex<historyStack.length-1)restoreHistory(historyIndex+1)}
@@ -1106,7 +1140,25 @@ function buildPublishPayload(preview=false){
   const pages=state.pages.map(page=>{state.activePageId=page.id;return {id:page.id,name:page.name,path:pageFullPath(page),parentId:page.parentId,kind:page.kind,html:isolatePageCode(page.code)+floatingObjectLayer(page,false)}});
   state.activePageId=previousPage;previewDB.accountLoggedIn=previousAccountState;buildingPreviewHtml=false;return {username:currentConsoleUser?.username||'',siteName:state.siteName,description:state.description,theme:state.theme,background:state.background,contentWidth:state.contentWidth,pages,forumPosts:[]};
 }
-document.querySelector('#previewSiteBtn').addEventListener('click',async()=>{const button=document.querySelector('#previewSiteBtn');const popup=window.open('about:blank','_blank');button.disabled=true;button.firstChild.textContent='生成中 ';try{await persistDraftSnapshot(JSON.stringify(state));const payload=await consoleRequest('/api/preview',{method:'POST',body:buildPublishPayload(true)});currentConsoleUser.previewId=payload.previewId;updateConsoleAccount();notifyPublishedReload('预览内容已更新');if(popup)popup.location.replace(payload.url);else window.open(payload.url,'_blank');showToast('临时预览已更新')}catch(error){popup?.close();if(error.status===401)showAuthGate('登录已过期，请重新登录');showToast(`预览失败：${error.message}`)}finally{button.disabled=false;button.firstChild.textContent='预览 '}});
+// 预览持续在后台更新：已有 previewId 时点开即是当前内容，再后台补一次最新推送；
+// 首次使用还没有 previewId，走一次即时生成拿到地址
+document.querySelector('#previewSiteBtn').addEventListener('click',async()=>{
+  const button=document.querySelector('#previewSiteBtn');
+  if(currentConsoleUser?.previewId){
+    window.open(`/preview/${currentConsoleUser.previewId}`,'_blank');
+    void pushPreviewSnapshot(true);
+    return;
+  }
+  const popup=window.open('about:blank','_blank');button.disabled=true;button.firstChild.textContent='生成中 ';
+  try{
+    await persistDraftSnapshot(JSON.stringify(state));
+    const payload=await pushPreviewSnapshot(true);
+    if(!payload)throw new Error('预览生成失败，请重试');
+    if(popup)popup.location.replace(payload.url);else window.open(payload.url,'_blank');
+    showToast('预览已开启，之后编辑会自动实时更新');
+  }catch(error){popup?.close();if(error.status===401)showAuthGate('登录已过期，请重新登录');showToast(`预览失败：${error.message}`)}
+  finally{button.disabled=false;button.firstChild.textContent='预览 '}
+});
 function siteAdminCredentialMarkup(admin){return `<div class="site-admin-credential"><small>本站独立管理员 · 仅显示这一次</small><b>${esc(admin.username)}</b><code>${esc(admin.password)}</code><button type="button" data-modal-action="copy" data-copy="用户名：${esc(admin.username)}\n密码：${esc(admin.password)}">复制管理员凭据</button><p>请登录发布网站后妥善保管。它不等于炼丹社Hatchery控制台账号，也不能登录其他网站。</p></div>`}
 function openPublishModal(){
   if(!currentConsoleUser){showAuthGate('请先登录');return}

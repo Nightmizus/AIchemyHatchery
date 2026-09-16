@@ -24,8 +24,11 @@ function refreshPublishedMobileFonts(){
   root.querySelectorAll('[data-mobile-font-scaled]').forEach(node=>{node.removeAttribute('data-mobile-font-scaled');node.style.removeProperty('--mobile-font-size')});root.removeAttribute('data-mobile-font-scaled');root.style.removeProperty('--mobile-font-size');if(!window.matchMedia('(max-width:680px)').matches)return;const candidates=[root,...root.querySelectorAll('*')].filter(node=>node.matches?.('input,textarea,select')||[...node.childNodes].some(child=>child.nodeType===Node.TEXT_NODE&&child.textContent.trim()));const sizes=candidates.map(node=>[node,Number.parseFloat(getComputedStyle(node).fontSize)]);sizes.forEach(([node,size])=>{if(!(size>40))return;node.dataset.mobileFontScaled='true';node.style.setProperty('--mobile-font-size',`${scaledMobileFontSize(size)}px`)})
 }
 let publishedFontScaleFrame=0;function schedulePublishedMobileFonts(){cancelAnimationFrame(publishedFontScaleFrame);publishedFontScaleFrame=requestAnimationFrame(refreshPublishedMobileFonts)}
-try{const liveChannel=new BroadcastChannel('alchemyhatchery-live-preview');liveChannel.addEventListener('message',event=>{if(event.data?.type==='reload')location.reload()});window.addEventListener('beforeunload',()=>liveChannel.close(),{once:true})}catch{}
-window.addEventListener('storage',event=>{if(event.key==='alchemyhatchery:published-reload'&&event.newValue)location.reload()});
+try{const liveChannel=new BroadcastChannel('alchemyhatchery-live-preview');liveChannel.addEventListener('message',event=>{const data=event.data;if(data?.type!=='reload')return;if(data.previewPath&&!location.pathname.startsWith(data.previewPath))return;location.reload()});window.addEventListener('beforeunload',()=>liveChannel.close(),{once:true})}catch{}
+window.addEventListener('storage',event=>{
+  if(event.key==='alchemyhatchery:published-reload'&&event.newValue)location.reload();
+  if(event.key==='alchemyhatchery:preview-reload'&&event.newValue){try{const data=JSON.parse(event.newValue);if(data.previewPath&&location.pathname.startsWith(data.previewPath))location.reload()}catch{}}
+});
 root.className=`published-site theme-${site.theme}`;
 root.style.setProperty('--page-bg',site.background||'#fff');
 root.style.background=site.background||'#fff';
