@@ -438,7 +438,7 @@ body {
 .app-shell.preview-hidden { margin-left:240px }
 .app-shell.preview-hidden .activity-bar { width:240px;padding:14px 10px;align-items:stretch }
 .app-shell.preview-hidden .activity-brand { margin:2px 2px 14px;display:flex;align-items:center;gap:10px;text-decoration:none }
-.app-shell.preview-hidden .activity-brand span { width:30px;height:30px;display:grid;place-items:center;flex:0 0 auto;border-radius:6px;background:#e6edf3;color:#0d1117;font-size:14px }
+.app-shell.preview-hidden .activity-brand span { width:30px;height:30px;display:grid;place-items:center;flex:0 0 auto;border-radius:6px;background:#e6edf3;color:#0d1117;font-size:17px }
 .app-shell.preview-hidden .activity-brand b { color:#e6edf3;font-size:14px }
 .app-shell.preview-hidden .activity-items { display:grid;gap:4px }
 .app-shell.preview-hidden .activity-item { width:100%;height:40px;padding:0 10px;grid-template-columns:22px minmax(0,1fr);justify-items:start;gap:8px;font-size:17px }
@@ -583,6 +583,8 @@ body {
 .preview-dialog .publish-gallery-opt small{color:var(--muted);font-size:8px;line-height:1.55}
 .preview-dialog .publish-gallery-opt small a{color:#8ab4f8;text-decoration:none}
 .preview-dialog .publish-gallery-opt small a:hover{text-decoration:underline}
+.preview-dialog .publish-gallery-note a{color:#8ab4f8;text-decoration:none}
+.preview-dialog .publish-gallery-note a:hover{text-decoration:underline}
 /* 管理后台：已发布网站列表 */
 .admin-site-list{max-height:260px;overflow:auto}
 .admin-site-row{padding:11px 13px;display:grid;grid-template-columns:30px minmax(0,1fr) auto auto;align-items:center;gap:9px;border-top:1px solid var(--soft-line)}
@@ -594,6 +596,7 @@ body {
 .admin-site-row>em{padding:5px 7px;border-radius:99px;font-size:7px;font-style:normal}
 .admin-site-row>em.active{background:rgba(63,185,80,.16);color:#3fb950}
 .admin-site-row>em.disabled{background:rgba(240,246,252,.08);color:#8b949e}
+.admin-site-row>em.missing{background:rgba(248,81,73,.14);color:#f85149}
 .admin-site-row>a{min-width:45px;padding:6px;border:1px solid var(--line);border-radius:5px;background:transparent;color:#c9d1d9;font-size:7px;text-align:center;text-decoration:none;white-space:nowrap}
 .admin-site-row>a:hover{border-color:var(--mica-hover-line);color:var(--ink)}
 .admin-console section>header>a{color:#8ab4f8;font-size:8px;text-decoration:none}

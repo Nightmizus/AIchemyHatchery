@@ -124,7 +124,7 @@ def rate_limit_hit(scope: str, identity: str, limit: int, window: float) -> bool
 # 发布路径会作为站点子域名（如 xxx.aichemy.club），必须是 DNS label 安全的小写形式（不允许连续短横线）
 SITE_SLUG_PATTERN = re.compile(r"^(?=.{3,32}$)[a-z0-9]+(?:-[a-z0-9]+)*$")
 RESERVED_SITE_SLUGS = frozenset({
-    "www", "api", "app", "mail", "smtp", "admin", "console", "pages", "preview",
+    "www", "api", "app", "mail", "smtp", "admin", "console", "pages", "preview", "gallery",
     "static", "assets", "hatchery", "mizusumi", "aichemy", "localhost", "ftp", "ns1", "ns2",
 })
 
@@ -193,6 +193,8 @@ AI_UPSTREAM_DEGRADED: dict | None = None
 FRONTEND_DIR = "frontend"
 AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/motion.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
 PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js"))
+# 站点图标：🐣（小鸡破壳，呼应 Hatchery）。SVG 文本emoji，所有现代浏览器可直接做 favicon
+FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🐣</text></svg>'
 
 # 写死的站长账号：数字校园号为 20264689 的用户始终是站长（管理员），
 # 不依赖数据库里的 isAdmin 标记，也不能被停用。
@@ -350,13 +352,99 @@ def new_preview_id(cur) -> str:
             return preview_id
 
 
+_SITE_META_CACHE: dict[str, tuple[tuple[int, int], str, str]] = {}
+_SITE_META_LOCK = threading.Lock()
+
+
 def published_site_meta(slug: str) -> tuple[str, str]:
-    """读取已发布站点的 site.json，返回 (站点名, 简介)；文件缺失或损坏时返回空串。"""
+    """读取已发布站点的 site.json，返回 (站点名, 简介)；文件缺失或损坏时返回空串。
+    site.json 带着整站页面（含 base64 图片，动辄数 MB），Gallery/总览每次都全量解析会越来越慢，
+    这里按 (mtime, size) 缓存，文件一变立刻失效。"""
+    site_file = PUBLISHED / slug / "site.json"
     try:
-        data = json.loads((PUBLISHED / slug / "site.json").read_text(encoding="utf-8"))
-    except Exception:
+        stat = site_file.stat()
+    except OSError:
         return "", ""
-    return str(data.get("siteName") or ""), str(data.get("description") or "")
+    key = (stat.st_mtime_ns, stat.st_size)
+    with _SITE_META_LOCK:
+        cached = _SITE_META_CACHE.get(slug)
+    if cached and cached[0] == key:
+        return cached[1], cached[2]
+    try:
+        data = json.loads(site_file.read_text(encoding="utf-8"))
+        site_name, description = str(data.get("siteName") or "").strip(), str(data.get("description") or "").strip()
+    except Exception:
+        site_name, description = "", ""
+    with _SITE_META_LOCK:
+        if len(_SITE_META_CACHE) > 2000:
+            _SITE_META_CACHE.clear()
+        _SITE_META_CACHE[slug] = (key, site_name, description)
+    return site_name, description
+
+
+def public_site_url(slug: str) -> str:
+    """站点公开地址。DNS 安全的发布路径走子域名；历史遗留的老用户名目录（大写、下划线）
+    不能当子域名，只能走 /pages/<slug> 路径。"""
+    if SITE_SLUG_PATTERN.fullmatch(slug) and slug not in RESERVED_SITE_SLUGS:
+        return f"https://{slug}.{SITE_BASE_DOMAIN}"
+    return f"/pages/{slug}"
+
+
+def published_site_index() -> list[dict]:
+    """全部已发布站点：数据库记录 ∪ 磁盘遗留目录，按更新时间倒序。
+    Gallery 与管理员总览共用这一份索引，保证两边看到的站点一致。
+    onDisk=False 表示数据库有行但磁盘没有 site.json（已删除 / 改名残留），这类站点不能进 Gallery。"""
+    with neon_db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT p.slug, p.created_at, p.updated_at, p.listed_in_gallery,
+                       u.name AS owner_name, u."campusId" AS owner_campus_id
+                FROM hatchery_published_sites p
+                LEFT JOIN "User" u ON u.id = p.user_id
+                ORDER BY p.updated_at DESC
+                LIMIT 500
+                """
+            )
+            rows = cur.fetchall()
+    on_disk = published_site_slugs_on_disk()
+    sites: list[dict] = []
+    seen_slugs: set[str] = set()
+    for row in rows:
+        slug = str(row["slug"])
+        seen_slugs.add(slug)
+        site_name, description = published_site_meta(slug)
+        sites.append({
+            "slug": slug,
+            "siteName": site_name,
+            "description": description,
+            "owner": row["owner_name"] or "",
+            "ownerCampusId": row["owner_campus_id"] or "",
+            "listed": bool(row["listed_in_gallery"]),
+            "onDisk": slug in on_disk,
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+            "publicUrl": public_site_url(slug),
+        })
+    # 服务以文件系统为准：磁盘上有但数据库缺行的历史站点也并入（默认收录）
+    for slug, mtime in on_disk.items():
+        if slug in seen_slugs:
+            continue
+        site_name, description = published_site_meta(slug)
+        sites.append({
+            "slug": slug,
+            "siteName": site_name,
+            "description": description,
+            "owner": "",
+            "ownerCampusId": "",
+            "listed": True,
+            "onDisk": True,
+            "createdAt": mtime,
+            "updatedAt": mtime,
+            "publicUrl": public_site_url(slug),
+        })
+    sites.sort(key=lambda item: str(item["updatedAt"]), reverse=True)
+    return sites
 
 
 def published_site_slugs_on_disk() -> dict[str, str]:
@@ -789,7 +877,20 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.path = f"/{FRONTEND_DIR}{parsed.path}"
             super().do_HEAD()
             return
+        if parsed.path in ("/favicon.svg", "/favicon.ico"):
+            self.send_favicon(head_only=True)
+            return
         self.send_error(404, "Not found")
+
+    def send_favicon(self, head_only: bool = False) -> None:
+        body = FAVICON_SVG.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
 
     def send_json(self, value: object, status: int = 200, headers: dict[str, str | list[str]] | None = None) -> None:
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -2518,6 +2619,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
 
     def _do_GET(self) -> None:
         parsed = urlparse(self.path)
+        # favicon 要在子域名分流之前处理：发布的站点（xxx.aichemy.club）也共用这个图标
+        if parsed.path in ("/favicon.svg", "/favicon.ico"):
+            self.send_favicon()
+            return
         if parsed.path in ("/", "/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.html", "/viewer.js") or parsed.path.startswith("/c/"):
             for header in ("If-Modified-Since", "If-None-Match"):
                 if header in self.headers:
@@ -2616,53 +2721,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             admin = self.require_console_user(admin=True)
             if not admin:
                 return
-            with neon_db() as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute(
-                        """
-                        SELECT p.slug, p.created_at, p.updated_at, p.listed_in_gallery,
-                               u.name AS owner_name, u."campusId" AS owner_campus_id
-                        FROM hatchery_published_sites p
-                        LEFT JOIN "User" u ON u.id = p.user_id
-                        ORDER BY p.updated_at DESC
-                        LIMIT 500
-                        """
-                    )
-                    rows = cur.fetchall()
-            sites = []
-            seen_slugs = set()
-            for row in rows:
-                slug = str(row["slug"])
-                seen_slugs.add(slug)
-                site_name, description = published_site_meta(slug)
-                sites.append({
-                    "slug": slug,
-                    "siteName": site_name,
-                    "description": description,
-                    "owner": row["owner_name"] or "",
-                    "ownerCampusId": row["owner_campus_id"] or "",
-                    "listed": bool(row["listed_in_gallery"]),
-                    "createdAt": row["created_at"],
-                    "updatedAt": row["updated_at"],
-                    "publicUrl": f"https://{slug}.{SITE_BASE_DOMAIN}",
-                })
-            # 服务以文件系统为准：磁盘上有但数据库缺行的历史站点也并入（默认收录）
-            for slug, mtime in published_site_slugs_on_disk().items():
-                if slug in seen_slugs:
-                    continue
-                site_name, description = published_site_meta(slug)
-                sites.append({
-                    "slug": slug,
-                    "siteName": site_name,
-                    "description": description,
-                    "owner": "",
-                    "ownerCampusId": "",
-                    "listed": True,
-                    "createdAt": mtime,
-                    "updatedAt": mtime,
-                    "publicUrl": f"https://{slug}.{SITE_BASE_DOMAIN}",
-                })
-            sites.sort(key=lambda item: str(item["updatedAt"]), reverse=True)
+            sites = published_site_index()
             self.send_json({"sites": sites, "total": len(sites)})
             return
         if parsed.path == "/api/admin/ai-usage":
@@ -2941,8 +3000,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if pages_match:
             self.serve_published(parsed.path, pages_match.group(1))
             return
-        # Hatchery Gallery：收录所有发布的网站（/Gallery 大小写同进）
-        if parsed.path.lower() == "/gallery":
+        # Hatchery Gallery：收录所有发布的网站（/Gallery 大小写、/gallery/ 尾斜杠同进）
+        if parsed.path.lower().rstrip("/") == "/gallery":
             self.serve_gallery()
             return
         if parsed.path == "/":
@@ -2961,34 +3020,22 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_error(404, "Not found")
 
     def serve_gallery(self) -> None:
-        """Hatchery Gallery：公开页面，收录所有发布时勾选“收录进 Gallery”的网站。"""
-        with neon_db() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT p.slug, p.updated_at, u.name AS owner_name
-                    FROM hatchery_published_sites p
-                    LEFT JOIN "User" u ON u.id = p.user_id
-                    WHERE p.listed_in_gallery
-                    ORDER BY p.updated_at DESC
-                    LIMIT 500
-                    """
-                )
-                rows = cur.fetchall()
-        # 失效站点不进 Gallery：数据库之外没有磁盘内容的（已删除/改名残留）直接跳过
-        rows = [row for row in rows if (PUBLISHED / str(row["slug"]) / "site.json").is_file()]
+        """Hatchery Gallery：公开页面，收录所有发布时勾选“收录进 Gallery”的网站。
+        与管理员总览共用 published_site_index()：数据库记录 ∪ 磁盘遗留站点；
+        磁盘上已没有内容的残留记录（已删除 / 改名）不展示。"""
+        sites = [site for site in published_site_index() if site["listed"] and site["onDisk"]]
         cards = []
-        for row in rows:
-            slug = str(row["slug"])
-            site_name, description = published_site_meta(slug)
-            url = f"https://{slug}.{SITE_BASE_DOMAIN}"
-            updated = str(row["updated_at"])[:10]
+        for site in sites:
+            slug = str(site["slug"])
+            url = str(site["publicUrl"])
+            updated = str(site["updatedAt"])[:10]
+            host_label = url[len("https://"):] if url.startswith("https://") else url
             cards.append(
                 f'<a class="card" href="{html.escape(url, quote=True)}" target="_blank" rel="noopener">'
-                f"<b>{html.escape(site_name or slug)}</b>"
-                f"<p>{html.escape(description or '这个网站还没有写介绍。')}</p>"
-                f"<small>{html.escape(str(row['owner_name'] or '匿名'))} · 更新于 {html.escape(updated)}</small>"
-                f'<span class="host">{html.escape(slug)}.{html.escape(SITE_BASE_DOMAIN)} ↗</span></a>'
+                f"<b>{html.escape(site['siteName'] or slug)}</b>"
+                f"<p>{html.escape(site['description'] or '这个网站还没有写介绍。')}</p>"
+                f"<small>{html.escape(str(site['owner'] or '匿名'))} · 更新于 {html.escape(updated)}</small>"
+                f'<span class="host">{html.escape(host_label)} ↗</span></a>'
             )
         grid = "".join(cards) or '<p class="empty">还没有收录的网站。发布你的网站时勾选「收录进 Hatchery Gallery」，就会出现在这里。</p>'
         page = f"""<!doctype html>
@@ -2998,6 +3045,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <title>Hatchery Gallery｜炼丹社Hatchery</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
 *{{margin:0;box-sizing:border-box}}
 body{{min-height:100vh;padding:56px 24px 80px;background:#0d1117;color:#e6edf3;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color-scheme:dark}}
