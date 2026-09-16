@@ -138,61 +138,51 @@ def site_slug_from_host(host: str) -> str | None:
             return match.group(1)
     return None
 AI_LOCK = threading.Lock()
-AI_RUN_LOCK = threading.Lock()
-# 看门狗阈值必须大于 harness 自身超时，否则合法的长跑会被强标失败并强制放锁，
-# 而子进程还在继续跑——后续重试会与它并发写同一个 site.json。跟随 DEEPSEEK_HARNESS_TIMEOUT_SECONDS 推导。
+# AI 任务并发上限：工作区已按任务隔离（sites/<user>/.runs/<job>），不再需要全局串行，
+# 槽位只做资源背压（每个任务都是一条 harness 子进程 + 一路模型调用）。
+AI_RUN_MAX_PARALLEL = max(1, int(os.environ.get("HATCHERY_AI_MAX_PARALLEL", "4")))
+AI_RUN_SLOTS_LOCK = threading.Lock()
+AI_RUN_SLOT_OWNERS: set[str] = set()
+# 看门狗阈值必须大于 harness 自身超时，否则合法的长跑会被强标失败并强放槽位，
+# 而子进程还在继续跑。跟随 DEEPSEEK_HARNESS_TIMEOUT_SECONDS 推导。
 _HARNESS_TIMEOUT_FOR_STALE = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "1200"))))
 AI_JOB_STALE_SECONDS = float(os.environ.get("HATCHERY_AI_JOB_STALE_SECONDS", _HARNESS_TIMEOUT_FOR_STALE * 1.1 + 60))
-# AI_RUN_LOCK 的当前持有者（job id / sync-<hex>）。threading.Lock 不校验释放者，
-# 看门狗强放后老 worker 的 finally 会把新任务刚拿到的锁放掉，造成多个 dsh 并发写同一工作区；
-# 释放前核对令牌，只放自己持有的锁。
-AI_RUN_LOCK_OWNER: str | None = None
 
 
-def ai_run_lock_acquire(owner: str) -> bool:
-    global AI_RUN_LOCK_OWNER
-    if AI_RUN_LOCK.acquire(blocking=False):
-        with AI_RUN_JOBS_LOCK:
-            AI_RUN_LOCK_OWNER = owner
-        return True
-    if not ai_run_lock_reset_stale(time.time()):
-        return False
-    if AI_RUN_LOCK.acquire(blocking=False):
-        with AI_RUN_JOBS_LOCK:
-            AI_RUN_LOCK_OWNER = owner
-        return True
+def ai_run_slot_acquire(owner: str) -> bool:
+    with AI_RUN_SLOTS_LOCK:
+        if len(AI_RUN_SLOT_OWNERS) < AI_RUN_MAX_PARALLEL:
+            AI_RUN_SLOT_OWNERS.add(owner)
+            return True
+    ai_run_jobs_sweep_stale(time.time())
+    with AI_RUN_SLOTS_LOCK:
+        if len(AI_RUN_SLOT_OWNERS) < AI_RUN_MAX_PARALLEL:
+            AI_RUN_SLOT_OWNERS.add(owner)
+            return True
     return False
 
 
-def ai_run_lock_release(owner: str) -> None:
-    with AI_RUN_JOBS_LOCK:
-        global AI_RUN_LOCK_OWNER
-        if AI_RUN_LOCK_OWNER == owner:
-            AI_RUN_LOCK_OWNER = None
-            AI_RUN_LOCK.release()
+def ai_run_slot_release(owner: str) -> None:
+    with AI_RUN_SLOTS_LOCK:
+        AI_RUN_SLOT_OWNERS.discard(owner)
 
 
-def ai_run_lock_reset_stale(now: float) -> int:
-    """清理超时仍挂起的 AI 任务：标记失败并强制释放全局锁。返回清理的任务数。
-    锁本身可能被 harness 子进程挂起长期占用；超过 harness 自身超时后仍持有即判定为泄漏。
-    只强放"持有者是本次判定泄漏的任务"的锁，避免误放后来者刚拿到的锁。"""
-    released = 0
+def ai_run_jobs_sweep_stale(now: float) -> int:
+    """清理超时仍挂起的 AI 任务：标记失败并强放其并发槽位。返回清理的任务数。
+    槽位可能被 harness 子进程挂起长期占用；超过 harness 自身超时后仍持有即判定为泄漏。
+    工作区已按任务隔离，被强放槽位的旧 worker 即便还活着也只写自己的目录，不会污染新任务。"""
     with AI_RUN_JOBS_LOCK:
-        global AI_RUN_LOCK_OWNER
         stale_ids = [
             key for key, value in AI_RUN_JOBS.items()
             if value.get("status") == "running" and now - float(value.get("createdAt", now)) > AI_JOB_STALE_SECONDS
         ]
         for key in stale_ids:
             AI_RUN_JOBS[key].update({"status": "failed", "error": "任务超时被系统终止"})
-            released += 1
-        if released and AI_RUN_LOCK.locked() and (AI_RUN_LOCK_OWNER is None or AI_RUN_LOCK_OWNER in stale_ids):
-            AI_RUN_LOCK_OWNER = None
-            try:
-                AI_RUN_LOCK.release()
-            except RuntimeError:
-                pass
-    return released
+    if stale_ids:
+        with AI_RUN_SLOTS_LOCK:
+            for key in stale_ids:
+                AI_RUN_SLOT_OWNERS.discard(key)
+    return len(stale_ids)
 AI_RUN_JOBS_LOCK = threading.Lock()
 AI_BACKUPS: dict[str, dict[str, str]] = {}
 AI_RUN_JOBS: dict[str, dict] = {}
@@ -279,6 +269,17 @@ def ai_site_workspace(user_id) -> Path:
     """The one folder the AI may touch: the current website's own directory."""
     safe = re.sub(r"[^A-Za-z0-9_-]", "", str(user_id))[:64] or "unknown"
     return ROOT / "sites" / safe
+
+
+# 每次 AI 任务拿独立的临时工作区（用户目录下的 .runs/<任务号>），
+# 让同一用户的多个会话可以并行执行而互不覆盖 site.json。
+def ai_job_workspace(user_id, job_key: str) -> Path:
+    safe_key = re.sub(r"[^A-Za-z0-9_-]", "", str(job_key))[:48] or "unknown"
+    return ai_site_workspace(user_id) / ".runs" / safe_key
+
+
+# 进行中任务的 job_key -> (user_id, workspace)：供 /ai-preview/<id>/run/<job_key> 实时渲染该任务的工作区
+AI_RUN_WORKSPACES: dict[str, tuple[str, Path]] = {}
 
 
 def load_env() -> None:
@@ -1410,7 +1411,23 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     # DeepSeek Harness is the only automatic execution engine. Its file access is
     # confined to the current website's own folder (sites/<user_id>/); the AI may
     # not read or modify anything else on the host.
-    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None, mode: str = "full", model_override: str = "", effort_override: str = "") -> dict:
+    @staticmethod
+    def sweep_stale_job_workspaces(user_id) -> None:
+        """清理一天前的任务级工作区残留（异常中断的任务目录靠这里回收）。"""
+        runs_root = ai_site_workspace(user_id) / ".runs"
+        try:
+            entries = list(runs_root.iterdir())
+        except OSError:
+            return
+        cutoff = time.time() - 86400
+        for entry in entries:
+            try:
+                if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                pass
+
+    def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None, mode: str = "full", model_override: str = "", effort_override: str = "", job_key: str = "") -> dict:
         run_id = f"run-{secrets.token_hex(10)}"
         if mode not in ("chat", "plan", "full"):
             mode = "full"
@@ -1437,9 +1454,19 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if mode == "full" and not chosen_presets and total_elements == 0:
             style_seed = secrets.choice(SITE_STYLE_SEEDS)
             prompt = prompt + f"\n\n本次是从零建站。如果用户没有透露社团、项目或爱好等风格线索，参考这个随机风格方向：{style_seed}；如果用户给了线索，以用户线索为准。"
-        workspace = ai_site_workspace(user["id"])
+        run_token = re.sub(r"[^A-Za-z0-9_-]", "", str(job_key))[:48]
+        if run_token:
+            # 每个任务独立工作区：同一会话/同一用户的多个任务并行时互不覆盖 site.json
+            self.sweep_stale_job_workspaces(user["id"])
+            workspace = ai_job_workspace(user["id"], run_token)
+        else:
+            workspace = ai_site_workspace(user["id"])
         workspace.mkdir(parents=True, exist_ok=True)
         preview_url = f"/ai-preview/{user_preview_id(user['id'])}"
+        if run_token:
+            preview_url = f"{preview_url}/run/{run_token}"
+            with AI_RUN_JOBS_LOCK:
+                AI_RUN_WORKSPACES[run_token] = (str(user["id"]), workspace)
         if mode == "full":
             prompt = prompt + f"\n\n本次改动的工作区实时预览地址：{preview_url}（它实时渲染你改完后的 site.json。用浏览器工具打开它验证改动效果，不要打开控制台首页——那是登录页，看不到任何东西）。"
         elif mode == "plan":
@@ -1448,24 +1475,32 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         original_site_json = json.dumps(site_state, ensure_ascii=False, indent=2)
         write_text_exact(site_json_path, original_site_json)
 
-        result = run_deepseek_harness(
-            root=ROOT,
-            prompt=prompt,
-            context=context,
-            attachments=attachments,
-            workspace=workspace,
-            preview_port=PORT,
-            progress=progress,
-            mode=mode,
-            model=model_override or None,
-            reasoning=effort_override or None,
-        )
+        try:
+            result = run_deepseek_harness(
+                root=ROOT,
+                prompt=prompt,
+                context=context,
+                attachments=attachments,
+                workspace=workspace,
+                preview_port=PORT,
+                progress=progress,
+                mode=mode,
+                model=model_override or None,
+                reasoning=effort_override or None,
+            )
+        finally:
+            if run_token:
+                # 任务结束即摘掉任务级预览入口；目录在读完 site.json 后删除
+                with AI_RUN_JOBS_LOCK:
+                    AI_RUN_WORKSPACES.pop(run_token, None)
 
         site_replace = None
         changed_files: list[str] = []
         if not site_json_path.is_file():
             raise ValueError("AI 删除了网站数据文件 site.json，本次任务已中止")
         after_text = read_text_exact(site_json_path)
+        if run_token:
+            shutil.rmtree(workspace, ignore_errors=True)
         if after_text != original_site_json:
             if len(after_text.encode("utf-8")) > 4_000_000:
                 raise ValueError("AI 修改后的网站数据超过大小限制，本次任务已中止")
@@ -1718,14 +1753,26 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         messages_html = str(payload.get("messagesHtml") or "")
         if len(messages_html) > 600_000:
             raise ValueError("会话内容过大，无法保存")
-        session_id = str(uuid.uuid4())
+        # 前端在发第一条消息时就本地生成会话 id 并绑给 AI 任务，创建必须是幂等 upsert
+        requested_id = str(payload.get("id") or "")
+        if requested_id:
+            if not re.fullmatch(r"[0-9a-fA-F-]{32,36}", requested_id):
+                raise ValueError("会话编号格式无效")
+            session_id = requested_id.lower()
+        else:
+            session_id = str(uuid.uuid4())
         now = iso_time()
         with neon_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO hatchery_ai_chat_sessions(id, user_id, title, messages_html, created_at, updated_at) VALUES(%s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO hatchery_ai_chat_sessions(id, user_id, title, messages_html, created_at, updated_at) VALUES(%s, %s, %s, %s, %s, %s)"
+                    " ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, messages_html=EXCLUDED.messages_html, updated_at=EXCLUDED.updated_at"
+                    " WHERE hatchery_ai_chat_sessions.user_id = EXCLUDED.user_id",
                     (session_id, str(user["id"]), title, messages_html, now, now),
                 )
+                if cur.rowcount == 0:
+                    self.send_json({"error": "会话编号冲突，请刷新后重试"}, 409)
+                    return
         self.send_json({"session": {"id": session_id, "title": title, "createdAt": now, "updatedAt": now}})
 
     def handle_ai_session_update(self, user: dict, session_id: str) -> None:
@@ -1777,12 +1824,12 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
         lock_owner = f"sync-{secrets.token_hex(6)}"
-        if not ai_run_lock_acquire(lock_owner):
-            raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
+        if not ai_run_slot_acquire(lock_owner):
+            raise ValueError("当前同时运行的 AI 任务较多，请稍候再试")
         provider_name, model = current_ai_provider_model()
         model = chosen_model or model
         try:
-            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode=mode, model_override=chosen_model, effort_override=chosen_effort)
+            result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode=mode, model_override=chosen_model, effort_override=chosen_effort, job_key=lock_owner)
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
             AI_UPSTREAM_DEGRADED = None
         except Exception:
@@ -1791,7 +1838,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 AI_UPSTREAM_DEGRADED = {"reason": "quota", "message": str(sys.exc_info()[1])[:300], "since": iso_time()}
             raise
         finally:
-            ai_run_lock_release(lock_owner)
+            ai_run_slot_release(lock_owner)
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
@@ -1799,8 +1846,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
-        if not ai_run_lock_acquire(job_id):
-            raise ValueError("另一个 AI 任务尚未结束，请稍后再试")
+        if not ai_run_slot_acquire(job_id):
+            raise ValueError("当前同时运行的 AI 任务较多，请稍候再试")
         now = time.time()
         with AI_RUN_JOBS_LOCK:
             for stale_id in [key for key, value in AI_RUN_JOBS.items() if now - float(value.get("createdAt", now)) > 3600]:
@@ -1826,7 +1873,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             provider_name, model = current_ai_provider_model()
             model = chosen_model or model
             try:
-                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress=progress, mode=mode, model_override=chosen_model, effort_override=chosen_effort)
+                result = self.run_ai_harness(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress=progress, mode=mode, model_override=chosen_model, effort_override=chosen_effort, job_key=job_id)
                 record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, result.get("usage"), "completed")
                 AI_UPSTREAM_DEGRADED = None
                 with AI_RUN_JOBS_LOCK:
@@ -1842,14 +1889,14 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     if job and job.get("status") == "running":
                         job.update({"status": "failed", "error": str(error)[:1000]})
             finally:
-                ai_run_lock_release(job_id)
+                ai_run_slot_release(job_id)
 
         try:
             threading.Thread(target=worker, name=f"hatchery-ai-{job_id[-6:]}", daemon=True).start()
         except Exception:
             with AI_RUN_JOBS_LOCK:
                 AI_RUN_JOBS.pop(job_id, None)
-            ai_run_lock_release(job_id)
+            ai_run_slot_release(job_id)
             raise
         self.send_json({"jobId": job_id, "status": "running"}, 202)
 
@@ -2789,9 +2836,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 "updatedAt": row["updated_at"],
             }})
             return
-        ai_preview_match = re.match(r"^/ai-preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
+        ai_preview_match = re.match(r"^/ai-preview/([A-Za-z0-9_-]{32})(?:/run/([A-Za-z0-9_-]{6,48}))?(?:/|$)", parsed.path)
         if ai_preview_match:
-            self.serve_workspace_preview(parsed.path, ai_preview_match.group(1))
+            self.serve_workspace_preview(parsed.path, ai_preview_match.group(1), ai_preview_match.group(2))
             return
         preview_match = re.match(r"^/preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
         if preview_match:
@@ -2928,12 +2975,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     """
                 )
                 rows = cur.fetchall()
-        # 磁盘上有但数据库缺行的历史站点一并收录（数据库行的收录标记优先）
-        known = {str(row["slug"]) for row in rows}
-        for slug, mtime in published_site_slugs_on_disk().items():
-            if slug not in known:
-                rows.append({"slug": slug, "updated_at": mtime, "owner_name": ""})
-        rows.sort(key=lambda row: str(row["updated_at"]), reverse=True)
+        # 失效站点不进 Gallery：数据库之外没有磁盘内容的（已删除/改名残留）直接跳过
+        rows = [row for row in rows if (PUBLISHED / str(row["slug"]) / "site.json").is_file()]
         cards = []
         for row in rows:
             slug = str(row["slug"])
@@ -2994,8 +3037,9 @@ h1{{font-size:clamp(26px,4vw,36px);letter-spacing:-.02em}}
         self.end_headers()
         self.wfile.write(body)
 
-    def serve_workspace_preview(self, path: str, preview_id: str) -> None:
-        """AI 工作区实时预览：按随机预览 id 读取对应用户工作区的 site.json，把 pages[].code 直接渲染出来。"""
+    def serve_workspace_preview(self, path: str, preview_id: str, run_token: str | None = None) -> None:
+        """AI 工作区实时预览：按随机预览 id 读取对应用户工作区的 site.json，把 pages[].code 直接渲染出来。
+        带 run_token 时渲染该任务独立工作区（并行任务各自预览各自的 site.json）。"""
         with neon_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT user_id FROM hatchery_user_extras WHERE preview_id = %s", (preview_id,))
@@ -3003,7 +3047,20 @@ h1{{font-size:clamp(26px,4vw,36px);letter-spacing:-.02em}}
         if not row:
             self.send_error(404, "Not found")
             return
-        site_file = ai_site_workspace(row[0]) / "site.json"
+        if run_token:
+            with AI_RUN_JOBS_LOCK:
+                entry = AI_RUN_WORKSPACES.get(run_token)
+            if not entry or str(entry[0]) != str(row[0]):
+                body = "<meta charset='utf-8'><p style='font:14px sans-serif;padding:40px'>该 AI 任务已结束，任务级预览随之关闭。</p>".encode("utf-8")
+                self.send_response(404)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            site_file = entry[1] / "site.json"
+        else:
+            site_file = ai_site_workspace(row[0]) / "site.json"
         if not site_file.is_file():
             body = "<meta charset='utf-8'><p style='font:14px sans-serif;padding:40px'>工作区还没有内容，先让 AI 做点什么。</p>".encode("utf-8")
             self.send_response(404)
@@ -3036,11 +3093,11 @@ h1{{font-size:clamp(26px,4vw,36px);letter-spacing:-.02em}}
             "forumPosts": [],
             "previewMode": True,
             "previewId": preview_id,
-            "basePath": f"/ai-preview/{preview_id}",
+            "basePath": f"/ai-preview/{preview_id}" + (f"/run/{run_token}" if run_token else ""),
         }
         template = (ROOT / FRONTEND_DIR / "viewer.html").read_text(encoding="utf-8")
         site_data = json.dumps(site, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-        prefix = f"/ai-preview/{preview_id}"
+        prefix = f"/ai-preview/{preview_id}" + (f"/run/{run_token}" if run_token else "")
         page_path = path.removeprefix(prefix).strip("/") if path not in (prefix, f"{prefix}/") else ""
         html = template.replace("__SITE_DATA_JSON__", site_data).replace("__PAGE_PATH_JSON__", json.dumps(page_path, ensure_ascii=False))
         body = html.encode("utf-8")
