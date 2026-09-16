@@ -461,6 +461,8 @@ body {
 .ai-session-item i { width:20px;height:20px;display:grid;place-items:center;flex:0 0 auto;border-radius:5px;color:#8b949e;font-size:13px;font-style:normal;line-height:1;opacity:0;transition:opacity .15s }
 .ai-session-item:hover i,.ai-session-item.active i { opacity:1 }
 .ai-session-item i:hover { background:rgba(248,81,73,.14);color:#ff7b72 }
+.ai-session-item .ai-session-spin { width:12px;height:12px;flex:0 0 auto;border:1.5px solid rgba(240,246,252,.22);border-top-color:#e6edf3;border-radius:50%;animation:aiSessionSpin .8s linear infinite }
+@keyframes aiSessionSpin { to { transform:rotate(360deg) } }
 .ai-session-empty { margin:4px 10px;color:#565d64;font-size:11px }
 @media(max-width:680px){
   .activity-bar { left:0;right:0;top:auto;bottom:0;width:auto;height:52px;padding:0 8px;flex-direction:row;align-items:center;border-right:0;border-top:1px solid rgba(240,246,252,.14) }

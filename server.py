@@ -3022,7 +3022,7 @@ h1{{font-size:clamp(26px,4vw,36px);letter-spacing:-.02em}}
 <body>
 <div class="wrap">
 <header class="top"><h1>Hatchery Gallery</h1><a class="back" href="/">← 回到控制台</a></header>
-<p class="sub">这里收录了用炼丹社Hatchery创建并发布的网站。发布时可以选择不收录。</p>
+<p class="sub">这里收录了用炼丹社Hatchery创建并发布的网站。</p>
 <p class="count">共收录 {len(cards)} 个网站</p>
 <div class="grid">{grid}</div>
 </div>
