@@ -470,6 +470,22 @@ body {
 .app-shell.preview-hidden .activity-bar .console-account-wrap { justify-content:flex-start;gap:10px;padding:10px 4px 0;border-top:1px solid rgba(240,246,252,.14) }
 .app-shell.preview-hidden .activity-account-name { display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e6edf3;font-size:12px }
 .app-shell.preview-hidden .activity-bar .console-account-menu { left:0 }
+/* 新聊天按钮：参照 ChatGPT 侧栏，作为首要动作常驻高亮 */
+.app-shell.preview-hidden .activity-item.activity-new-chat { background:rgba(240,246,252,.08);color:#f0f6fc }
+.app-shell.preview-hidden .activity-item.activity-new-chat:hover { background:rgba(240,246,252,.12) }
+/* 最近会话列表：只在侧栏展开（预览收回）时显示，占满菜单与账号之间的空间 */
+.activity-sessions { display:none }
+.app-shell.preview-hidden .activity-sessions { margin:16px 0 0;flex:1;min-height:0;display:flex;flex-direction:column }
+.activity-sessions-label { padding:0 10px 6px;color:#6e7681;font-size:11px }
+.activity-session-list { flex:1;min-height:0;padding-bottom:6px;overflow-y:auto;display:grid;gap:2px;align-content:start;scrollbar-color:#30363d transparent }
+.ai-session-item { width:100%;padding:8px 10px;display:flex;align-items:center;gap:4px;border:0;border-radius:8px;background:transparent;color:#b1bac4;font-size:12px;text-align:left;cursor:pointer }
+.ai-session-item>span { flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
+.ai-session-item:hover { background:rgba(240,246,252,.06);color:#e6edf3 }
+.ai-session-item.active { background:rgba(240,246,252,.09);color:#f0f6fc }
+.ai-session-item i { width:20px;height:20px;display:grid;place-items:center;flex:0 0 auto;border-radius:5px;color:#8b949e;font-size:13px;font-style:normal;line-height:1;opacity:0;transition:opacity .15s }
+.ai-session-item:hover i,.ai-session-item.active i { opacity:1 }
+.ai-session-item i:hover { background:rgba(248,81,73,.14);color:#ff7b72 }
+.ai-session-empty { margin:4px 10px;color:#565d64;font-size:11px }
 @media(max-width:680px){
   .activity-bar { left:0;right:0;top:auto;bottom:0;width:auto;height:52px;padding:0 8px;flex-direction:row;align-items:center;border-right:0;border-top:1px solid rgba(240,246,252,.14) }
   .activity-brand { display:none!important }

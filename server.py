@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from email.mime.text import MIMEText
 from http.cookies import SimpleCookie
@@ -461,6 +462,15 @@ def initialize_database() -> None:
         created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS hatchery_ai_usage_user_idx ON hatchery_ai_usage(user_id, created_at);
+    CREATE TABLE IF NOT EXISTS hatchery_ai_chat_sessions(
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '新聊天',
+        messages_html TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS hatchery_ai_chat_sessions_user_idx ON hatchery_ai_chat_sessions(user_id, updated_at DESC);
     """
     with neon_db() as conn:
         with conn.cursor() as cur:
@@ -1290,6 +1300,21 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_save_draft()
             elif path == "/api/site-account/reset-owner":
                 self.handle_site_owner_reset()
+            elif path == "/api/ai/sessions":
+                user = self.require_console_user()
+                if user:
+                    self.handle_ai_session_create(user)
+            elif path.startswith("/api/ai/sessions/"):
+                user = self.require_console_user()
+                if not user:
+                    return
+                session_match = re.fullmatch(r"/api/ai/sessions/([0-9a-fA-F-]{32,36})(/delete)?", path)
+                if not session_match:
+                    self.send_json({"error": "接口不存在"}, 404)
+                elif session_match.group(2) == "/delete":
+                    self.handle_ai_session_delete(user, session_match.group(1))
+                else:
+                    self.handle_ai_session_update(user, session_match.group(1))
             elif path == "/api/ai/run":
                 user = self.require_console_user()
                 if user:
@@ -1658,6 +1683,65 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 if text:
                     history.append({"role": item["role"], "text": text})
         return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort
+
+    def handle_ai_session_create(self, user: dict) -> None:
+        payload = self.read_json()
+        title = str(payload.get("title") or "新聊天").strip()[:60] or "新聊天"
+        messages_html = str(payload.get("messagesHtml") or "")
+        if len(messages_html) > 600_000:
+            raise ValueError("会话内容过大，无法保存")
+        session_id = str(uuid.uuid4())
+        now = iso_time()
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO hatchery_ai_chat_sessions(id, user_id, title, messages_html, created_at, updated_at) VALUES(%s, %s, %s, %s, %s, %s)",
+                    (session_id, str(user["id"]), title, messages_html, now, now),
+                )
+        self.send_json({"session": {"id": session_id, "title": title, "createdAt": now, "updatedAt": now}})
+
+    def handle_ai_session_update(self, user: dict, session_id: str) -> None:
+        payload = self.read_json()
+        fields, values = [], []
+        if "title" in payload:
+            title = str(payload.get("title") or "").strip()[:60]
+            if title:
+                fields.append("title = %s")
+                values.append(title)
+        if "messagesHtml" in payload:
+            messages_html = str(payload.get("messagesHtml") or "")
+            if len(messages_html) > 600_000:
+                raise ValueError("会话内容过大，无法保存")
+            fields.append("messages_html = %s")
+            values.append(messages_html)
+        if not fields:
+            self.send_json({"ok": True})
+            return
+        fields.append("updated_at = %s")
+        values.append(iso_time())
+        values.extend([session_id, str(user["id"])])
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE hatchery_ai_chat_sessions SET {', '.join(fields)} WHERE id = %s AND user_id = %s",
+                    values,
+                )
+                if cur.rowcount == 0:
+                    self.send_json({"error": "会话不存在或已删除"}, 404)
+                    return
+        self.send_json({"ok": True})
+
+    def handle_ai_session_delete(self, user: dict, session_id: str) -> None:
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM hatchery_ai_chat_sessions WHERE id = %s AND user_id = %s",
+                    (session_id, str(user["id"])),
+                )
+                if cur.rowcount == 0:
+                    self.send_json({"error": "会话不存在或已删除"}, 404)
+                    return
+        self.send_json({"ok": True})
 
     def handle_ai_run(self, user: dict) -> None:
         global AI_UPSTREAM_DEGRADED
@@ -2358,7 +2442,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
 
     def _do_GET(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.html", "/viewer.js"):
+        if parsed.path in ("/", "/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.html", "/viewer.js") or parsed.path.startswith("/c/"):
             for header in ("If-Modified-Since", "If-None-Match"):
                 if header in self.headers:
                     del self.headers[header]
@@ -2578,6 +2662,51 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 status["degraded"] = AI_UPSTREAM_DEGRADED
             self.send_json(status)
             return
+        if parsed.path == "/api/ai/sessions":
+            user = self.require_console_user()
+            if not user:
+                return
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        SELECT id, title, created_at, updated_at
+                        FROM hatchery_ai_chat_sessions
+                        WHERE user_id = %s AND messages_html <> ''
+                        ORDER BY updated_at DESC
+                        LIMIT 50
+                        """,
+                        (str(user["id"]),),
+                    )
+                    rows = cur.fetchall()
+            self.send_json({"sessions": [
+                {"id": row["id"], "title": row["title"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
+                for row in rows
+            ]})
+            return
+        ai_session_match = re.fullmatch(r"/api/ai/sessions/([0-9a-fA-F-]{32,36})", parsed.path)
+        if ai_session_match:
+            user = self.require_console_user()
+            if not user:
+                return
+            with neon_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT id, title, messages_html, created_at, updated_at FROM hatchery_ai_chat_sessions WHERE id = %s AND user_id = %s",
+                        (ai_session_match.group(1), str(user["id"])),
+                    )
+                    row = cur.fetchone()
+            if not row:
+                self.send_json({"error": "会话不存在或已删除"}, 404)
+                return
+            self.send_json({"session": {
+                "id": row["id"],
+                "title": row["title"],
+                "messagesHtml": row["messages_html"],
+                "createdAt": row["created_at"],
+                "updatedAt": row["updated_at"],
+            }})
+            return
         ai_preview_match = re.match(r"^/ai-preview/([A-Za-z0-9_-]{32})(?:/|$)", parsed.path)
         if ai_preview_match:
             self.serve_workspace_preview(parsed.path, ai_preview_match.group(1))
@@ -2684,6 +2813,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.serve_published(parsed.path, pages_match.group(1))
             return
         if parsed.path == "/":
+            self.path = f"/{FRONTEND_DIR}/index.html"
+            super().do_GET()
+            return
+        # GPT 式会话地址：/c/<uuid> 由前端路由接管，统一回控制台首页
+        if re.fullmatch(r"/c/[0-9a-fA-F-]{32,36}/?", parsed.path):
             self.path = f"/{FRONTEND_DIR}/index.html"
             super().do_GET()
             return
