@@ -606,3 +606,8 @@ body {
 .preview-dialog .site-admin-credential small{color:var(--muted)}
 .preview-dialog .site-admin-credential button{background:#e6edf3;color:#0d1117}
 .preview-dialog .site-account-existing button{border-color:var(--line);background:transparent;color:#c9d1d9}
+/* 弹窗表单提交中的转圈加载态（发布、改密等较慢操作） */
+.preview-dialog .account-settings-form button{position:relative}
+.preview-dialog .account-settings-form button.is-loading{color:transparent!important;pointer-events:none}
+.preview-dialog .account-settings-form button.is-loading::after{content:"";position:absolute;left:50%;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border:2px solid rgba(13,17,23,.25);border-top-color:#0d1117;border-radius:50%;animation:hatcherySpin .7s linear infinite}
+@keyframes hatcherySpin{to{transform:rotate(360deg)}}
