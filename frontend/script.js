@@ -896,7 +896,7 @@ window.addEventListener('popstate',()=>{
   else if(!id&&aiChatSessionId)startNewAiChat('none');
 });
 function scrollAiConversation(force=false){const node=document.querySelector('#aiConversation');if(!force&&node.scrollHeight-node.scrollTop-node.clientHeight>120){persistAiChatHistory();return}requestAnimationFrame(()=>{node.scrollTop=node.scrollHeight});persistAiChatHistory()}
-let previewManualState=null;
+let previewManualState=true;// 刷新后默认收起网站预览，本次会话内手动展开/收起后保持选择
 let previewAnimTimer=null;
 function updatePreviewVisibility(){
   if(previewAnimTimer)return;
