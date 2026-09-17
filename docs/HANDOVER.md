@@ -8,7 +8,7 @@
 
 - 仓库：GitHub `Nightmizus/AIchemyHatchery`（private），本地工作目录 `C:\Users\Mizusumi\Documents\Codex\2026-08-24\zu-yi\work`
 - 多人在改：主人用 Kimi Code（本手册作者）+ Codex CLI 同时在同一个工作区写代码，Codex 会直接推 main。改代码前先 `git status` + `git log` 看现场，**不要替别人提交他们的半成品**
-- 提交/推送/合并**每次都要用户明确许可**，别自作主张
+- 提交/推送/合并**每次都要用户明确许可**，别自作主张。**例外（2026-09-17 起，主人亲口授权）**：Kimi Code 在本工作区完成的改动，每次做完后自动提交 + 推 main + 部署生产，不用逐次请示；替别人提交半成品的禁令仍然有效
 
 ## 2. 技术结构
 
