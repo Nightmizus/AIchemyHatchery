@@ -686,6 +686,7 @@ def run_deepseek_harness(
         # 那些不算进展，否则卡死的会话会被无关心跳掩盖成"活着"。
         last_useful = time.monotonic()
         received = False
+        heartbeat_reported = False
         while True:
             # 15 秒一片轮询：整体超时不变；本会话长时间没有有效事件视为卡死，提前终止，
             # 不再让用户干等满整个 timeout。切片锚定当前时刻——锚 last_useful 的话静默超过
@@ -703,11 +704,14 @@ def run_deepseek_harness(
                     raise
                 silent = now - last_useful
                 if silent > stall_seconds:
-                    raise HarnessRuntimeError(f"DeepSeek Harness 长时间没有新进展，判定为卡死，任务已终止；请重试{runtime._diagnostics()}")
-                if silent >= 30:
-                    # 静默心跳：让用户看到任务活着（同一 id 原地更新，不刷屏）
-                    elapsed = int(now - (deadline - timeout))
-                    projector._report("dsh-heartbeat", "tool", "AI 工作中", f"已运行 {elapsed} 秒 · 模型静默 {int(silent)} 秒", "running", "")
+                    error = HarnessRuntimeError(f"DeepSeek Harness 长时间没有新进展，判定为卡死，任务已终止；请重试{runtime._diagnostics()}")
+                    # 一个有效事件都没收到过＝上游接单后一言不发，这种重试基本都能救活，server.py 会自动重试一次
+                    error.stall_no_progress = not events
+                    raise error
+                if silent >= 30 and not heartbeat_reported:
+                    # 静默心跳：每段静默只报一次且不带读秒（读秒每秒触发前端重渲染，纯属浪费）
+                    projector._report("dsh-heartbeat", "tool", "AI 工作中", "模型仍在响应，长时间无输出会自动终止任务", "running", "")
+                    heartbeat_reported = True
                 continue
             method = notification.get("method")
             payload = notification.get("params") if isinstance(notification.get("params"), dict) else {}
@@ -724,6 +728,7 @@ def run_deepseek_harness(
                         received = True
                 if received:
                     last_useful = time.monotonic()
+                    heartbeat_reported = False
                     events.append(event)
                     projector.accept(event)
             elif method == "session.status" and received and payload.get("status") == "idle":

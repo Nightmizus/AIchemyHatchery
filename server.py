@@ -34,7 +34,7 @@ import urllib.request
 import urllib.error
 import urllib.parse as urlparse_mod
 
-from deepseek_harness_adapter import harness_status, resolve_llm_provider, run_deepseek_harness
+from deepseek_harness_adapter import HarnessRuntimeError, harness_status, resolve_llm_provider, run_deepseek_harness
 
 ROOT = Path(__file__).resolve().parent
 PUBLISHED = ROOT / "published"
@@ -1611,19 +1611,33 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         original_site_json = json.dumps(site_state, ensure_ascii=False, indent=2)
         write_text_exact(site_json_path, original_site_json)
 
+        attempt = 0
         try:
-            result = run_deepseek_harness(
-                root=ROOT,
-                prompt=prompt,
-                context=context,
-                attachments=attachments,
-                workspace=workspace,
-                preview_port=PORT,
-                progress=progress,
-                mode=mode,
-                model=model_override or None,
-                reasoning=effort_override or None,
-            )
+            while True:
+                attempt += 1
+                try:
+                    result = run_deepseek_harness(
+                        root=ROOT,
+                        prompt=prompt,
+                        context=context,
+                        attachments=attachments,
+                        workspace=workspace,
+                        preview_port=PORT,
+                        progress=progress,
+                        mode=mode,
+                        model=model_override or None,
+                        reasoning=effort_override or None,
+                    )
+                    break
+                except HarnessRuntimeError as error:
+                    # 上游偶发"接单后一言不发"（0 进展直接判卡死）：手动重试基本都能成功，
+                    # 这里自动整机重试一次——site.json 还原成任务前状态，避免半截改动带偏第二次
+                    if attempt > 1 or not getattr(error, "stall_no_progress", False):
+                        raise
+                    print(f"[ai-run] {run_id} 上游零进展卡死，自动重试一次", file=sys.stderr, flush=True)
+                    write_text_exact(site_json_path, original_site_json)
+                    if progress:
+                        progress({"id": "ai-auto-retry", "kind": "tool", "label": "自动重试", "detail": "上游长时间没有响应，本次任务已自动重新开始", "status": "running", "tool": ""})
         finally:
             if run_token:
                 # 任务结束即摘掉任务级预览入口；目录在读完 site.json 后删除
