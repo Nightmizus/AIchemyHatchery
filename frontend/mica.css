@@ -447,8 +447,7 @@ body {
 .app-shell.preview-hidden .activity-bar .console-account-wrap { justify-content:flex-start;gap:10px;padding:10px 4px 0;border-top:1px solid rgba(240,246,252,.14) }
 .app-shell.preview-hidden .activity-account-name { display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e6edf3;font-size:12px }
 .app-shell.preview-hidden .activity-bar .console-account-menu { left:0 }
-/* 新聊天按钮：参照 ChatGPT 侧栏，作为首要动作常驻高亮 */
-.app-shell.preview-hidden .activity-item.activity-new-chat { background:rgba(240,246,252,.08);color:#f0f6fc }
+/* 新聊天就是 AI 对话主页：只在对话页激活时点亮，与其他入口互斥 */
 .app-shell.preview-hidden .activity-item.activity-new-chat:hover { background:rgba(240,246,252,.12) }
 /* 最近会话列表：只在侧栏展开（预览收回）时显示，占满菜单与账号之间的空间 */
 .activity-sessions { display:none }

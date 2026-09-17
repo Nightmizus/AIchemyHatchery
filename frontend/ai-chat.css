@@ -57,6 +57,12 @@
 .template-picker .element-group-title span{color:var(--ai-dim);font:600 8px Consolas,monospace}
 .template-picker-foot{padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--ai-line)}
 .template-picker-foot span{color:var(--ai-muted);font-size:11px}
+/* 模板卡片选中态：深色主题下的"点亮"，hover 不熄灭；按下立即有反馈，不等松开 */
+.template-picker .element-card{transition:background .12s,border-color .12s,transform .08s}
+.template-picker .element-card:active{background:rgba(240,246,252,.14);transform:scale(.985)}
+.template-picker .element-card[aria-pressed="true"]{border-color:#e6edf3;background:rgba(240,246,252,.13);box-shadow:inset 0 0 0 1px #e6edf3}
+.template-picker .element-card[aria-pressed="true"]:hover{border-color:#fff;background:rgba(240,246,252,.17)}
+.template-picker .element-card[aria-pressed="true"]:active{background:rgba(240,246,252,.2)}
 /* AI working animations: silky entrances, sheen while running, smooth text output. */
 .ai-run-output{animation:aiCardIn .38s cubic-bezier(.22,.9,.28,1) both}
 @keyframes aiCardIn{0%{opacity:0;transform:translateY(12px)}100%{opacity:1;transform:translateY(0)}}
