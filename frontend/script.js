@@ -655,10 +655,10 @@ function ensureAiSessionId(){
 }
 function enqueueAiRun(sessionId,item){
   appendAiChatMessage('user',item.shownText,item.attachments);
-  void saveAiChatSession();// 排队消息也立刻落库：关网页再打开时至少能看到它排过队
   if(!aiSessionTitles.has(sessionId))aiSessionTitles.set(sessionId,item.shownText.slice(0,30)||'新聊天');
   const last=document.querySelector('#aiChatMessages')?.lastElementChild;const tag=document.createElement('small');tag.className='ai-queue-tag';tag.textContent=`排队中（第 ${aiRunQueue.length+1} 位）`;last?.querySelector('div')?.append(tag);
   aiRunQueue.push({...item,sessionId,tag});
+  void saveAiChatSession();// 排队消息同样立即落库，防止刷新后丢失
   showToast('已有 AI 任务进行中，这条消息已排队，会按顺序自动执行');
   renderAiSessionList();
 }
@@ -1235,12 +1235,11 @@ async function executeAiRun(run){
   if(live()){
     archiveAiRunOutput();
     if(!run.messageAppended)appendAiChatMessage('user',run.shownText,run.attachments);
-    // 发消息即落库（绕过运行期的 2.5s 防抖）：此时关网页，重开也能看到完整的"问题+进度/结果"
-    void saveAiChatSession();
     const messages=document.querySelector('#aiChatMessages');const result=document.querySelector('#aiResult');const card=document.querySelector('#aiRunCard');const undoBtn=document.querySelector('#aiUndoBtn');
     if(messages&&result&&card)messages.append(result,card,...undoBtn?[undoBtn]:[]);
     if(result){result.hidden=true;result.classList.remove('error')}
     renderAiRunProgress(run.snapshot,run);
+    void saveAiChatSession();// 用户消息立即落库：任务期间的防抖放宽到 2.5s，中途刷新不能把消息弄丢
     scrollAiConversation();
   }else{
     // 离线启动（排队任务轮到执行时已切走）：先在该会话的缓存 html 里固化上一轮输出、重置卡片

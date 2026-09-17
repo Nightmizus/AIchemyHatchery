@@ -311,7 +311,15 @@ class TestHandler(srv.AIchemyHatcheryHandler):
             session_id, is_delete = match.group(1).lower(), bool(match.group(2))
             with LOCK:
                 session = SESSIONS.get(session_id)
-                if not session or session["userId"] != str(user["id"]):
+                owned = bool(session) and session["userId"] == str(user["id"])
+                if method == "GET" and not is_delete:
+                    if not owned:
+                        self.send_json({"error": "会话不存在或已删除"}, 404)
+                        return True
+                    self.send_json({"session": {"id": session["id"], "title": session["title"], "messagesHtml": session["html"],
+                                                "createdAt": session["createdAt"], "updatedAt": session["updatedAt"]}})
+                    return True
+                if not owned:
                     self.send_json({"error": "会话不存在或已删除"}, 404)
                     return True
                 if is_delete:
