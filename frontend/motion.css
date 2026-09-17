@@ -70,8 +70,6 @@ button,a,input,select,textarea,label{transition:background-color .16s ease,borde
 #authGate[data-state="form"] .auth-copy{animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) both}
 #authGate[data-state="form"] .auth-tabs{animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) .05s both}
 #authGate[data-state="form"] .auth-form:not([hidden]){animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) .1s both}
-#authGate[data-state="form"] .auth-sso-divider{animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) .14s both}
-#authGate[data-state="form"] .auth-sso-btn{animation:uiFadeSlideIn .34s cubic-bezier(.22,.9,.3,1) .18s both}
 
 /* ---- 画布页面切换（编辑器内跳转页面时整页轻入） ---- */
 @keyframes uiPageIn{from{opacity:.35;transform:translateY(10px)}to{opacity:1;transform:none}}

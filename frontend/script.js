@@ -879,13 +879,14 @@ document.querySelector('#aiSessionList')?.addEventListener('click',event=>{
   if(del){event.stopPropagation();void deleteAiChatSession(del.dataset.aiSessionDelete);return}
   const item=event.target.closest('[data-ai-session]');
   if(!item)return;
+  switchActivity('ai');
   const id=item.dataset.aiSession;
   if(id===aiChatSessionId)return;
   history.pushState(null,'',`/c/${id}`);
   void loadAiChatSession(id);
 });
 document.querySelector('#aiNewChatBtn')?.addEventListener('click',()=>{
-  if(document.querySelector('.ai-chat-panel')?.hidden)document.querySelector('[data-activity="ai"]')?.click();
+  switchActivity('ai');
   if(!aiChatSessionId&&!firstAiUserText()){document.querySelector('#aiPrompt')?.focus();return}
   startNewAiChat();
 });

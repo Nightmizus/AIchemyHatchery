@@ -6,10 +6,10 @@
   <meta name="description" content="炼丹社Hatchery——面向校园个人与社团的模块化 AI 建站控制台。">
   <title>炼丹社Hatchery｜页面编辑器</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/styles.css?v=20260916-3">
-  <link rel="stylesheet" href="/mica.css?v=20260916-12">
-  <link rel="stylesheet" href="/ai-chat.css?v=20260916-9">
-  <link rel="stylesheet" href="/motion.css?v=20260916-1">
+  <link rel="stylesheet" href="/styles.css?v=20260917-1">
+  <link rel="stylesheet" href="/mica.css?v=20260917-1">
+  <link rel="stylesheet" href="/ai-chat.css?v=20260917-1">
+  <link rel="stylesheet" href="/motion.css?v=20260917-1">
 </head>
 <body>
   <section class="auth-gate" id="authGate" data-state="checking" aria-label="炼丹社Hatchery账号登录">
@@ -24,11 +24,8 @@
         <div class="auth-options"><label><input name="remember" type="checkbox" checked><span>在这台设备保持登录 7 天</span></label><button type="button" data-auth-help>忘记密码？</button></div>
         <button class="auth-submit" type="submit"><b>登录控制台</b><span>→</span></button>
       </form>
-      <div class="auth-sso-divider"><span>或</span></div>
-      <a class="auth-submit auth-sso-btn" href="/api/auth/sso/authorize"><b>通过 SDSZ 账号登录</b><span>→</span></a>
       <div class="auth-form" id="registerForm" data-auth-form="register" hidden>
         <p class="auth-sso-note">账号注册已迁移到 SDSZ 统一账号系统，两站共用同一套账号。注册完成后回到这里直接登录。</p>
-        <a class="auth-submit" href="https://sdsz.groovin.cn/register"><b>前往 SDSZ 注册</b><span>→</span></a>
       </div>
       <p class="auth-error" id="authError" role="alert" hidden></p>
     </div>
@@ -176,6 +173,6 @@
     <button data-context-action="edit">编辑</button>
   </div>
   <script src="/auth.js?v=20260916-2"></script>
-  <script src="/script.js?v=20260917-2"></script>
+  <script src="/script.js?v=20260917-3"></script>
 </body>
 </html>
