@@ -612,10 +612,8 @@ function updateAiContextRing(){
   const used=aiContextUsage();
   const circumference=69.12;
   ring.style.strokeDashoffset=String(circumference*(1-Math.max(used,0.02)));
-  // 参照各 harness 的做法：环形指示常驻显示在发送钮旁边，随上下文用量填充并变色
-  ring.style.stroke=used>=0.8?'#f85149':used>=0.5?'#e3b341':'#3fa88a';
-  const pct=document.querySelector('#aiContextPct');
-  if(pct)pct.textContent=used>=0.995?'99':String(Math.round(used*100));
+  // 参照各 harness 的做法：环形指示常驻显示在发送钮旁边，随上下文用量填充，快满时变红
+  ring.style.stroke=used>=0.8?'#f85149':'#58a6ff';
   const wrap=document.querySelector('#aiContextRingWrap');
   if(wrap){wrap.classList.add('is-visible');wrap.setAttribute('title',`本轮上下文约占 ${Math.round(used*100)}%（站点快照 + 对话历史 + 附件）`)}
 }
