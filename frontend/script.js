@@ -1244,13 +1244,10 @@ function closeTemplatePicker(){
     else if(!picker.classList.contains('is-closing'))picker.remove();
   }
   document.querySelector('[data-template-open]')?.classList.remove('active');
-  // 模板面板只存在于 AI 界面，关闭后把选中状态还给 AI 按钮
-  if(!document.querySelector('.ai-chat-panel')?.hidden)document.querySelector('[data-activity="ai"]')?.classList.add('active');
 }
 function openTemplatePicker(){
   if(anyAiRunActive()){showToast('AI 正在修改网站，完成后再添加模块');return}
   const panel=document.querySelector('.ai-chat-panel');if(!panel||panel.querySelector('#templatePicker'))return;
-  document.querySelector('[data-activity="ai"]')?.classList.remove('active');
   document.querySelector('[data-template-open]')?.classList.add('active');
   const groups=TEMPLATE_GROUPS.map(group=>`<div class="element-group"><div class="element-group-title"><b>${group.title}</b><span>${group.en}</span></div><div class="element-grid">${group.items.map(type=>`<button type="button" class="element-card${type==='forum'?' wide':''}" data-template-type="${type}" aria-pressed="false"><i class="element-visual v-${type}">${TEMPLATE_VISUALS[type]||'<span></span>'}</i><b>${elementCatalog[type]?.name||type}</b><small>${TEMPLATE_DESCRIPTIONS[type]||''}</small></button>`).join('')}</div></div>`).join('');
   panel.insertAdjacentHTML('beforeend',`<div class="template-picker" id="templatePicker"><header class="template-picker-head"><div><small>TEMPLATES</small><b>浏览现成模板</b></div><button type="button" class="template-picker-close" data-template-close aria-label="关闭模板选择">×</button></header><div class="template-picker-body"><p class="template-picker-tip">点选要用的模块（可多选），确定后交给 AI 加进当前网站。</p>${groups}</div><footer class="template-picker-foot"><span data-template-count>未选择模块</span><button type="button" class="ai-preset-confirm" data-template-confirm disabled>确定添加</button></footer></div>`);
@@ -1277,6 +1274,7 @@ function openTemplatePicker(){
 function switchActivity(name){
   closeTemplatePicker();
   document.querySelectorAll('.activity-item[data-activity]').forEach(item=>{const active=item.dataset.activity===name;item.classList.toggle('active',active);item.setAttribute('aria-selected',String(active))});
+  document.querySelector('#aiNewChatBtn')?.classList.toggle('active',name==='ai');
   document.querySelector('.ai-chat-panel').hidden=name!=='ai';
   document.querySelector('.security-panel').hidden=name!=='security';
 }
