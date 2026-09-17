@@ -25,8 +25,9 @@ owned by `server.py`; Harness has no account or database tool.
 ## LLM providers
 
 `deepseek_harness_adapter.py` picks the model provider via `MIAODA_LLM`
-(`kimi` or `deepseek`); when unset it autodetects from the configured keys
-(`KIMI_API_KEY` present → Kimi, otherwise DeepSeek).
+(`kimi`, `glm` or `deepseek`); when unset it autodetects from the configured
+keys (`KIMI_API_KEY` present → Kimi, else `GLM_API_KEY` present → GLM,
+otherwise DeepSeek).
 
 - **DeepSeek** — built into the runtime (`deepseek-official` route); needs
   `DEEPSEEK_API_KEY`, optional `DEEPSEEK_MODEL` / `DEEPSEEK_REASONING_EFFORT`.
@@ -37,3 +38,13 @@ owned by `server.py`; Harness has no account or database tool.
   with `sk-kimi-` default to `https://api.kimi.com/coding/v1`, others to
   `https://api.moonshot.cn/v1`. Image attachments are rejected
   (text-only adapter).
+- **GLM (智谱 BigModel, 国内)** — `llm-glm.mjs`, same shape as the Kimi
+  adapter, registered as the `glm` route. Needs `GLM_API_KEY` (a
+  `open.bigmodel.cn` key, `<id>.<secret>` form); optional `GLM_MODEL`
+  (default `glm-5.3`; also `glm-5.3-flash`, `glm-4.7`),
+  `GLM_REASONING_EFFORT` (default `high`), `GLM_BASE_URL` (default
+  `https://open.bigmodel.cn/api/paas/v4`; GLM Coding Plan subscribers set
+  `https://open.bigmodel.cn/api/coding/paas/v4`). Reasoning is sent in
+  bigmodel's `thinking: {type: enabled|disabled}` form, with
+  `reasoning_effort` added only for `glm-5.2+`; `tool_stream: true` is
+  requested so tool-call arguments stream incrementally. Text-only.

@@ -7,7 +7,7 @@
   <title>炼丹社Hatchery｜页面编辑器</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/styles.css?v=20260917-1">
-  <link rel="stylesheet" href="/mica.css?v=20260917-3">
+  <link rel="stylesheet" href="/mica.css?v=20260917-4">
   <link rel="stylesheet" href="/ai-chat.css?v=20260917-6">
   <link rel="stylesheet" href="/motion.css?v=20260917-1">
 </head>
@@ -138,10 +138,10 @@
       <header class="page-control">
         <div class="workspace-page-title"><span>CURRENT PAGE</span><b id="currentBreadcrumb">首页</b><small id="selectionState">未选择模块</small></div>
         <div class="page-actions">
+          <button id="previewCollapseBtn" title="向右收起预览" aria-label="向右收起预览">»</button>
           <div class="history-actions" aria-label="编辑历史"><button id="undoBtn" title="撤销（Ctrl+Z）" disabled>↶</button><button id="redoBtn" title="重做（Ctrl+Shift+Z）" disabled>↷</button></div>
           <div class="device-switch" role="group" aria-label="预览设备"><button class="active" data-preview-device="desktop" title="桌面预览">桌面</button><button data-preview-device="mobile" title="手机预览">手机</button></div>
           <button id="clearPageBtn" title="清空当前页面">清空</button>
-          <button id="previewCollapseBtn" title="向左收起预览" aria-label="向左收起预览">«</button>
         </div>
         <div class="deploy-actions">
           <button class="preview-site-button" id="previewSiteBtn">预览 <span>↗</span></button>
@@ -157,7 +157,7 @@
         </div>
       </div>
     </section>
-    <button class="preview-expand-fab" id="previewExpandFab" title="展开网站预览" aria-label="展开网站预览">» 预览</button>
+    <button class="preview-expand-fab" id="previewExpandFab" title="展开网站预览" aria-label="展开网站预览">« 预览</button>
   </main>
 
   <div class="toast" id="toast" hidden><span></span><button aria-label="关闭提示">×</button></div>
@@ -171,6 +171,6 @@
     <button data-context-action="edit">编辑</button>
   </div>
   <script src="/auth.js?v=20260916-2"></script>
-  <script src="/script.js?v=20260917-8"></script>
+  <script src="/script.js?v=20260917-10"></script>
 </body>
 </html>

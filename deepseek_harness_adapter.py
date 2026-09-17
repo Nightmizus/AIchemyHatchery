@@ -29,8 +29,8 @@ TOOL_LABELS = {
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 
-# 可选 LLM 提供方。MIAODA_LLM 显式指定（kimi / deepseek）；
-# 未指定时按已配置的 Key 自动选择（有 KIMI_API_KEY 用 kimi，否则 deepseek）。
+# 可选 LLM 提供方。MIAODA_LLM 显式指定（kimi / glm / deepseek）；
+# 未指定时按已配置的 Key 自动选择（有 KIMI_API_KEY 用 kimi，其次 GLM_API_KEY 用 glm，否则 deepseek）。
 PROVIDERS = {
     "deepseek": {
         "route": "deepseek-official",
@@ -54,6 +54,21 @@ PROVIDERS = {
         "models": [{"id": "k3", "name": "Kimi K3"}, {"id": "kimi-k2.6", "name": "Kimi K2.6"}],
         "efforts": [{"id": "off", "name": "关闭"}, {"id": "low", "name": "低"}, {"id": "high", "name": "高"}],
     },
+    "glm": {
+        "route": "glm",
+        "key_env": "GLM_API_KEY",
+        "model_env": "GLM_MODEL",
+        "effort_env": "GLM_REASONING_EFFORT",
+        "default_model": "glm-5.3",
+        "default_effort": "high",
+        "label": "GLM 智谱 (Harness)",
+        "models": [
+            {"id": "glm-5.3", "name": "GLM-5.3"},
+            {"id": "glm-5.3-flash", "name": "GLM-5.3 Flash"},
+            {"id": "glm-4.7", "name": "GLM-4.7"},
+        ],
+        "efforts": [{"id": "off", "name": "关闭"}, {"id": "low", "name": "低"}, {"id": "high", "name": "高"}],
+    },
 }
 
 
@@ -61,10 +76,12 @@ def resolve_llm_provider() -> tuple[str, dict]:
     explicit = os.environ.get("MIAODA_LLM", "").strip().lower()
     if explicit:
         if explicit not in PROVIDERS:
-            raise HarnessRuntimeError(f"未知的 MIAODA_LLM：{explicit}（可选：kimi / deepseek）")
+            raise HarnessRuntimeError(f"未知的 MIAODA_LLM：{explicit}（可选：kimi / glm / deepseek）")
         return explicit, PROVIDERS[explicit]
     if os.environ.get("KIMI_API_KEY", "").strip():
         return "kimi", PROVIDERS["kimi"]
+    if os.environ.get("GLM_API_KEY", "").strip():
+        return "glm", PROVIDERS["glm"]
     return "deepseek", PROVIDERS["deepseek"]
 
 SYSTEM_PROMPT = """你是秒哒网站平台中负责自动修改网站的代码代理，执行内核是 DeepSeek Harness。
@@ -489,21 +506,40 @@ def _finish_reason(events: list[dict]) -> str | None:
     return None
 
 
+def _finish_failure_message(chunk: dict) -> str:
+    if chunk.get("type") != "finish":
+        return ""
+    reason = chunk.get("reason") if isinstance(chunk.get("reason"), dict) else {}
+    failure = reason.get("failure") if isinstance(reason.get("failure"), dict) else {}
+    return str(failure.get("message") or "").strip()
+
+
 def _upstream_failure(events: list[dict]) -> str:
-    """从 finish chunk 里取上游 API 的失败摘要（如 Kimi 403 限额），没有则空串。
-    之前只报 finish_reason='error' 用户完全看不出是额度耗尽还是别的故障。"""
+    """从 finish chunk 里取上游 API 的失败摘要（如 Kimi 403 限额 / GLM 429 余额不足），没有则空串。
+    之前只报 finish_reason='error' 用户完全看不出是额度耗尽还是别的故障。
+    新版运行时（session format v2）不再发顶层 assistant/chunk，失败落在 turn/end 的 reason.error
+    和 assistant/attempt 内嵌的 stream[] finish chunk 里，这里一并兜底。"""
     for event in reversed(events):
-        if event.get("type") != "assistant/chunk":
-            continue
+        event_type = event.get("type")
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
-        chunk = data.get("chunk") if isinstance(data.get("chunk"), dict) else {}
-        if chunk.get("type") != "finish":
-            continue
-        reason = chunk.get("reason") if isinstance(chunk.get("reason"), dict) else {}
-        failure = reason.get("failure") if isinstance(reason.get("failure"), dict) else {}
-        message = str(failure.get("message") or "").strip()
-        if message:
-            return message
+        if event_type == "assistant/chunk":
+            chunk = data.get("chunk") if isinstance(data.get("chunk"), dict) else {}
+            message = _finish_failure_message(chunk)
+            if message:
+                return message
+        elif event_type == "turn/end":
+            reason = data.get("reason") if isinstance(data.get("reason"), dict) else {}
+            error = reason.get("error") if isinstance(reason.get("error"), dict) else {}
+            message = str(error.get("message") or "").strip()
+            if message:
+                return message
+        elif event_type in ("assistant/attempt", "assistant/message"):
+            stream = data.get("stream") if isinstance(data.get("stream"), list) else []
+            for item in reversed(stream):
+                chunk = item.get("chunk") if isinstance(item, dict) and isinstance(item.get("chunk"), dict) else {}
+                message = _finish_failure_message(chunk)
+                if message:
+                    return message
     return ""
 
 
@@ -511,11 +547,15 @@ def _token_usage(events: list[dict]) -> dict:
     """Sum token usage across all LLM turns of a run.
 
     Primary source: StreamChunk 'usage' forwarded as assistant/chunk events.
-    Fallback: a usage object attached to turn/end. Input tokens include
+    Newer runtimes (session format v2) stop emitting top-level chunks and instead
+    attach `usage` to each assistant/message, so that is summed as the second source.
+    Last fallback: a usage object attached to turn/end. Input tokens include
     cache-read tokens so the number reflects the real prompt size.
     """
     input_tokens = 0
     output_tokens = 0
+    message_input = 0
+    message_output = 0
     turn_usage: dict | None = None
     for event in events:
         event_type = event.get("type")
@@ -527,6 +567,10 @@ def _token_usage(events: list[dict]) -> dict:
             usage = chunk.get("usage") if isinstance(chunk.get("usage"), dict) else {}
             input_tokens += int(usage.get("inputTokens") or 0) + int(usage.get("cacheReadTokens") or 0)
             output_tokens += int(usage.get("outputTokens") or 0)
+        elif event_type == "assistant/message":
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            message_input += int(usage.get("inputTokens") or 0) + int(usage.get("cacheReadTokens") or 0)
+            message_output += int(usage.get("outputTokens") or 0)
         elif event_type == "turn/end":
             usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
             if usage:
@@ -536,6 +580,8 @@ def _token_usage(events: list[dict]) -> dict:
                 }
     if input_tokens or output_tokens:
         return {"inputTokens": input_tokens, "outputTokens": output_tokens}
+    if message_input or message_output:
+        return {"inputTokens": message_input, "outputTokens": message_output}
     return turn_usage or {"inputTokens": 0, "outputTokens": 0}
 
 
@@ -689,8 +735,8 @@ def run_deepseek_harness(
         failure = _upstream_failure(events)
         if failure:
             lowered = failure.lower()
-            if any(keyword in lowered for keyword in ("usage limit", "quota", "insufficient", "balance", "billing", "429", "rate limit", "exceeded")):
-                raise HarnessRuntimeError("AI 服务上游配额已用尽（Kimi 返回额度类错误）：等待配额重置、购买额外用量或更换 API Key 后即可恢复")
+            if any(keyword in lowered for keyword in ("usage limit", "quota", "insufficient", "balance", "billing", "429", "rate limit", "exceeded", "余额", "额度", "配额", "欠费")):
+                raise HarnessRuntimeError(f"AI 服务上游配额已用尽（{provider['label']} 返回额度类错误）：等待配额重置、购买额外用量或更换 API Key 后即可恢复")
             raise HarnessRuntimeError(f"AI 服务上游调用失败：{_redact(failure[:200], (key,))}{runtime._diagnostics()}")
         raise HarnessRuntimeError(f"DeepSeek Harness 未正常完成网站任务（{finish_reason}）{runtime._diagnostics()}")
     result = _extract_json_object(response)

@@ -90,7 +90,7 @@ LOCK = threading.Lock()
 SESSIONS: dict[str, dict] = {}      # id -> {id,userId,title,html,createdAt,updatedAt}
 DRAFTS: dict[str, str] = {}         # userId -> 草稿 JSON 字符串
 DRAFT_SAVES: list[dict] = []        # 每次草稿保存的 {userId, pages0}
-AI_JOBS: dict[str, dict] = {}       # jobId -> 任务记录（含启动时上下文）
+AI_JOB_META: dict[str, dict] = {}   # jobId -> {prompt, context, contextPage0Code, createdAt, completedAt}
 AI_CONFIG = {"delayMs": 700, "fail": False, "serial": True}
 
 
@@ -98,17 +98,17 @@ def now_iso():
     return srv.iso_time()
 
 
-def fake_ai_result(job):
+def fake_ai_result(meta):
     """确定性的 siteReplace：往 pages[0].code 末尾追加带 prompt 的标记。"""
-    site = job["context"].get("site") or {}
+    site = json.loads(json.dumps(meta["context"].get("site") or {}))
     pages = site.get("pages") or []
     if pages:
-        marker = f'<section class="ai-task-marker" data-task="{job["prompt"]}">任务 {job["prompt"]} 已应用</section>'
+        marker = f'<section class="ai-task-marker" data-task="{meta["prompt"]}">任务 {meta["prompt"]} 已应用</section>'
         pages[0]["code"] = f"{pages[0].get('code') or ''}\n{marker}"
     return {
-        "runId": job["jobId"],
-        "summary": f"已按「{job['prompt']}」完成修改并验证。",
-        "mode": job["mode"],
+        "runId": meta["jobId"],
+        "summary": f"已按「{meta['prompt']}」完成修改并验证。",
+        "mode": "full",
         "siteReplace": site,
         "siteOperations": [],
         "changedFiles": [],
@@ -150,7 +150,9 @@ class TestHandler(srv.AIchemyHatcheryHandler):
                 SESSIONS.clear()
                 DRAFTS.clear()
                 DRAFT_SAVES.clear()
-                AI_JOBS.clear()
+                AI_JOB_META.clear()
+                with srv.AI_RUN_JOBS_LOCK:
+                    srv.AI_RUN_JOBS.clear()
                 AI_CONFIG.update({"delayMs": 700, "fail": False, "serial": True})
             self.send_json({"ok": True})
             return True
@@ -161,10 +163,13 @@ class TestHandler(srv.AIchemyHatcheryHandler):
             self.send_json({"ok": True, "config": dict(AI_CONFIG)})
             return True
         if parsed.path == "/__test/ai/jobs":
+            # 从 meta 读（任务被客户端 ack 后会从 AI_RUN_JOBS 移除，这里仍能看到全history）
             with LOCK:
-                jobs = [{"jobId": job["jobId"], "userId": job["userId"], "prompt": job["prompt"], "status": job["status"],
-                         "createdAt": job["createdAt"], "completedAt": job["completedAt"],
-                         "contextPage0Code": job["contextPage0Code"]} for job in AI_JOBS.values()]
+                jobs = [{"jobId": meta["jobId"], "prompt": meta["prompt"], "status": meta.get("status", "running"),
+                         "contextPage0Code": meta["contextPage0Code"], "createdAt": meta["createdAt"],
+                         "completedAt": meta.get("completedAt")}
+                        for meta in AI_JOB_META.values()]
+            jobs.sort(key=lambda item: item["createdAt"])
             self.send_json({"jobs": jobs})
             return True
         if parsed.path == "/__test/state":
@@ -174,7 +179,8 @@ class TestHandler(srv.AIchemyHatcheryHandler):
                     "drafts": DRAFTS,
                     "draftSaves": DRAFT_SAVES,
                     "config": dict(AI_CONFIG),
-                    "jobs": [{"jobId": j["jobId"], "prompt": j["prompt"], "status": j["status"]} for j in AI_JOBS.values()],
+                    "jobs": [{"jobId": jid, "prompt": m["prompt"], "status": (srv.AI_RUN_JOBS.get(jid) or {}).get("status", "acked")}
+                             for jid, m in AI_JOB_META.items()],
                 }
             self.send_json(payload)
             return True
@@ -192,57 +198,51 @@ class TestHandler(srv.AIchemyHatcheryHandler):
             if not prompt:
                 self.send_json({"error": "缺少任务描述"}, 400)
                 return True
-            with LOCK:
-                if AI_CONFIG["serial"]:
-                    busy = next((jid for jid, job in AI_JOBS.items()
-                                 if job["userId"] == str(user["id"]) and job["status"] == "running"), None)
-                    if busy:
-                        self.send_json({"error": "已有 AI 任务在进行中，新任务会排队执行", "jobId": busy, "busy": True}, 409)
-                        return True
-                job_id = f"job-{secrets.token_hex(12)}"
-                site = body.get("context") or {}
-                pages = (site.get("site") or {}).get("pages") or []
-                AI_JOBS[job_id] = {
-                    "jobId": job_id, "userId": str(user["id"]), "prompt": prompt, "status": "running",
-                    "mode": str(body.get("mode") or "full"), "context": site,
+            # serial=true 镜像修复后服务端的“同账号单任务”守卫（user_running_ai_job）
+            if AI_CONFIG["serial"]:
+                busy = srv.user_running_ai_job(user["id"])
+                if busy:
+                    self.send_json({"error": "已有 AI 任务在进行中，稍后会自动继续", "jobId": busy, "busy": True}, 409)
+                    return True
+            job_id = f"job-{secrets.token_hex(12)}"
+            site = body.get("context") or {}
+            pages = (site.get("site") or {}).get("pages") or []
+            meta = {"jobId": job_id, "prompt": prompt, "context": site,
                     "contextPage0Code": str((pages[0] or {}).get("code") or "") if pages else "",
-                    "createdAt": time.time(), "completedAt": None,
-                }
+                    "createdAt": time.time(), "completedAt": None}
+            with LOCK:
+                AI_JOB_META[job_id] = meta
+                # 注册进真实的 AI_RUN_JOBS：/api/ai/run/status、/active、/ack 走服务端真实处理器
+                with srv.AI_RUN_JOBS_LOCK:
+                    srv.AI_RUN_JOBS[job_id] = {"userId": str(user["id"]), "sessionId": str(body.get("sessionId") or ""),
+                                               "prompt": prompt[:120], "status": "running", "events": [], "createdAt": meta["createdAt"],
+                                               "result": None, "error": None}
                 delay_ms = AI_CONFIG["delayMs"]
                 fail = AI_CONFIG["fail"]
 
             def worker():
                 time.sleep(max(0.05, delay_ms / 1000))
                 with LOCK:
-                    job = AI_JOBS.get(job_id)
-                    if not job or job["status"] != "running":
+                    if job_id not in AI_JOB_META:
                         return
                     if fail:
-                        job.update({"status": "failed", "error": "模拟的上游失败", "completedAt": time.time()})
+                        with srv.AI_RUN_JOBS_LOCK:
+                            job = srv.AI_RUN_JOBS.get(job_id)
+                            if job and job.get("status") == "running":
+                                job.update({"status": "failed", "error": "模拟的上游失败"})
+                        AI_JOB_META[job_id]["completedAt"] = time.time()
+                        AI_JOB_META[job_id]["status"] = "failed"
                         return
-                    job.update({"status": "completed", "result": fake_ai_result(job), "completedAt": time.time()})
+                    result = fake_ai_result(AI_JOB_META[job_id])
+                    AI_JOB_META[job_id]["completedAt"] = time.time()
+                    AI_JOB_META[job_id]["status"] = "completed"
+                    with srv.AI_RUN_JOBS_LOCK:
+                        job = srv.AI_RUN_JOBS.get(job_id)
+                        if job and job.get("status") == "running":
+                            job.update({"status": "completed", "result": result})
 
             threading.Thread(target=worker, daemon=True).start()
             self.send_json({"jobId": job_id, "status": "running"}, 202)
-            return True
-        if path == "/api/ai/run/status" and method == "GET":
-            user = self.require_console_user()
-            if not user:
-                return True
-            job_id = str((parse_qs(parsed.query).get("id") or [""])[0])
-            with LOCK:
-                job = AI_JOBS.get(job_id)
-                if not job or job["userId"] != str(user["id"]):
-                    self.send_json({"error": "AI 任务不存在或已过期（可能刚重启过服务）", "status": "failed"}, 404)
-                    return True
-                payload = {"jobId": job_id, "status": job["status"],
-                           "events": [{"id": "e1", "kind": "tool", "tool": "replace_file", "label": "修改文件", "detail": "site.json"},
-                                      {"id": "e2", "kind": "analysis", "detail": f"正在按「{job['prompt']}」修改网站"}]}
-                if job["status"] == "completed":
-                    payload["result"] = job["result"]
-                elif job["status"] == "failed":
-                    payload["error"] = job["error"]
-            self.send_json(payload)
             return True
         if path == "/api/ai/status" and method == "GET":
             self.send_json({"configured": True, "models": [{"id": "k3", "name": "k3"}], "efforts": [],

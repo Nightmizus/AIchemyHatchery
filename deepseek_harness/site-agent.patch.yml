@@ -48,3 +48,6 @@
 
     - id: miaoda-llm-kimi
       name: './llm-kimi.mjs'
+
+    - id: miaoda-llm-glm
+      name: './llm-glm.mjs'

@@ -167,6 +167,18 @@ def ai_run_slot_release(owner: str) -> None:
         AI_RUN_SLOT_OWNERS.discard(owner)
 
 
+def user_running_ai_job(user_id) -> str | None:
+    """同一账号同时只允许一个 AI 任务：网站只有一份，两个并行任务各自基于同一份快照改动，
+    后完成者的整站结果会把先完成者的修改覆盖掉。返回进行中的 jobId（超过 1 小时的僵尸任务不算）。"""
+    now = time.time()
+    with AI_RUN_JOBS_LOCK:
+        for job_id, job in AI_RUN_JOBS.items():
+            if (str(job.get("userId", "")) == str(user_id) and job.get("status") == "running"
+                    and now - float(job.get("createdAt", now)) < 3600):
+                return job_id
+    return None
+
+
 def ai_run_jobs_sweep_stale(now: float) -> int:
     """清理超时仍挂起的 AI 任务：标记失败并强放其并发槽位。返回清理的任务数。
     槽位可能被 harness 子进程挂起长期占用；超过 harness 自身超时后仍持有即判定为泄漏。
@@ -677,6 +689,7 @@ def ai_config_snapshot() -> dict:
     """管理面板展示的 AI 配置状态；只回传 Key 末 4 位，绝不回传完整内容。"""
     provider_name, provider = resolve_llm_provider()
     kimi_key = os.environ.get("KIMI_API_KEY", "").strip()
+    glm_key = os.environ.get("GLM_API_KEY", "").strip()
     return {
         "provider": provider_name,
         "providerLabel": provider["label"],
@@ -684,6 +697,8 @@ def ai_config_snapshot() -> dict:
         "explicitProvider": os.environ.get("MIAODA_LLM", "").strip().lower(),
         "kimiKeySet": bool(kimi_key),
         "kimiKeyMask": f"···{kimi_key[-4:]}" if kimi_key else "",
+        "glmKeySet": bool(glm_key),
+        "glmKeyMask": f"···{glm_key[-4:]}" if glm_key else "",
         "deepseekKeySet": bool(os.environ.get("DEEPSEEK_API_KEY", "").strip()),
     }
 
@@ -1379,6 +1394,19 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if not admin:
             return
         data = self.read_json()
+        if "glmApiKey" in data:
+            # 智谱 GLM Key 形如 <32 位 id>.<16 位 secret>，与 Kimi 共用同一字符白名单；Kimi 分支保持原样
+            key = str(data.get("glmApiKey", "")).strip()
+            if key and not KIMI_KEY_PATTERN.fullmatch(key):
+                raise ValueError("Key 格式无效：应为 7 位以上的字母数字串（可含 -、_、.），智谱 GLM Key 一般形如 xxxx.xxxx")
+            with AI_CONFIG_LOCK:
+                persist_env_value("GLM_API_KEY", key)
+                os.environ["GLM_API_KEY"] = key
+                with neon_db() as conn:
+                    with conn.cursor() as cur:
+                        audit_event(cur, str(admin["id"]), "admin.ai_config", {"glmKeySet": bool(key)})
+            self.send_json({"ok": True, **ai_config_snapshot()})
+            return
         key = str(data.get("kimiApiKey", "")).strip()
         if key and not KIMI_KEY_PATTERN.fullmatch(key):
             raise ValueError("Key 格式无效：应为 7 位以上的字母数字串（可含 -、_、.），Kimi Key 一般以 sk- 开头")
@@ -1935,6 +1963,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort, _session_id = self.prepare_ai_run()
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
+        busy_job = user_running_ai_job(user["id"])
+        if busy_job:
+            # 同账号已有任务在跑（可能是另一个页面/设备发起的）：让前端排队等待，避免整站结果互相覆盖
+            self.send_json({"error": "已有 AI 任务在进行中，稍后会自动继续", "jobId": busy_job, "busy": True}, 409)
+            return
         lock_owner = f"sync-{secrets.token_hex(6)}"
         if not ai_run_slot_acquire(lock_owner):
             raise ValueError("当前同时运行的 AI 任务较多，请稍候再试")
@@ -1959,6 +1992,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort, session_id = self.prepare_ai_run()
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
+        busy_job = user_running_ai_job(user["id"])
+        if busy_job:
+            # 同账号已有任务在跑（可能是另一个页面/设备发起的）：让前端排队等待，避免整站结果互相覆盖
+            self.send_json({"error": "已有 AI 任务在进行中，稍后会自动继续", "jobId": busy_job, "busy": True}, 409)
+            return
         job_id = f"job-{secrets.token_hex(12)}"
         if not ai_run_slot_acquire(job_id):
             raise ValueError("当前同时运行的 AI 任务较多，请稍候再试")
