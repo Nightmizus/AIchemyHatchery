@@ -1345,7 +1345,7 @@ function openPublishModal(){
   if(!currentConsoleUser){showAuthGate('请先登录');return}
   const current=String(currentConsoleUser.publishSlug||'');
   const publishDomain=String(currentConsoleUser.publishDomain||'hatchery.mizusumi.com');
-  const listed=currentConsoleUser.publishListed!==false;// 默认收录进 Gallery
+  const listed=true;// 每次打开发布弹窗都默认勾选收录进 Gallery；取消勾选仅对当次发布生效
   openModal('发布网站',`<form class="account-settings-form publish-form" data-console-form="publish"><p>输入发布路径，网站将发布在 <b class="publish-domain" data-publish-domain>${esc(current||'xxx')}.${esc(publishDomain)}</b>。</p><label>发布路径<input name="slug" required minlength="3" maxlength="32" pattern="[a-z0-9](-?[a-z0-9])+" placeholder="例如 campus-news" value="${esc(current)}" autocomplete="off" spellcheck="false"><small>3–32 位小写字母、数字或短横线；已被他人占用的路径不能取。</small></label>${current?`<p class="publish-warning" data-publish-warning hidden>更改路径后，旧地址 <b>${esc(current)}.${esc(publishDomain)}</b> 的页面（含论坛、成员账号数据）会被删除。</p>`:''}<div class="publish-gallery-opt"><label><input name="listed" type="checkbox"${listed?' checked':''}><span>收录进 Hatchery Gallery</span></label><small>收录后公开展示在 <a href="/gallery" target="_blank" rel="noopener">/gallery</a>；取消勾选不影响网站访问，只是不出现在收录页。</small></div><button>确认发布</button></form>`);
   const form=document.querySelector('#previewModal [data-console-form="publish"]');if(!form)return;const input=form.elements.slug,domain=form.querySelector('[data-publish-domain]'),warning=form.querySelector('[data-publish-warning]');
   const sync=()=>{const value=input.value.trim().toLowerCase();if(input.value!==value)input.value=value;if(domain)domain.textContent=`${value||'xxx'}.${publishDomain}`;if(warning)warning.hidden=!value||value===current};
