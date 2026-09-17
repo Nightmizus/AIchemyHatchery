@@ -437,7 +437,7 @@ body {
 /* 预览收回：左侧栏展开为 ChatGPT 式侧栏（品牌在最上面，账号在底部） */
 .app-shell.preview-hidden { margin-left:240px }
 .app-shell.preview-hidden .activity-bar { width:240px;padding:14px 10px;align-items:stretch;background:#171717;border-right-color:rgba(255,255,255,.07) }
-.app-shell.preview-hidden .activity-brand { margin:2px 2px 14px;display:flex;align-items:center;gap:10px;text-decoration:none }
+.app-shell.preview-hidden .activity-brand { margin:2px 2px 14px 10px;display:flex;align-items:center;gap:10px;text-decoration:none }
 .app-shell.preview-hidden .activity-brand b { color:#ececec;font-size:15px }
 .app-shell.preview-hidden .activity-items { display:grid;gap:4px }
 .app-shell.preview-hidden .activity-item { width:100%;height:40px;padding:0 10px;grid-template-columns:22px minmax(0,1fr);justify-items:start;gap:8px;font-size:17px }

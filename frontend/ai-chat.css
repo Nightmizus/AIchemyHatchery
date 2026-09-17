@@ -92,6 +92,7 @@
 .app-shell.preview-hidden .ai-chat-panel.ai-empty{height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 14px 26vh}
 .app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-conversation{display:contents}
 .app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-chat-messages{display:contents}
+.app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-message.assistant{justify-content:center}
 .app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-message.assistant>div{max-width:100%}
 .app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-message.assistant p{font-size:27px;font-weight:500;color:#ececec;line-height:1.45;letter-spacing:.01em;text-align:center}
 .app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-composer{position:static;left:auto;right:auto;bottom:auto;order:1;width:min(700px,100%);margin-top:34px;transform:none}
