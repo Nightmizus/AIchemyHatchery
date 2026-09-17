@@ -587,6 +587,8 @@ def initialize_database() -> None:
     );
     CREATE INDEX IF NOT EXISTS hatchery_ai_chat_sessions_user_idx ON hatchery_ai_chat_sessions(user_id, updated_at DESC);
     ALTER TABLE hatchery_published_sites ADD COLUMN IF NOT EXISTS listed_in_gallery BOOLEAN NOT NULL DEFAULT TRUE;
+    -- 失败原因落库：任务失败时排障不必依赖转瞬即逝的内存与容器日志
+    ALTER TABLE hatchery_ai_usage ADD COLUMN IF NOT EXISTS error TEXT;
     """
     with neon_db() as conn:
         with conn.cursor() as cur:
@@ -627,7 +629,7 @@ def audit_event(cur, user_id: str | None, event: str, detail: dict | None = None
     )
 
 
-def record_ai_usage(user_id: str, job_id: str | None, prompt: str, attachments: list[dict], provider: str, model: str, usage: dict | None, status: str) -> None:
+def record_ai_usage(user_id: str, job_id: str | None, prompt: str, attachments: list[dict], provider: str, model: str, usage: dict | None, status: str, error: str = "") -> None:
     """归档一次 AI 输入及其 token 用量；统计写库失败不影响主流程。"""
     try:
         input_tokens = max(0, int((usage or {}).get("inputTokens") or 0))
@@ -641,8 +643,8 @@ def record_ai_usage(user_id: str, job_id: str | None, prompt: str, attachments: 
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO hatchery_ai_usage(user_id,job_id,prompt,attachments_json,provider,model,input_tokens,output_tokens,total_tokens,status,created_at)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    INSERT INTO hatchery_ai_usage(user_id,job_id,prompt,attachments_json,provider,model,input_tokens,output_tokens,total_tokens,status,error,created_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         str(user_id),
@@ -655,6 +657,7 @@ def record_ai_usage(user_id: str, job_id: str | None, prompt: str, attachments: 
                         output_tokens,
                         input_tokens + output_tokens,
                         status,
+                        (error or "")[:500] or None,
                         iso_time(),
                     ),
                 )
@@ -1452,6 +1455,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                         self.handle_ai_run_start(user)
                     else:
                         self.handle_ai_run(user)
+            elif path == "/api/ai/run/ack":
+                user = self.require_console_user()
+                if user:
+                    self.handle_ai_run_ack(user)
             elif path == "/api/ai/undo":
                 # 越权：这个接口直接改写平台源码，只有管理员可用
                 if self.require_console_user(admin=True):
@@ -1846,7 +1853,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 text = str(item.get("text", "")).strip()[:1000]
                 if text:
                     history.append({"role": item["role"], "text": text})
-        return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort
+        # 会话锚点：任务挂到某个聊天会话上，关掉网页再打开能按用户找回进度
+        session_id = str(payload.get("sessionId") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f-]{32,36}", session_id):
+            session_id = ""
+        return prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort, session_id
 
     def handle_ai_session_create(self, user: dict) -> None:
         payload = self.read_json()
@@ -1921,7 +1932,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
 
     def handle_ai_run(self, user: dict) -> None:
         global AI_UPSTREAM_DEGRADED
-        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort, _session_id = self.prepare_ai_run()
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
         lock_owner = f"sync-{secrets.token_hex(6)}"
@@ -1934,16 +1945,18 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, result.get("usage"), "completed")
             AI_UPSTREAM_DEGRADED = None
         except Exception:
-            record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, None, "failed")
-            if "配额已用尽" in str(sys.exc_info()[1]):
-                AI_UPSTREAM_DEGRADED = {"reason": "quota", "message": str(sys.exc_info()[1])[:300], "since": iso_time()}
+            run_error = str(sys.exc_info()[1])
+            print(f"[ai-run] 同步任务失败：{run_error}", file=sys.stderr, flush=True)
+            record_ai_usage(user["id"], None, prompt, attachments, provider_name, model, None, "failed", run_error)
+            if "配额已用尽" in run_error:
+                AI_UPSTREAM_DEGRADED = {"reason": "quota", "message": run_error[:300], "since": iso_time()}
             raise
         finally:
             ai_run_slot_release(lock_owner)
         self.send_json(result)
 
     def handle_ai_run_start(self, user: dict) -> None:
-        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort = self.prepare_ai_run()
+        prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, mode, chosen_model, chosen_effort, session_id = self.prepare_ai_run()
         if rate_limit_hit("ai-run-user", str(user["id"]), 20, 600):
             raise ValueError("AI 任务请求过于频繁，请稍后再试")
         job_id = f"job-{secrets.token_hex(12)}"
@@ -1953,7 +1966,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         with AI_RUN_JOBS_LOCK:
             for stale_id in [key for key, value in AI_RUN_JOBS.items() if now - float(value.get("createdAt", now)) > 3600]:
                 AI_RUN_JOBS.pop(stale_id, None)
-            AI_RUN_JOBS[job_id] = {"userId": str(user["id"]), "status": "running", "events": [], "createdAt": now, "result": None, "error": None}
+            # sessionId 是"关网页再打开还能找回进度"的关键：任务属于哪个会话；结果在客户端确认（ack）前一直保留
+            AI_RUN_JOBS[job_id] = {"userId": str(user["id"]), "sessionId": session_id, "prompt": prompt[:120], "status": "running", "events": [], "createdAt": now, "result": None, "error": None}
 
         def progress(event: dict) -> None:
             with AI_RUN_JOBS_LOCK:
@@ -1982,7 +1996,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     if job and job.get("status") == "running":
                         job.update({"status": "completed", "result": result})
             except Exception as error:
-                record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, None, "failed")
+                print(f"[ai-run] {job_id} 失败：{error}", file=sys.stderr, flush=True)
+                record_ai_usage(user["id"], job_id, prompt, attachments, provider_name, model, None, "failed", str(error))
                 if "配额已用尽" in str(error):
                     AI_UPSTREAM_DEGRADED = {"reason": "quota", "message": str(error)[:300], "since": iso_time()}
                 with AI_RUN_JOBS_LOCK:
@@ -2020,6 +2035,42 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 "error": job.get("error"),
             }
         self.send_json(payload)
+
+    def handle_ai_run_active(self, user: dict) -> None:
+        """当前用户的可重挂任务：进行中的 + 已结束但结果还没被任何客户端取走的。
+        浏览器关掉再打开、换设备登录，都靠这个接口把进度/结果找回来。"""
+        with AI_RUN_JOBS_LOCK:
+            jobs = []
+            for job_id, job in AI_RUN_JOBS.items():
+                if str(job.get("userId", "")) != str(user["id"]):
+                    continue
+                jobs.append({
+                    "jobId": job_id,
+                    "sessionId": job.get("sessionId") or "",
+                    "prompt": job.get("prompt") or "",
+                    "status": job["status"],
+                    "events": [dict(item) for item in job["events"]],
+                    "result": job.get("result") if job["status"] != "running" else None,
+                    "error": job.get("error"),
+                    "createdAt": job.get("createdAt"),
+                })
+            jobs.sort(key=lambda item: float(item.get("createdAt") or 0))
+        self.send_json({"jobs": jobs})
+
+    def handle_ai_run_ack(self, user: dict) -> None:
+        """客户端确认已取走结果：已结束的任务直接移除释放内存；仍在运行的忽略（结果还没产出，不能标记取走）。"""
+        job_id = str(self.read_json().get("jobId", ""))
+        if not re.fullmatch(r"job-[0-9a-f]{24}", job_id):
+            self.send_json({"error": "AI 任务编号无效"}, 400)
+            return
+        with AI_RUN_JOBS_LOCK:
+            job = AI_RUN_JOBS.get(job_id)
+            if not job or str(job.get("userId", "")) != str(user["id"]):
+                self.send_json({"ok": True})
+                return
+            if job["status"] != "running":
+                AI_RUN_JOBS.pop(job_id, None)
+        self.send_json({"ok": True})
 
     def handle_ai_undo(self) -> None:
         proposal_id = str(self.read_json().get("proposalId", ""))
@@ -2841,6 +2892,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             user = self.require_console_user()
             if user:
                 self.handle_ai_run_status(user, parsed)
+            return
+        if parsed.path == "/api/ai/run/active":
+            user = self.require_console_user()
+            if user:
+                self.handle_ai_run_active(user)
             return
         if parsed.path == "/api/ai/status":
             status = harness_status(ROOT)
