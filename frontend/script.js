@@ -573,8 +573,10 @@ document.querySelectorAll('[data-bg]').forEach(button=>button.addEventListener('
 const contentWidthInput=document.querySelector('#contentWidth');const widthValueLabel=document.querySelector('#widthValue');contentWidthInput?.addEventListener('input',event=>{state.contentWidth=Number(event.target.value);if(widthValueLabel)widthValueLabel.textContent=`${state.contentWidth}%`;renderCanvas()});
 document.querySelector('#clearPageBtn').addEventListener('click',()=>{const page=activePage();if(!page.code.trim()&&!pageObjects().length&&!page.elements.length){showToast('当前页面已经是空白的');return}cleanupElementDetails(page.elements);page.elements=[];page.code='';page.objects=[];editingElementId=null;clearObjectSelection();renderPages();renderCanvas();showToast('当前页面已清空')});document.querySelector('#toast button').addEventListener('click',()=>uiHide(document.querySelector('#toast')));
 document.querySelectorAll('.ai-examples button').forEach(button=>button.addEventListener('click',()=>{const prompt=document.querySelector('#aiPrompt');prompt.value=button.textContent;prompt.focus()}));
-const AI_ATTACHMENT_LIMIT=4,AI_ATTACHMENT_TOTAL_LIMIT=8*1024*1024,AI_IMAGE_LIMIT=4*1024*1024,AI_TEXT_LIMIT=512*1024;
+const AI_ATTACHMENT_LIMIT=4,AI_ATTACHMENT_TOTAL_LIMIT=8*1024*1024,AI_IMAGE_LIMIT=4*1024*1024,AI_TEXT_LIMIT=512*1024,AI_FILE_LIMIT=4*1024*1024;
 const AI_TEXT_EXTENSIONS=new Set(['txt','md','json','csv','html','css','js','mjs','ts','tsx','jsx','py','yml','yaml','xml','svg']);
+// 二进制附件（视频/音频/文档等）：AI 不必读内容，服务器落盘换 URL 后由 AI 嵌入网页
+const AI_BINARY_EXTENSIONS=new Set(['pdf','zip','doc','docx','xls','xlsx','ppt','pptx','mp4','mov','webm','avi','mkv','mp3','wav','ogg','m4a','flac','rar','7z']);
 let aiAttachments=[];
 const formatAiFileSize=size=>size<1024?`${size} B`:size<1024*1024?`${Math.ceil(size/1024)} KB`:`${(size/1024/1024).toFixed(1)} MB`;
 const aiFileExtension=name=>String(name).split('.').pop().toLowerCase();
@@ -585,11 +587,14 @@ async function addAiAttachments(files){
   for(const file of files){
     if(aiAttachments.length>=AI_ATTACHMENT_LIMIT){showToast(`一次最多添加 ${AI_ATTACHMENT_LIMIT} 个附件`);break}
     const extension=aiFileExtension(file.name);const isImage=file.type.startsWith('image/')&&file.type!=='image/svg+xml';const isText=file.type.startsWith('text/')||AI_TEXT_EXTENSIONS.has(extension);
-    if(!isImage&&!isText){showToast(`不支持 ${file.name} 的文件格式`);continue}
-    const limit=isImage?AI_IMAGE_LIMIT:AI_TEXT_LIMIT;if(file.size>limit){showToast(`${file.name} 超过 ${formatAiFileSize(limit)} 限制`);continue}
+    const isVideo=file.type.startsWith('video/')||['mp4','mov','webm','avi','mkv'].includes(extension);const isAudio=file.type.startsWith('audio/')||['mp3','wav','ogg','m4a','flac'].includes(extension);
+    const isFile=isVideo||isAudio||file.type==='application/pdf'||AI_BINARY_EXTENSIONS.has(extension);
+    if(!isImage&&!isText&&!isFile){showToast(`不支持 ${file.name} 的文件格式`);continue}
+    const limit=isImage?AI_IMAGE_LIMIT:isFile?AI_FILE_LIMIT:AI_TEXT_LIMIT;if(file.size>limit){showToast(`${file.name} 超过 ${formatAiFileSize(limit)} 限制`);continue}
     if(aiAttachments.reduce((sum,item)=>sum+item.size,0)+file.size>AI_ATTACHMENT_TOTAL_LIMIT){showToast('附件总大小不能超过 8 MB');break}
-    const content=isImage?await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('图片读取失败'));reader.readAsDataURL(file)}):await file.text();
-    aiAttachments.push({id:uid('attachment'),name:file.name,type:file.type||(isImage?'image/jpeg':'text/plain'),size:file.size,kind:isImage?'image':'text',content});
+    const content=isImage||isFile?await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('文件读取失败'));reader.readAsDataURL(file)}):await file.text();
+    const fallbackType=isImage?'image/jpeg':isText?'text/plain':isVideo?'video/mp4':isAudio?'audio/mpeg':'application/octet-stream';
+    aiAttachments.push({id:uid('attachment'),name:file.name,type:file.type||fallbackType,size:file.size,kind:isImage?'image':isText?'text':'file',content});
   }
   renderAiAttachments();scrollAiConversation();
 }
@@ -1256,12 +1261,21 @@ async function executeAiRun(run){
   }
   let payload=null;let stateBackup=null;
   try{
-    let started=null;
+    let started=null;let gatewayFails=0;
     for(let attempt=0;;attempt++){
-      const response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:run.prompt,sessionId:run.sessionId,mode:run.mode,model:aiModelChoice.model,reasoningEffort:aiModelChoice.effort,attachments:run.attachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true,chosenPresets:run.chosenPresets,presetSnippets:run.presetSnippets,history:run.history||[]})});
-      const startText=await response.text();try{started=startText?JSON.parse(startText):null}catch{/* 网关瞬时故障会回 HTML 错误页 */}
-      if(response.status===409&&started?.busy&&started.jobId&&attempt<200){try{await waitForAiRun(started.jobId,null)}catch{/* 挡路的任务已被发起页取走结果（ack 后移除）或网络抖动：直接重试发送即可 */}continue}
-      if(!started)throw new Error('网关返回了无效响应，任务未能启动；请稍后重试');
+      let response=null;let startText='';
+      try{
+        response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:run.prompt,sessionId:run.sessionId,mode:run.mode,model:aiModelChoice.model,reasoningEffort:aiModelChoice.effort,attachments:run.attachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true,chosenPresets:run.chosenPresets,presetSnippets:run.presetSnippets,history:run.history||[]})});
+        startText=await response.text();
+      }catch{/* 部署重启/网络抖动时连接会被直接拒绝，按网关瞬时故障走退避重试 */}
+      try{started=startText?JSON.parse(startText):null}catch{/* 网关瞬时故障会回 HTML 错误页 */}
+      if(response&&response.status===409&&started?.busy&&started.jobId&&attempt<200){try{await waitForAiRun(started.jobId,null)}catch{/* 挡路的任务已被发起页取走结果（ack 后移除）或网络抖动：直接重试发送即可 */}continue}
+      if(!started){
+        // CF 边缘在 origin 不可达时回 HTML 错误页（部署重启窗口/隧道抖动）：退避重试几次，都失败才报错
+        gatewayFails++;
+        if(gatewayFails<=4){await new Promise(resolve=>setTimeout(resolve,Math.min(1500*Math.pow(2,gatewayFails-1),12000)));continue}
+        throw new Error('网关返回了无效响应，任务未能启动；请稍后重试');
+      }
       if(!response.ok)throw new Error(started.error||'AI 自动任务启动失败');
       break;
     }

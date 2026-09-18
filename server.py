@@ -7,6 +7,7 @@ import html
 import json
 import hashlib
 import hmac
+import mimetypes
 import os
 import re
 import secrets
@@ -23,7 +24,7 @@ from email.mime.text import MIMEText
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -294,6 +295,132 @@ def ai_job_workspace(user_id, job_key: str) -> Path:
 
 # 进行中任务的 job_key -> (user_id, workspace)：供 /ai-preview/<id>/run/<job_key> 实时渲染该任务的工作区
 AI_RUN_WORKSPACES: dict[str, tuple[str, Path]] = {}
+
+
+# ===== 用户上传给 AI 的附件：统一落到服务器临时目录，换取稳定 URL 供 AI 嵌入网页 =====
+# 设计要点：
+# 1) 附件（图片/视频/任意文件）不一定是要 AI「读」，更多是要放进网页里——AI 拿到公开 URL 即可嵌入；
+# 2) 图片是否作为视觉内容块喂给模型由适配器能力决定（kimi/glm 均为纯文本，见 deepseek_harness_adapter._content_blocks），
+#    纯文本适配器收到图片块会直接报 UNSUPPORTED_CONTENT，因此默认不发图片块，接入多模态后置 HATCHERY_AI_VISION=1；
+# 3) 临时目录按用户/附件两级存放，保留 7 天后自动清理。
+AI_ATTACHMENT_ROOT = ROOT / "tmp" / "ai-attachments"
+AI_ATTACHMENT_MAX_AGE = 7 * 86400
+AI_ATTACHMENT_URL_PATTERN = re.compile(r"^/attachments/ai/([A-Za-z0-9_-]{1,64})/([A-Za-z0-9_-]{6,64})/(.+)$")
+
+
+def parse_ai_attachments(raw_attachments: object) -> list[dict]:
+    """校验并规范化请求里的附件列表：图片/文本喂给 AI 与网页，二进制（视频等）落盘换 URL 嵌入网页。"""
+    if not isinstance(raw_attachments, list) or len(raw_attachments) > 4:
+        raise ValueError("一次最多添加 4 个附件")
+    attachments: list[dict] = []
+    total_attachment_size = 0
+    for raw in raw_attachments:
+        if not isinstance(raw, dict):
+            raise ValueError("附件格式错误")
+        name = Path(str(raw.get("name", "附件"))).name[:180]
+        kind = str(raw.get("kind", "text"))
+        mime_type = str(raw.get("type", "text/plain"))[:100]
+        content = str(raw.get("content", ""))
+        size = max(0, int(raw.get("size", 0)))
+        if kind == "image":
+            if not mime_type.startswith("image/") or not content.startswith("data:image/") or len(content) > 6_000_000:
+                raise ValueError(f"图片附件 {name} 格式错误或过大")
+        elif kind == "text":
+            if len(content.encode("utf-8")) > 600_000:
+                raise ValueError(f"文本附件 {name} 超过大小限制")
+        elif kind == "file":
+            # 视频/音频/压缩包等二进制：AI 不必“读”它，落盘换 URL 后嵌入网页即可
+            decode_data_url(content)  # 校验 data:…;base64, 合法且可解码，坏内容直接拒
+            if len(content) > 8_500_000:
+                raise ValueError(f"附件 {name} 超过大小限制")
+        else:
+            raise ValueError(f"附件 {name} 类型不受支持")
+        total_attachment_size += size
+        if total_attachment_size > 8 * 1024 * 1024:
+            raise ValueError("附件总大小不能超过 8 MB")
+        attachments.append({"name": name, "kind": kind, "type": mime_type, "content": content})
+    return attachments
+
+
+def ai_vision_enabled() -> bool:
+    return os.environ.get("HATCHERY_AI_VISION", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def sweep_stale_ai_attachments() -> None:
+    """清理超过保留期的附件目录（发布出去的页面里 URL 失效属于预期：本来就是临时区）。"""
+    now = time.time()
+    try:
+        for user_dir in AI_ATTACHMENT_ROOT.iterdir():
+            if not user_dir.is_dir():
+                continue
+            for attach_dir in user_dir.iterdir():
+                try:
+                    if attach_dir.is_dir() and attach_dir.stat().st_mtime < now - AI_ATTACHMENT_MAX_AGE:
+                        shutil.rmtree(attach_dir, ignore_errors=True)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def decode_data_url(content: str) -> tuple[str, bytes]:
+    """解析 data:<mime>;base64,<payload>，返回 (mime, 原始字节)；格式非法抛 ValueError。"""
+    match = re.fullmatch(r"data:([A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*);base64,([A-Za-z0-9+/=\r\n]+)", str(content or ""))
+    if not match:
+        raise ValueError("附件内容不是合法的 base64 数据")
+    try:
+        return match.group(1), base64.b64decode(match.group(2), validate=True)
+    except ValueError as exc:
+        raise ValueError("附件内容不是合法的 base64 数据") from exc
+
+
+def save_ai_attachments(user_id: str, attachments: list[dict]) -> list[dict]:
+    """把本次任务的附件写进临时目录，返回带公开 URL 的清单（AI 用它嵌入网页）。"""
+    manifest: list[dict] = []
+    if not attachments:
+        return manifest
+    sweep_stale_ai_attachments()
+    safe_user = re.sub(r"[^A-Za-z0-9_-]", "", str(user_id))[:64] or "unknown"
+    for item in attachments:
+        name = str(item.get("name", "附件"))
+        kind = str(item.get("kind", "text"))
+        if kind == "text":
+            mime_type, payload = str(item.get("type", "text/plain")), str(item.get("content", "")).encode("utf-8")
+        else:
+            try:
+                mime_type, payload = decode_data_url(str(item.get("content", "")))
+            except ValueError:
+                continue  # 单个附件损坏不拖垮整个任务
+        attach_id = secrets.token_hex(8)
+        attach_dir = AI_ATTACHMENT_ROOT / safe_user / attach_id
+        attach_dir.mkdir(parents=True, exist_ok=True)
+        (attach_dir / name).write_bytes(payload)
+        manifest.append({"name": name, "kind": kind, "type": mime_type, "size": len(payload),
+                         "url": f"/attachments/ai/{safe_user}/{attach_id}/{quote(name)}"})
+    return manifest
+
+
+def attachment_embed_hint(item: dict) -> str:
+    mime_type = str(item.get("type", ""))
+    if mime_type.startswith("image/"):
+        return "<img src=…>"
+    if mime_type.startswith("video/"):
+        return "<video controls src=…>"
+    if mime_type.startswith("audio/"):
+        return "<audio controls src=…>"
+    return '<a href=… download>下载链接</a>'
+
+
+def build_attachment_prompt(manifest: list[dict]) -> str:
+    """附件清单进提示词：所有附件给出 URL 与嵌入建议；看图能力未开启时明确告知模型图片用 URL 嵌入。"""
+    if not manifest:
+        return ""
+    lines = ["用户上传的附件（已保存到服务器，下列 URL 公开可访问、可直接嵌入网页；图片也请用 URL 写 <img src>，不要转成 base64）："]
+    for item in manifest:
+        lines.append(f"- {item['name']}（{item['type']}，建议 {attachment_embed_hint(item)}）：{item['url']}")
+    if not ai_vision_enabled() and any(item["kind"] == "image" for item in manifest):
+        lines.append("当前模型不看图：图片内容请依据文件名与用户描述判断，用上面的 URL 嵌入网页即可。")
+    return "\n\n" + "\n".join(lines)
 
 
 def load_env() -> None:
@@ -847,7 +974,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     sys_version = ""  # 不在 Server 响应头里暴露 Python 版本（指纹信息泄露）
 
     def log_message(self, fmt: str, *args) -> None:
-        print(f"[{self.log_date_time_string()}] {fmt % args}")
+        # 容器里 stdout 是块缓冲，不 flush 的话 docker logs 永远看不到请求日志
+        print(f"[{self.log_date_time_string()}] {fmt % args}", flush=True)
 
     def request_is_https(self) -> bool:
         return SECURE_COOKIES or self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https"
@@ -909,6 +1037,31 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
+
+    def serve_ai_attachment(self, path: str) -> None:
+        """公开访问用户上传的 AI 附件（嵌入在预览/发布页里，匿名可读）。"""
+        match = AI_ATTACHMENT_URL_PATTERN.match(path)
+        if not match:
+            self.send_error(404, "Not found")
+            return
+        user_token, attach_id, raw_name = match.group(1), match.group(2), unquote(match.group(3))
+        name = Path(raw_name.replace("\\", "/")).name  # 双重保险：去掉任何路径成分
+        root = AI_ATTACHMENT_ROOT.resolve()
+        attach_dir = (root / user_token / attach_id).resolve()
+        target = (attach_dir / name).resolve()
+        if root not in attach_dir.parents or root not in target.parents or not target.is_file():
+            self.send_error(404, "Not found")
+            return
+        body = target.read_bytes()
+        mime_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if mime_type.startswith("text/") or mime_type in ("application/javascript", "image/svg+xml"):
+            mime_type += "; charset=utf-8"  # 文本类附件按 UTF-8 展示，避免乱码
+        self.send_response(200)
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=604800")  # 附件内容带随机 id，可放心长缓存
+        self.end_headers()
+        self.wfile.write(body)
 
     def send_json(self, value: object, status: int = 200, headers: dict[str, str | list[str]] | None = None) -> None:
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -1610,6 +1763,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         site_json_path = workspace / "site.json"
         original_site_json = json.dumps(site_state, ensure_ascii=False, indent=2)
         write_text_exact(site_json_path, original_site_json)
+        # 附件先落盘换稳定 URL，清单写进提示词：AI 拿 URL 嵌入网页；图片是否额外喂给模型由适配器能力决定
+        attachment_manifest = save_ai_attachments(str(user["id"]), attachments)
+        prompt = prompt + build_attachment_prompt(attachment_manifest)
 
         attempt = 0
         try:
@@ -1862,30 +2018,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             raise ValueError("修改描述过长（最多 2 万字符），请精简后重试")
         if not isinstance(context, dict):
             raise ValueError("站点上下文格式错误")
-        if not isinstance(raw_attachments, list) or len(raw_attachments) > 4:
-            raise ValueError("一次最多添加 4 个附件")
-        attachments = []
-        total_attachment_size = 0
-        for raw in raw_attachments:
-            if not isinstance(raw, dict):
-                raise ValueError("附件格式错误")
-            name = Path(str(raw.get("name", "附件"))).name[:180]
-            kind = str(raw.get("kind", "text"))
-            mime_type = str(raw.get("type", "text/plain"))[:100]
-            content = str(raw.get("content", ""))
-            size = max(0, int(raw.get("size", 0)))
-            if kind == "image":
-                if not mime_type.startswith("image/") or not content.startswith("data:image/") or len(content) > 6_000_000:
-                    raise ValueError(f"图片附件 {name} 格式错误或过大")
-            elif kind == "text":
-                if len(content.encode("utf-8")) > 600_000:
-                    raise ValueError(f"文本附件 {name} 超过大小限制")
-            else:
-                raise ValueError(f"附件 {name} 类型不受支持")
-            total_attachment_size += size
-            if total_attachment_size > 8 * 1024 * 1024:
-                raise ValueError("附件总大小不能超过 8 MB")
-            attachments.append({"name": name, "kind": kind, "type": mime_type, "content": content})
+        attachments = parse_ai_attachments(raw_attachments)
         raw_history = payload.get("history", [])
         history: list[dict] = []
         if isinstance(raw_history, list):
@@ -2725,6 +2858,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         # favicon 要在子域名分流之前处理：发布的站点（xxx.aichemy.club）也共用这个图标
         if parsed.path in ("/favicon.svg", "/favicon.ico"):
             self.send_favicon()
+            return
+        # AI 附件同理：发布页里嵌的是 /attachments/ai/… 相对链接，必须在子域名分流前全局可访问
+        if parsed.path.startswith("/attachments/ai/"):
+            self.serve_ai_attachment(parsed.path)
             return
         if parsed.path in ("/", "/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.html", "/viewer.js") or parsed.path.startswith("/c/"):
             for header in ("If-Modified-Since", "If-None-Match"):

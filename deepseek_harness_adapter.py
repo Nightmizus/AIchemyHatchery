@@ -585,6 +585,13 @@ def _token_usage(events: list[dict]) -> dict:
     return turn_usage or {"inputTokens": 0, "outputTokens": 0}
 
 
+def _vision_enabled() -> bool:
+    """当前 LLM 适配器（kimi/glm）都是纯文本：收到图片内容块会抛 UNSUPPORTED_CONTENT 导致整个任务失败。
+    默认不发图片块（图片已由服务端落盘成 URL 写进提示词，模型照样能嵌入网页）；
+    接入多模态适配器后置 HATCHERY_AI_VISION=1 即恢复“把图片给 AI 看”。"""
+    return os.environ.get("HATCHERY_AI_VISION", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _content_blocks(prompt: str, context: dict, attachments: list[dict]) -> list[dict]:
     text_attachments = "\n\n".join(
         f"附件 {item['name']}（{item['type']}）：\n---\n{item['content']}\n---"
@@ -600,6 +607,8 @@ def _content_blocks(prompt: str, context: dict, attachments: list[dict]) -> list
         + prompt
     )
     blocks: list[dict] = [{"type": "text", "text": text}]
+    if not _vision_enabled():
+        return blocks
     for item in attachments:
         if item.get("kind") != "image":
             continue

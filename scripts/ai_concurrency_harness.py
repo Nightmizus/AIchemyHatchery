@@ -99,12 +99,24 @@ def now_iso():
 
 
 def fake_ai_result(meta):
-    """确定性的 siteReplace：往 pages[0].code 末尾追加带 prompt 的标记。"""
+    """确定性的 siteReplace：往 pages[0].code 末尾追加带 prompt 的标记；
+    有附件时按真实 AI 的约定把附件 URL 嵌入网页（img/video/audio/下载链接）。"""
     site = json.loads(json.dumps(meta["context"].get("site") or {}))
     pages = site.get("pages") or []
     if pages:
         marker = f'<section class="ai-task-marker" data-task="{meta["prompt"]}">任务 {meta["prompt"]} 已应用</section>'
         pages[0]["code"] = f"{pages[0].get('code') or ''}\n{marker}"
+        for att in meta.get("attachments") or []:
+            mime_type = str(att.get("type", ""))
+            if mime_type.startswith("image/"):
+                tag = f'<img src="{att["url"]}" alt="{att["name"]}">'
+            elif mime_type.startswith("video/"):
+                tag = f'<video controls src="{att["url"]}"></video>'
+            elif mime_type.startswith("audio/"):
+                tag = f'<audio controls src="{att["url"]}"></audio>'
+            else:
+                tag = f'<a href="{att["url"]}" download>{att["name"]}</a>'
+            pages[0]["code"] += f'\n<section class="ai-attachment-embed">{tag}</section>'
     return {
         "runId": meta["jobId"],
         "summary": f"已按「{meta['prompt']}」完成修改并验证。",
@@ -167,7 +179,8 @@ class TestHandler(srv.AIchemyHatcheryHandler):
             with LOCK:
                 jobs = [{"jobId": meta["jobId"], "prompt": meta["prompt"], "status": meta.get("status", "running"),
                          "contextPage0Code": meta["contextPage0Code"], "createdAt": meta["createdAt"],
-                         "completedAt": meta.get("completedAt")}
+                         "completedAt": meta.get("completedAt"), "attachments": meta.get("attachments") or [],
+                         "vision": meta.get("vision", False)}
                         for meta in AI_JOB_META.values()]
             jobs.sort(key=lambda item: item["createdAt"])
             self.send_json({"jobs": jobs})
@@ -198,6 +211,12 @@ class TestHandler(srv.AIchemyHatcheryHandler):
             if not prompt:
                 self.send_json({"error": "缺少任务描述"}, 400)
                 return True
+            try:
+                # 镜像真实服务端的附件校验（kind/大小/base64 合法性）
+                srv.parse_ai_attachments(body.get("attachments", []))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return True
             # serial=true 镜像修复后服务端的“同账号单任务”守卫（user_running_ai_job）
             if AI_CONFIG["serial"]:
                 busy = srv.user_running_ai_job(user["id"])
@@ -207,8 +226,11 @@ class TestHandler(srv.AIchemyHatcheryHandler):
             job_id = f"job-{secrets.token_hex(12)}"
             site = body.get("context") or {}
             pages = (site.get("site") or {}).get("pages") or []
+            # 镜像真实服务端：附件落盘换公开 URL（复用 server.save_ai_attachments 真实实现）
+            attachments_manifest = srv.save_ai_attachments(str(user["id"]), body.get("attachments") or [])
             meta = {"jobId": job_id, "prompt": prompt, "context": site,
                     "contextPage0Code": str((pages[0] or {}).get("code") or "") if pages else "",
+                    "attachments": attachments_manifest, "vision": srv.ai_vision_enabled(),
                     "createdAt": time.time(), "completedAt": None}
             with LOCK:
                 AI_JOB_META[job_id] = meta
