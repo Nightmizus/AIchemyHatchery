@@ -9,7 +9,6 @@ const INITIAL_STATE = {
 const state = JSON.parse(JSON.stringify(INITIAL_STATE));
 let currentConsoleUser=null;
 let DRAFT_KEY='alchemyhatchery:guest:draft:v3';
-let AI_UNDO_KEY='alchemyhatchery:guest:ai-undo:v2';
 let AI_RELOAD_NOTICE_KEY='alchemyhatchery:guest:ai-reload-notice:v2';
 let AI_MODE_KEY='alchemyhatchery:guest:ai-mode:v1';
 let AI_MODEL_KEY='alchemyhatchery:guest:ai-model:v1';
@@ -627,7 +626,6 @@ document.querySelector('#undoBtn').addEventListener('click',undoState);document.
 document.querySelectorAll('[data-preview-device]').forEach(button=>button.addEventListener('click',()=>{previewDevice=button.dataset.previewDevice;sessionStorage.setItem('alchemyhatchery:preview-device',previewDevice);renderCanvas();showToast(`已切换到${button.textContent}预览`)}));
 document.addEventListener('keydown',event=>{const editingText=event.target.closest?.('input,textarea,[contenteditable]');if(editingText)return;if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();if(event.shiftKey)redoState();else undoState()}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redoState()}else if(event.key==='Escape'&&editingElementId)openElementEditor(editingElementId)});
 
-let lastAiUndo=null; // {proposalId,state,sourceApplied,sessionId}：按钮只在发起会话里显示，但撤销的是全局网站状态
 // AI 任务注册表：每个任务绑定一个会话，进度按会话路由渲染；执行跨会话全局排队（见 aiRunQueue）
 const aiRuns=new Map();
 const aiRunQueue=[];// 跨会话全局 FIFO：一个账号只有一份网站，AI 任务必须按发送顺序串行执行，否则并行任务的整站结果会互相覆盖
@@ -705,7 +703,7 @@ const AI_IMAGE_PLACEHOLDER='[本地图片数据已省略，但必须保留原值
 const AI_OBJECT_PLACEHOLDER='[页面浮动图片数据已省略，但必须保留原值]';
 const AI_PLACEHOLDERS=new Set([AI_IMAGE_PLACEHOLDER,AI_OBJECT_PLACEHOLDER]);
 let aiChatHistoryTimer=null;
-// 初始消息区快照（问候语 + 结果/运行卡片/撤销按钮的干净副本），用于新聊天重置
+// 初始消息区快照（问候语 + 结果/运行卡片的干净副本），用于新聊天重置
 const AI_CHAT_INITIAL_HTML=document.querySelector('#aiChatMessages')?.innerHTML||'';
 function aiChatHistoryKey(){return `alchemyhatchery:${currentConsoleUser?.username||'guest'}:ai-chat:v1`}
 function aiSessionIdFromPath(){const match=location.pathname.match(/^\/c\/([0-9a-fA-F-]{32,36})\/?$/);return match?match[1]:null}
@@ -783,7 +781,6 @@ function applyAiChatHtml(html){
   const trace=messages.querySelector('#aiRunTrace');if(trace)trace.dataset.rendered=String(trace.childElementCount);
   const runningRun=activeRunForSession(aiChatSessionId);
   if(!runningRun){const card=messages.querySelector('#aiRunCard');card?.querySelector('.ai-working-status')?.remove();card?.classList.remove('is-running')}
-  const undoBtn=messages.querySelector('#aiUndoBtn');if(undoBtn)undoBtn.hidden=!(lastAiUndo&&lastAiUndo.sessionId===aiChatSessionId);
   updateAiEmptyState();
   updateAiContextRing();
   updateAiBusy();
@@ -1037,21 +1034,14 @@ function renderAiRunResult(run,payload,root=document){
   const planBox=root.querySelector('#aiPlanBox');if(planBox){const showPlan=payload.mode==='plan'&&String(payload.plan||'').trim().length>0;planBox.hidden=!showPlan;if(showPlan)planBox.querySelector('p').textContent=payload.plan}
   const events=payload.events||payload.trace||[];renderAiEvents(events,root);const process=root.querySelector('#aiRunProcess');if(process)process.open=false;const summary=root.querySelector('#aiRunProcessLabel');if(summary){summary.hidden=false;summary.textContent='查看过程'}
   const changes=[...(payload.changedFiles||[]).map(name=>`已修改文件：${name}`),...(payload.siteOperations||[]).map(item=>describeAiOperation(item))];const checksBox=root.querySelector('#aiRunChecks');if(checksBox)checksBox.innerHTML=changes.length?changes.map(item=>`<div class="ai-change">${esc(item)}</div>`).join(''):'<div class="ai-change">未产生文件或站点改动</div>';
-  const undoBtn=root.querySelector('#aiUndoBtn');if(undoBtn&&root!==document)undoBtn.hidden=!(lastAiUndo&&lastAiUndo.sessionId===run.sessionId);
   if(root===document)scrollAiConversation(true);
 }
-async function waitForAiRun(jobId,run){let badPolls=0;for(let attempt=0;attempt<4000;attempt++){let snapshot=null;let failure=null;try{const response=await fetch(`/api/ai/run/status?id=${encodeURIComponent(jobId)}&ts=${Date.now()}`,{cache:'no-store'});const text=await response.text();try{snapshot=text?JSON.parse(text):null}catch{snapshot=null}if(!response.ok){if(response.status===404)failure=new Error(snapshot?.error||'AI 任务不存在或已过期（可能刚重启过服务）');else if(!snapshot)failure='transient';else failure=new Error(snapshot.error||'无法读取 AI 执行状态')}else if(!snapshot){failure='transient'}}catch{failure='transient'}if(failure==='transient'){/* 公网链路（CF/网关）偶发返回 HTML 错误页或瞬断：单次抖动不该判死整个任务 */if(++badPolls>=10)throw new Error('与任务状态接口连续失联（网络或网关抖动）；任务可能仍在后台执行，刷新页面可尝试恢复进度');await new Promise(resolve=>setTimeout(resolve,1000));continue}if(failure)throw failure;badPolls=0;if(run){run.snapshot=snapshot;if(run.sessionId===aiChatSessionId)renderAiRunProgress(snapshot,run)}if(snapshot.status==='completed'){return {...snapshot.result,events:snapshot.events||[]}}if(snapshot.status==='failed')throw new Error(snapshot.error||'AI 自动任务失败');await new Promise(resolve=>setTimeout(resolve,500))}throw new Error('AI 执行超时，请稍后重试')}
+async function waitForAiRun(jobId,run){let badPolls=0;for(let attempt=0;attempt<4000;attempt++){let snapshot=null;let failure=null;try{const response=await fetch(`/api/ai/run/status?id=${encodeURIComponent(jobId)}&ts=${Date.now()}`,{cache:'no-store'});const text=await response.text();try{snapshot=text?JSON.parse(text):null}catch{snapshot=null}if(!response.ok){if(response.status===404)failure=new Error(snapshot?.error||'AI 任务不存在或已过期（可能刚重启过服务）');else if(!snapshot)failure='transient';else failure=new Error(snapshot.error||'无法读取 AI 执行状态')}else if(!snapshot){failure='transient'}}catch{failure='transient'}if(failure==='transient'){/* 公网链路（CF/网关）偶发返回 HTML 错误页或瞬断：单次抖动不该判死整个任务 */if(++badPolls>=10)throw new Error('与任务状态接口连续失联（网络或网关抖动）；任务可能仍在后台执行，刷新页面可尝试恢复进度');await new Promise(resolve=>setTimeout(resolve,1000));continue}if(failure)throw failure;badPolls=0;if(run){run.snapshot=snapshot;if(run.sessionId===aiChatSessionId)renderAiRunProgress(snapshot,run)}if(snapshot.status==='completed'){return snapshot.result?{...snapshot.result,events:snapshot.events||[]}:null}if(snapshot.status==='failed')throw new Error(snapshot.error||'AI 自动任务失败');await new Promise(resolve=>setTimeout(resolve,500))}throw new Error('AI 执行超时，请稍后重试')}
 async function loadAiStatus(){updateAiContextRing();try{const response=await fetch('/api/ai/status',{cache:'no-store'});const status=await response.json();const button=document.querySelector('#aiAdjustBtn');aiServiceConfigured=!!status.configured;aiServiceCatalog={models:status.models||[],efforts:status.efforts||[],currentModel:status.model||'',currentEffort:status.reasoningEffort||''};renderAiModelChoice();button.classList.toggle('ai-unavailable',!status.configured);button.title=status.configured?'发送修改要求':'AI 尚未配置：点击查看配置指引';const notice=document.querySelector('#aiServiceNotice');if(notice){if(status.degraded){notice.hidden=false;notice.innerHTML=`<b>AI 服务暂不可用</b> · ${esc(status.degraded.message||'上游额度或配额异常')}（恢复后此提示自动消失，仍可提交任务重试）`}else notice.hidden=true}}catch{/* 请求时再显示具体错误 */}}
 function saveDraftNow(){clearTimeout(draftSaveTimer);if(!currentConsoleUser)return;try{const snapshot=JSON.stringify(state);void persistDraftSnapshot(snapshot).catch(()=>setSaveState('同步失败',false))}catch{}}
-function persistAiUndo(){try{if(lastAiUndo)sessionStorage.setItem(AI_UNDO_KEY,JSON.stringify(lastAiUndo));else sessionStorage.removeItem(AI_UNDO_KEY)}catch{}}
 function ackAiRun(jobId){if(!jobId)return;void fetch('/api/ai/run/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobId})}).catch(()=>{})}
 function applyAiRunResult(payload){
   let stateBackup=null;if(payload.siteReplace)stateBackup=applyAiSiteReplace(payload.siteReplace);const opsBackup=applyAiSiteOperations(payload.siteOperations||[]);return stateBackup||opsBackup;
-}
-function syncAiUndoButton(){const button=document.querySelector('#aiUndoBtn');if(button)button.hidden=!(lastAiUndo&&lastAiUndo.sessionId===aiChatSessionId)}
-function storeAiRunUndo(run,payload,stateBackup){
-  const changedSite=Boolean(payload.siteReplace)||Boolean((payload.siteOperations||[]).length);if(changedSite||payload.undoAvailable){lastAiUndo={proposalId:payload.runId,state:stateBackup,sourceApplied:Boolean(payload.undoAvailable),sessionId:run.sessionId};persistAiUndo()}else{lastAiUndo=null;persistAiUndo()}
-  syncAiUndoButton();
 }
 function finishAiSummaryTyping(root){
   // 打字动画中途要固化/切换视图时，直接补完，避免冻结到半截摘要
@@ -1079,9 +1069,9 @@ async function finalizeAiRunOffline(run,errorMessage){
   const doc=document.createElement('div');doc.innerHTML=html;
   if(!doc.querySelector('#aiRunCard')){
     const tpl=document.createElement('div');tpl.innerHTML=AI_CHAT_INITIAL_HTML;
-    ['aiResult','aiRunCard','aiUndoBtn'].forEach(elId=>{const node=tpl.querySelector(`#${elId}`);if(node)doc.append(node)});
+    ['aiResult','aiRunCard'].forEach(elId=>{const node=tpl.querySelector(`#${elId}`);if(node)doc.append(node)});
   }
-  if(errorMessage){showAiError(errorMessage,doc);const undoBtn=doc.querySelector('#aiUndoBtn');if(undoBtn)undoBtn.hidden=true}
+  if(errorMessage)showAiError(errorMessage,doc);
   else if(run.payload){renderAiRunResult(run,run.payload,doc)}
   cacheAiSessionHtml(run.sessionId,doc.innerHTML);
   try{await persistAiSessionHtml(run.sessionId,doc.innerHTML)}catch{}
@@ -1110,7 +1100,13 @@ async function resumeAiRun(run){
   let stateBackup=null;
   try{
     const payload=await waitForAiRun(run.jobId,run);
-    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);storeAiRunUndo(run,payload,stateBackup);saveDraftNow()});
+    if(!payload){ // 任务已成功完结但结果不在此处（另一页面先取走并 ack / 服务重启后按落库终态恢复）：不是失败，不弹"未能恢复"
+      run.status='completed';ackAiRun(run.jobId);
+      if(live())showToast('此 AI 任务已完成');
+      else await finalizeAiRunOffline(run,null);
+      return;
+    }
+    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);saveDraftNow()});
     run.status='completed';run.payload=payload;ackAiRun(run.jobId);
     if(live())renderAiRunResult(run,payload);else await finalizeAiRunOffline(run,null);
     if(payload.restartRequired)await restartLocalServer();
@@ -1132,7 +1128,7 @@ async function settleFinishedAiRun(run,job){
     const payload={...job.result,events:job.events||[]};
     run.status='completed';run.payload=payload;
     let liveFiles={editorReloadNeeded:false,viewerReloaded:false};
-    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);storeAiRunUndo(run,payload,stateBackup);saveDraftNow()});
+    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);saveDraftNow()});
     liveFiles=refreshAiChangedFiles(payload.changedFiles||[]);
     if(live())renderAiRunResult(run,payload);else await finalizeAiRunOffline(run,null);
     if(payload.restartRequired)await restartLocalServer();
@@ -1164,7 +1160,6 @@ function scheduleEditorReload(message){saveDraftNow();try{sessionStorage.setItem
 function restoreAiReloadUi(){
   let notice='';try{notice=sessionStorage.getItem(AI_RELOAD_NOTICE_KEY)||'';sessionStorage.removeItem(AI_RELOAD_NOTICE_KEY)}catch{}
   if(notice){const result=document.querySelector('#aiResult');result.classList.remove('error');result.textContent=notice;result.hidden=false;showToast('AI 修改已实时加载')}
-  syncAiUndoButton();
 }
 async function consoleRequest(path,options={}){
   if(window.AIchemyHatcheryAuth)return window.AIchemyHatcheryAuth.request(path,options);
@@ -1181,10 +1176,10 @@ function updateConsoleAccount(){
   document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#menuUsername').textContent=username;const railName=document.querySelector('#activityAccountName');if(railName)railName.textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPreviewPath').textContent=currentConsoleUser.previewId?`/preview/${currentConsoleUser.previewId}`:'首次预览后生成';document.querySelector('#accountPublishPath').textContent=currentConsoleUser.publishSlug?`${currentConsoleUser.publishSlug}.${currentConsoleUser.publishDomain||'hatchery.mizusumi.com'}`:'未发布';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
 }
 async function enterConsole(user){
-  currentConsoleUser=user;const username=user.username;aiRuns.clear();aiRunQueue.length=0;aiSessionHtmlCache.clear();aiSessionDirty.clear();aiSessionTitles.clear();aiSessionDeleted.clear();updateAiBusy();DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_UNDO_KEY=`alchemyhatchery:${username}:ai-undo:v2`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;AI_MODE_KEY=`alchemyhatchery:${username}:ai-mode:v1`;AI_MODEL_KEY=`alchemyhatchery:${username}:ai-model:v1`;
+  currentConsoleUser=user;const username=user.username;aiRuns.clear();aiRunQueue.length=0;aiSessionHtmlCache.clear();aiSessionDirty.clear();aiSessionTitles.clear();aiSessionDeleted.clear();updateAiBusy();DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;AI_MODE_KEY=`alchemyhatchery:${username}:ai-mode:v1`;AI_MODEL_KEY=`alchemyhatchery:${username}:ai-model:v1`;
   let draft=null;try{draft=(await consoleRequest('/api/console/draft')).draft}catch(error){if(error.status===401){showAuthGate('登录已过期，请重新登录');return}showToast(`读取云端草稿失败：${error.message}`)}
   if(!draft){try{draft=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null')}catch{}}
-  const next=draft?.pages?.length?{...INITIAL_STATE,...draft}:INITIAL_STATE;restoreState(next);ensureForumAccounts();syncEditorAfterAI();historyStack=[JSON.stringify(state)];historyIndex=0;updateHistoryButtons();lastAiUndo=null;try{const savedUndo=JSON.parse(sessionStorage.getItem(AI_UNDO_KEY)||'null');if(savedUndo?.proposalId)lastAiUndo=savedUndo}catch{}
+  const next=draft?.pages?.length?{...INITIAL_STATE,...draft}:INITIAL_STATE;restoreState(next);ensureForumAccounts();syncEditorAfterAI();historyStack=[JSON.stringify(state)];historyIndex=0;updateHistoryButtons();
   updateConsoleAccount();loadAiPermissionMode();loadAiModelChoice();uiHide(document.querySelector('#authGate'));setSaveState(draft?'草稿已同步':'新草稿',false);restoreAiReloadUi();void initAiChatSessions();void loadAiStatus();if(!draft)scheduleDraftSave();void resumeAiRuns();
 }
 function sessionLabel(userAgent=''){
@@ -1240,8 +1235,8 @@ async function executeAiRun(run){
   if(live()){
     archiveAiRunOutput();
     if(!run.messageAppended)appendAiChatMessage('user',run.shownText,run.attachments);
-    const messages=document.querySelector('#aiChatMessages');const result=document.querySelector('#aiResult');const card=document.querySelector('#aiRunCard');const undoBtn=document.querySelector('#aiUndoBtn');
-    if(messages&&result&&card)messages.append(result,card,...undoBtn?[undoBtn]:[]);
+    const messages=document.querySelector('#aiChatMessages');const result=document.querySelector('#aiResult');const card=document.querySelector('#aiRunCard');
+    if(messages&&result&&card)messages.append(result,card);
     if(result){result.hidden=true;result.classList.remove('error')}
     renderAiRunProgress(run.snapshot,run);
     void saveAiChatSession();// 用户消息立即落库：任务期间的防抖放宽到 2.5s，中途刷新不能把消息弄丢
@@ -1281,14 +1276,14 @@ async function executeAiRun(run){
     }
     const jobId=started.jobId||null;if(jobId)run.jobId=jobId;payload=jobId?await waitForAiRun(jobId,run):started;
     run.status='completed';run.payload=payload;ackAiRun(run.jobId);
-    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);storeAiRunUndo(run,payload,stateBackup);saveDraftNow()});
+    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);saveDraftNow()});
     const liveFiles=refreshAiChangedFiles(payload.changedFiles||[]);
     if(live())renderAiRunResult(run,payload);else await finalizeAiRunOffline(run,null);
     if(payload.restartRequired){const button=document.querySelector('#aiAdjustBtn');button.querySelector('b').textContent='重启中…';await restartLocalServer()}
     if(liveFiles.editorReloadNeeded){scheduleEditorReload('AI 网站代理已自动修改、验证并刷新编辑器。')}else showToast(payload.restartRequired?'AI 已完成修改并重启服务':(live()?'AI 已自动完成并验证网站修改':'另一个会话的 AI 任务已完成'));
   }catch(error){
     run.status='failed';ackAiRun(run.jobId);
-    await withAiApplyLock(()=>{if(stateBackup)restoreState(stateBackup)});if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}lastAiUndo=null;persistAiUndo();syncAiUndoButton();const failText=String(error.message||'');
+    await withAiApplyLock(()=>{if(stateBackup)restoreState(stateBackup)});if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}const failText=String(error.message||'');
     const message=failText.includes('配额已用尽')?failText:`自动执行失败，修改已回滚：${failText}`;
     if(live())showAiError(message);else await finalizeAiRunOffline(run,message);
     loadAiStatus();
@@ -1374,17 +1369,6 @@ async function runSecurityChecks(){
   button.disabled=false;button.textContent='重新测试';summary.innerHTML+=` · 耗时 ${((Date.now()-started)/1000).toFixed(1)}s`;
 }
 document.querySelector('#securityRunBtn').addEventListener('click',()=>void runSecurityChecks());
-// 撤销按钮在 #aiChatMessages 内部，会话切换会重建它：用事件委托避免监听器丢失
-document.querySelector('#aiChatMessages').addEventListener('click',async event=>{
-  const button=event.target.closest('#aiUndoBtn');if(!button)return;
-  if(!lastAiUndo||lastAiUndo.sessionId!==aiChatSessionId)return;const undo=lastAiUndo;button.disabled=true;let sourceUndo={restoredFiles:[],restartRequired:false};
-  try{
-    if(undo.sourceApplied){const response=await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:undo.proposalId})});sourceUndo=await response.json();if(!response.ok)throw new Error(sourceUndo.error||'源码恢复失败')}
-    restoreState(undo.state);saveDraftNow();const live=refreshAiChangedFiles(sourceUndo.restoredFiles||[]);lastAiUndo=null;persistAiUndo();button.hidden=true;
-    if(sourceUndo.restartRequired)await restartLocalServer();const result=document.querySelector('#aiResult');result.classList.remove('error');result.textContent='已撤销上一次 AI 修改。';result.hidden=false;scrollAiConversation(true);
-    if(live.editorReloadNeeded)scheduleEditorReload('已撤销 AI 修改，并自动刷新恢复编辑器。');else showToast('已恢复 AI 修改前的状态')
-  }catch(error){showAiError(`撤销失败：${error.message}`)}finally{button.disabled=false}
-});
 let buildingPreviewHtml=false;
 function buildPublishPayload(preview=false){
   ensureForumAccounts();ensureAllPagesCode();

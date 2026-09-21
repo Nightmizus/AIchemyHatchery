@@ -2206,20 +2206,37 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if not re.fullmatch(r"job-[0-9a-f]{24}", job_id):
             self.send_json({"error": "AI 任务编号无效"}, 400)
             return
+        payload = None
         with AI_RUN_JOBS_LOCK:
             job = AI_RUN_JOBS.get(job_id)
-            if not job or str(job.get("userId", "")) != str(user["id"]):
-                # 任务只存内存：服务重启或过期后会查不到；返回 JSON 让前端体面收尾，而不是掐断连接
-                self.send_json({"error": "AI 任务不存在或已过期（可能刚重启过服务）", "status": "failed"}, 404)
-                return
-            payload = {
-                "jobId": job_id,
-                "status": job["status"],
-                "events": [dict(item) for item in job["events"]],
-                "result": job.get("result"),
-                "error": job.get("error"),
-            }
-        self.send_json(payload)
+            if job and str(job.get("userId", "")) == str(user["id"]):
+                payload = {
+                    "jobId": job_id,
+                    "status": job["status"],
+                    "events": [dict(item) for item in job["events"]],
+                    "result": job.get("result"),
+                    "error": job.get("error"),
+                }
+        if payload:
+            self.send_json(payload)
+            return
+        # 内存表查无≠失败：已完成任务被任一客户端确认（ack）后即从内存摘除，服务重启也会清空内存表。
+        # 先查任务落库的终态，有结论按终态返回；结果 payload 不落库，completed 时 result 为 null，
+        # 前端据此静默收尾，不再把"已成功的任务"弹成"未能恢复"。
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, error FROM hatchery_ai_usage WHERE job_id = %s AND user_id = %s",
+                    (job_id, str(user["id"])),
+                )
+                settled = cur.fetchone()
+        if settled and settled[0] == "completed":
+            self.send_json({"jobId": job_id, "status": "completed", "events": [], "result": None})
+            return
+        if settled and settled[0] == "failed":
+            self.send_json({"jobId": job_id, "status": "failed", "events": [], "error": str(settled[1] or "AI 任务失败")})
+            return
+        self.send_json({"error": "AI 任务不存在或已过期（可能刚重启过服务）", "status": "failed"}, 404)
 
     def handle_ai_run_active(self, user: dict) -> None:
         """当前用户的可重挂任务：进行中的 + 已结束但结果还没被任何客户端取走的。
