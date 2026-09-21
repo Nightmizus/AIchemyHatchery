@@ -168,6 +168,12 @@ class TestHandler(srv.AIchemyHatcheryHandler):
                 AI_CONFIG.update({"delayMs": 700, "fail": False, "serial": True})
             self.send_json({"ok": True})
             return True
+        if parsed.path == "/__test/ai/dropjobs":
+            # 模拟任务从服务端内存丢失（完成超时被清理 / 服务重启），会话数据保留
+            with srv.AI_RUN_JOBS_LOCK:
+                srv.AI_RUN_JOBS.clear()
+            self.send_json({"ok": True})
+            return True
         if parsed.path == "/__test/ai/config":
             data = self.read_json()
             with LOCK:

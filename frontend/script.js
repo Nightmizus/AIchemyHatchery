@@ -780,7 +780,17 @@ function applyAiChatHtml(html){
   messages.querySelectorAll('.ai-preset-chip, .ai-preset-confirm').forEach(node=>{node.disabled=true});
   const trace=messages.querySelector('#aiRunTrace');if(trace)trace.dataset.rendered=String(trace.childElementCount);
   const runningRun=activeRunForSession(aiChatSessionId);
-  if(!runningRun){const card=messages.querySelector('#aiRunCard');card?.querySelector('.ai-working-status')?.remove();card?.classList.remove('is-running')}
+  if(!runningRun){
+    const card=messages.querySelector('#aiRunCard');card?.querySelector('.ai-working-status')?.remove();card?.classList.remove('is-running');
+    // 卡片停在半截（页面关闭期间任务从服务端内存过期/丢失），既无活跃任务也无结果无报错：
+    // 补一句终态说明，避免出现一张毫无反应的空白运行卡片
+    const finalBox=card?.querySelector('#aiRunFinal');const summary=card?.querySelector('#aiRunSummary');
+    const errorNode=messages.querySelector('#aiResult');const hasError=errorNode&&!errorNode.hidden&&String(errorNode.textContent).trim();
+    if(card&&!card.hidden&&finalBox&&finalBox.hidden&&summary&&!String(summary.textContent).trim()&&!hasError){
+      summary.textContent='这个任务在页面关闭期间中断，结果未能取回。重新发送你的要求即可继续。';
+      finalBox.hidden=false;
+    }
+  }
   updateAiEmptyState();
   updateAiContextRing();
   updateAiBusy();
