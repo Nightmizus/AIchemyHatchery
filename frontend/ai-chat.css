@@ -90,9 +90,10 @@
 /* Queue marker on user messages sent while an AI run is in flight. */
 .ai-queue-tag{display:inline-block;margin-top:6px;color:var(--ai-dim);font-size:10px;font-style:normal}
 /* ChatGPT empty state (only while the preview is hidden): greeting, composer and
-   suggestion pills form one in-flow group, centered slightly above the middle.
+   suggestion pills form one in-flow group. 顶 34px/底 24px 的不对称内边距把内容盒中心
+   把输入框中心对到页面垂直中点（实测校准）。
    Preview open 时恢复底部停靠布局。 */
-.app-shell.preview-hidden .ai-chat-panel.ai-empty{height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 14px 26vh}
+.app-shell.preview-hidden .ai-chat-panel.ai-empty{height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:34px 14px 24px}
 .app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-conversation{display:contents}
 .app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-chat-messages{display:contents}
 .app-shell.preview-hidden .ai-chat-panel.ai-empty .ai-message.assistant{justify-content:center}
