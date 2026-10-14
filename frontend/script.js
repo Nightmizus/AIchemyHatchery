@@ -1,3 +1,8 @@
+// Keep chat navigation under the console mount when hosted at /hatchery.
+// Published sites and the existing root deployment retain their original routes.
+const CONSOLE_BASE_PATH=/^\/hatchery(?:\/|$)/.test(location.pathname)?'/hatchery':'';
+function consolePath(path='/'){return `${CONSOLE_BASE_PATH}${path==='/'?'':path}`||'/'}
+
 const elementCatalog = {
   nav:{name:'导航栏'}, hero:{name:'首页大字'}, projects:{name:'作品展示卡片栏'}, blog:{name:'文章列表'}, gallery:{name:'图片画廊'}, stats:{name:'数据栏'}, team:{name:'成员展示'}, timeline:{name:'活动时间线'}, profile:{name:'个人名片'}, schedule:{name:'课程表'}, countdown:{name:'目标倒计时'}, skills:{name:'技能进度'}, awards:{name:'荣誉墙'}, departments:{name:'部门介绍'}, steps:{name:'招新流程'}, faq:{name:'常见问题'}, downloads:{name:'资料下载'}, poll:{name:'投票'}, forum:{name:'论坛板块'}, account:{name:'账号登录'}, notice:{name:'公告栏'}, links:{name:'链接集合'}, cta:{name:'行动区域'}, footer:{name:'页脚'}, detail:{name:'详情正文'}
 };
@@ -8,14 +13,43 @@ const INITIAL_STATE = {
 };
 const state = JSON.parse(JSON.stringify(INITIAL_STATE));
 let currentConsoleUser=null;
+let fileSite=null,fileSiteLoading=false,activeSiteFile='index.html';
+function applySiteFiles(info){
+  if(info?.format!=='files')return;
+  fileSite=info;
+  if(!info.pages.includes(activeSiteFile))activeSiteFile=info.pages[0]||'index.html';
+  state.siteName=info.metadata.siteName||'未命名网站';state.description=info.metadata.description||'';
+  clearTimeout(draftSaveTimer);clearTimeout(previewPushTimer);clearTimeout(historyTimer);
+  if(currentConsoleUser){currentConsoleUser.publishSlug=info.slug||'';currentConsoleUser.publishUrl=info.publicUrl||'';currentConsoleUser.previewId=info.previewUrl.split('/')[2]}
+  renderPages();renderCanvas();updateConsoleAccount();setSaveState('网站文件已保存',false);
+}
+function siteFilePreviewUrl(){
+  let name=activeSiteFile==='index.html'?'':activeSiteFile.replace(/index\.html$/,'');
+  return fileSite.previewUrl+name.split('/').map(encodeURIComponent).join('/');
+}
+function renderFileCanvas(){
+  const canvas=document.querySelector('#siteCanvas');canvas.className='site-canvas file-site-canvas';canvas.dataset.previewDevice=previewDevice;
+  canvas.style.setProperty('--canvas-width',previewDevice==='desktop'?'100%':'390px');
+  document.querySelector('.history-actions').hidden=true;document.querySelector('#clearPageBtn').hidden=true;
+  document.querySelector('#canvasContent').innerHTML='<iframe id="siteFilePreview" title="网站预览" sandbox="allow-scripts allow-forms allow-popups allow-downloads" referrerpolicy="no-referrer"></iframe>';
+  document.querySelector('#siteFilePreview').src=siteFilePreviewUrl()+'?v='+Date.now();
+  document.querySelector('#selectionState').textContent=fileSite.slug?'修改保存后会立即更新已发布网站':'AI 直接编辑网站文件';
+  document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));
+  updatePreviewVisibility();
+}
+async function reloadSiteFiles(){
+  if(!currentConsoleUser)return;
+  const info=await consoleRequest('/api/site/files');if(info.format==='files')applySiteFiles(info);
+}
+
 let DRAFT_KEY='alchemyhatchery:guest:draft:v3';
 let AI_RELOAD_NOTICE_KEY='alchemyhatchery:guest:ai-reload-notice:v2';
 let AI_MODE_KEY='alchemyhatchery:guest:ai-mode:v1';
-let AI_MODEL_KEY='alchemyhatchery:guest:ai-model:v1';
-// 当前 AI 会话（GPT 式）：null 表示未保存的新聊天；列表来自服务端
+let aiContextWindow=1000000;
+// 单会话模式：账号唯一会话，id 由服务端派生并下发（见 GET /api/ai/conversation）。
 let aiChatSessionId=null;
-let aiSessionList=[];
-let aiSessionSaving=false;
+// 服务端最近一次下发的会话 HTML，用于切换视图时立即回显。
+let aiSessionHtml='';
 let aiChatViewEpoch=0;
 
 const previewDB = {
@@ -265,23 +299,25 @@ function updateHistoryButtons(){const undo=document.querySelector('#undoBtn'),re
 function captureHistoryNow(){clearTimeout(historyTimer);const snapshot=JSON.stringify(state);if(snapshot===historyStack[historyIndex]){updateHistoryButtons();return}historyStack=historyStack.slice(0,historyIndex+1);historyStack.push(snapshot);if(historyStack.length>80)historyStack.shift();historyIndex=historyStack.length-1;updateHistoryButtons()}
 function scheduleHistoryCapture(){clearTimeout(historyTimer);historyTimer=setTimeout(captureHistoryNow,420)}
 async function persistDraftSnapshot(snapshot){
+  if(fileSite||fileSiteLoading)return;
   if(!currentConsoleUser)return;
   try{localStorage.setItem(DRAFT_KEY,snapshot)}catch{}
   const response=await fetch('/api/console/draft',{method:'POST',headers:{'Content-Type':'application/json'},body:snapshot});
   if(response.status===401){showAuthGate('登录已过期，请重新登录');throw new Error('登录已过期')}
   if(!response.ok){let payload={};try{payload=await response.json()}catch{}throw new Error(payload.error||'云端草稿保存失败')}
 }
-function scheduleDraftSave(){if(!currentConsoleUser)return;setSaveState('保存中…',true);clearTimeout(draftSaveTimer);draftSaveTimer=setTimeout(async()=>{try{const snapshot=JSON.stringify(state);await persistDraftSnapshot(snapshot);const time=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});setSaveState(`已同步 · ${time}`,false)}catch{setSaveState('同步失败',false)}},350);scheduleHistoryCapture();schedulePreviewPush()}
+function scheduleDraftSave(){if(fileSite||fileSiteLoading)return;if(!currentConsoleUser)return;setSaveState('保存中…',true);clearTimeout(draftSaveTimer);draftSaveTimer=setTimeout(async()=>{try{const snapshot=JSON.stringify(state);await persistDraftSnapshot(snapshot);const time=new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});setSaveState(`已同步 · ${time}`,false)}catch{setSaveState('同步失败',false)}},350);scheduleHistoryCapture();schedulePreviewPush()}
 // 预览实时化：编辑防抖后持续把整站预览负载推到服务端，预览按钮与已打开页面始终是当前内容
 let previewPushTimer=null,previewPushInFlight=false,previewPushPending=false,previewPushHash='';
 function previewPayloadHash(text){let hash=5381;for(let i=0;i<text.length;i++)hash=((hash<<5)+hash+text.charCodeAt(i))>>>0;return hash.toString(36)}
 function schedulePreviewPush(){if(!currentConsoleUser?.previewId)return;clearTimeout(previewPushTimer);previewPushTimer=setTimeout(()=>void pushPreviewSnapshot(),1500)}
 async function pushPreviewSnapshot(allowCreate=false){
+  if(fileSite)return {previewId:currentConsoleUser?.previewId,url:fileSite.previewUrl};
   if(!currentConsoleUser)return null;
   if(!allowCreate&&!currentConsoleUser.previewId)return null;// 没用过预览的账号不主动创建，首次点击按钮时再生成
   if(previewPushInFlight){previewPushPending=true;return null}
   let payloadObj=null,body='';
-  try{payloadObj=buildPublishPayload(true);body=JSON.stringify(payloadObj)}catch{return null}
+  try{payloadObj={siteName:state.siteName,description:state.description};body=JSON.stringify(payloadObj)}catch{return null}
   const hash=previewPayloadHash(body);
   if(hash===previewPushHash)return currentConsoleUser.previewId?{previewId:currentConsoleUser.previewId,url:`/preview/${currentConsoleUser.previewId}`}:null;// 内容没变就不重复写库、不打扰已打开的页面
   previewPushInFlight=true;
@@ -325,6 +361,7 @@ function ensurePageCode(page){
 }
 function ensureAllPagesCode(){const previousPage=state.activePageId;state.pages.forEach(page=>ensurePageCode(page));state.activePageId=previousPage}
 function renderCanvas(){
+  if(fileSite){renderFileCanvas();return}
   if(isComposingText){deferredCanvasRender=true;return}captureTextSelectionBookmark();const page=activePage();if(!page)return;
   const canvas=document.querySelector('#siteCanvas');canvas.className=`site-canvas theme-${state.theme}`;canvas.dataset.previewDevice=previewDevice;canvas.style.setProperty('--page-bg',state.background||'#ffffff');canvas.style.setProperty('--canvas-width',previewDevice==='desktop'?`${state.contentWidth||100}%`:'390px');
   const legacyImages=(page.elements||[]).filter(element=>element.type==='image');if(legacyImages.length){legacyImages.forEach((element,index)=>pageObjects(page).push({id:uid('obj'),kind:'image',settings:{image:element.settings?.image||'',alt:element.settings?.alt||'插入的图片'},objectStyles:{image:{width:element.objectStyles?.image?.width||360,height:element.objectStyles?.image?.height||230,objectFit:element.objectStyles?.image?.objectFit||'contain',x:element.objectStyles?.image?.x||60+index*24,y:element.objectStyles?.image?.y||70+index*24,rotation:element.objectStyles?.image?.rotation||0}}}));page.elements=page.elements.filter(element=>element.type!=='image')}
@@ -334,6 +371,11 @@ function renderCanvas(){
 }
 
 function renderPages(){
+  if(fileSite){
+    const breadcrumb=document.querySelector('#currentBreadcrumb');
+    breadcrumb.innerHTML=`<select id="siteFileSelect" aria-label="预览页面">${fileSite.pages.map(name=>`<option value="${esc(name)}"${name===activeSiteFile?' selected':''}>${esc(name)}</option>`).join('')}</select>`;
+    breadcrumb.querySelector('select').addEventListener('change',event=>{activeSiteFile=event.target.value;renderCanvas()});return;
+  }
   document.querySelector('#currentBreadcrumb').textContent=pageAncestors(activePage()).map(page=>page.name).join(' / ');
 }
 function selectPage(id){if(!state.pages.some(page=>page.id===id))return;state.activePageId=id;editingElementId=null;editingItemId=null;renderPages();renderCanvas();const canvas=document.querySelector('#siteCanvas');if(canvas){canvas.classList.remove('page-enter');void canvas.offsetWidth;canvas.classList.add('page-enter')}document.querySelector('#canvasScroll').scrollTop=0}
@@ -602,26 +644,43 @@ document.querySelector('#aiFileInput').addEventListener('change',async event=>{t
 document.querySelector('#aiAttachmentStrip').addEventListener('click',event=>{const button=event.target.closest('[data-ai-remove-attachment]');if(!button)return;aiAttachments=aiAttachments.filter(item=>item.id!==button.dataset.aiRemoveAttachment);renderAiAttachments()});
 const aiComposer=document.querySelector('#aiComposer');aiComposer.addEventListener('dragover',event=>{if([...(event.dataTransfer?.types||[])].includes('Files')){event.preventDefault();aiComposer.classList.add('is-file-over')}});aiComposer.addEventListener('dragleave',()=>aiComposer.classList.remove('is-file-over'));aiComposer.addEventListener('drop',async event=>{if(!event.dataTransfer?.files?.length)return;event.preventDefault();aiComposer.classList.remove('is-file-over');try{await addAiAttachments([...event.dataTransfer.files])}catch(error){showToast(error.message)}});
 document.querySelector('#aiPrompt').addEventListener('input',event=>{event.target.style.height='auto';event.target.style.height=`${Math.min(event.target.scrollHeight,180)}px`;updateAiContextRing()});
+function estimateAiTokens(text=''){
+  const value=String(text),ascii=value.replace(/[^\x00-\x7f]/g,'').length;
+  return Math.ceil(ascii/4+(value.length-ascii));
+}
 function aiContextUsage(){
-  // 粗估本轮会进模型的上下文体量：站点快照 + 已输入 prompt + 对话历史 + 附件文本
-  let chars=0;try{chars+=JSON.stringify(aiSafeSnapshot()).length}catch{}
-  chars+=(document.querySelector('#aiPrompt')?.value||'').length;
-  chars+=aiChatHistoryForContext().reduce((sum,item)=>sum+(item.text||'').length,0);
-  chars+=aiAttachments.reduce((sum,item)=>sum+(item.kind==='text'?(item.content||'').length:4000),0);
-  return Math.min(1,chars/120000);
+  const prompt=document.querySelector('#aiPrompt')?.value||'';
+  // Usage lives in this session's saved message HTML, including background runs.
+  const records=document.querySelectorAll('#aiChatMessages [data-context-usage]');
+  if(!prompt&&!aiAttachments.length&&records.length){
+    try{const saved=JSON.parse(records[records.length-1].dataset.contextUsage);if(Number.isFinite(saved.usedTokens)&&saved.usedTokens>=0&&saved.contextWindow>0)return {...saved,estimated:false}}catch{}
+  }
+  let tokens=0;try{tokens+=estimateAiTokens(JSON.stringify(aiSafeSnapshot()))}catch{}
+  tokens+=estimateAiTokens(prompt);
+  tokens+=aiChatHistoryForContext().reduce((sum,item)=>sum+estimateAiTokens(item.text),0);
+  tokens+=aiAttachments.reduce((sum,item)=>sum+estimateAiTokens(item.kind==='text'?item.content:item.name),0);
+  return {usedTokens:tokens,contextWindow:aiContextWindow,estimated:true};
 }
 function updateAiContextRing(){
   const ring=document.querySelector('#aiContextRing');if(!ring)return;
-  const used=aiContextUsage();
-  const circumference=69.12;
-  ring.style.strokeDashoffset=String(circumference*(1-Math.max(used,0.02)));
-  // 参照各 harness 的做法：环形指示常驻显示在发送钮旁边，随上下文用量填充，快满时变红
+  const usage=aiContextUsage(),used=Math.min(1,usage.usedTokens/usage.contextWindow);
+  ring.style.strokeDashoffset=String(69.12*(1-used));
   ring.style.stroke=used>=0.8?'#f85149':'#58a6ff';
   const wrap=document.querySelector('#aiContextRingWrap');
-  if(wrap){wrap.classList.add('is-visible');wrap.setAttribute('title',`本轮上下文约占 ${Math.round(used*100)}%（站点快照 + 对话历史 + 附件）`)}
+  if(wrap){
+    const label=`${usage.estimated?'下次请求估算（站点 + 当前会话历史 + 输入与附件）':'当前会话最近一次模型调用（含回复）'}：${usage.usedTokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} tokens（${(used*100).toFixed(1)}%）${usage.estimated?'；不含系统提示与工具开销':''}`;
+    const started=!!document.querySelector('#aiChatMessages .ai-message.user')||!!(document.querySelector('#aiPrompt')?.value||'').trim();
+    wrap.classList.toggle('is-visible',started&&usage.usedTokens>0);wrap.title=label;wrap.setAttribute('aria-label',label);wrap.setAttribute('aria-valuenow',String(Number((used*100).toFixed(1))));
+  }
+}
+function setAiContextUsage(usage,root=document){
+  if(!usage||!Number.isFinite(usage.usedTokens)||usage.usedTokens<0||!Number.isFinite(usage.contextWindow)||usage.contextWindow<=0)return;
+  const card=root.querySelector('#aiRunCard');if(!card)return;
+  card.dataset.contextUsage=JSON.stringify({usedTokens:usage.usedTokens,contextWindow:usage.contextWindow});
+  if(root===document)updateAiContextRing();
 }
 document.querySelector('#aiPrompt').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();document.querySelector('#aiAdjustBtn').click()}});
-document.querySelector('#aiChatMessages').addEventListener('click',event=>{const execute=event.target.closest('[data-ai-plan-execute]');if(!execute)return;if(!aiServiceConfigured){showToast('AI 尚未配置：请管理员在「管理后台 → AI 服务配置」中添加 Kimi API Key');return}const plan=execute.closest('.ai-plan-box')?.querySelector('p')?.textContent.trim();if(!plan)return;void startAiRun(`请严格按照以下已确认的计划修改网站（本次为完全访问模式，直接执行，不要再只出计划）：\n${plan}`,[],[],[],{mode:'full',displayText:'按此计划执行'});execute.disabled=true});
+document.querySelector('#aiChatMessages').addEventListener('click',event=>{const execute=event.target.closest('[data-ai-plan-execute]');if(!execute)return;if(!aiServiceConfigured){showToast('AI 尚未配置：请管理员配置 DeepSeek API Key');return}const plan=execute.closest('.ai-plan-box')?.querySelector('p')?.textContent.trim();if(!plan)return;void startAiRun(`请严格按照以下已确认的计划修改网站（本次为完全访问模式，直接执行，不要再只出计划）：\n${plan}`,[],[],[],{mode:'full',displayText:'按此计划执行'});execute.disabled=true});
 document.querySelector('#undoBtn').addEventListener('click',undoState);document.querySelector('#redoBtn').addEventListener('click',redoState);
 document.querySelectorAll('[data-preview-device]').forEach(button=>button.addEventListener('click',()=>{previewDevice=button.dataset.previewDevice;sessionStorage.setItem('alchemyhatchery:preview-device',previewDevice);renderCanvas();showToast(`已切换到${button.textContent}预览`)}));
 document.addEventListener('keydown',event=>{const editingText=event.target.closest?.('input,textarea,[contenteditable]');if(editingText)return;if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();if(event.shiftKey)redoState();else undoState()}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redoState()}else if(event.key==='Escape'&&editingElementId)openElementEditor(editingElementId)});
@@ -629,46 +688,28 @@ document.addEventListener('keydown',event=>{const editingText=event.target.close
 // AI 任务注册表：每个任务绑定一个会话，进度按会话路由渲染；执行跨会话全局排队（见 aiRunQueue）
 const aiRuns=new Map();
 const aiRunQueue=[];// 跨会话全局 FIFO：一个账号只有一份网站，AI 任务必须按发送顺序串行执行，否则并行任务的整站结果会互相覆盖
-const aiSessionHtmlCache=new Map();
-const aiSessionDirty=new Set();
-const aiSessionTitles=new Map();
-const aiSessionDeleted=new Set();
 let aiRunLocalSeq=0;
 let aiServiceConfigured=true;
 let aiApplyChain=Promise.resolve();// 结果应用串行锁：并行轮询中的任务（恢复/跨页）应用整站结果时必须排队，避免互相覆盖
 function withAiApplyLock(task){const next=aiApplyChain.then(task);aiApplyChain=next.catch(()=>{});return next}
-function activeAiRuns(){return [...aiRuns.values()].filter(run=>run.status==='running')}
+function activeAiRuns(){return [...aiRuns.values()].filter(run=>['queued','running'].includes(run.status))}
 function anyAiRunActive(){return activeAiRuns().length>0}
-function activeRunForSession(sessionId){return activeAiRuns().find(run=>run.sessionId===sessionId)||null}
-function updateAiBusy(){document.body.classList.toggle('ai-busy',anyAiRunActive());document.body.classList.toggle('ai-session-busy',!!activeRunForSession(aiChatSessionId))}
+function updateAiBusy(){document.body.classList.toggle('ai-busy',anyAiRunActive());document.body.classList.toggle('ai-session-busy',anyAiRunActive())}
 function aiRunShownText(prompt,chosenPresets=[],displayText=''){return displayText||(chosenPresets.length?`使用这些模块制作：${chosenPresets.map(type=>elementCatalog[type]?.name||type).join('、')}`:prompt)}
 function newAiSessionId(){
   if(crypto.randomUUID)return crypto.randomUUID().toLowerCase();
   return '10000000-1000-4000-8000-100000000000'.replace(/[018]/g,c=>(+c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>+c/4).toString(16));
 }
-function ensureAiSessionId(){
-  if(aiChatSessionId)return aiChatSessionId;
-  // 发消息即分配会话 id：AI 任务从启动起就绑定会话，不再等首次落库
-  const id=newAiSessionId();
-  aiChatSessionId=id;
-  aiSessionDirty.add(id);
-  history.replaceState(null,'',`/c/${id}`);
-  renderAiSessionList();
-  return id;
-}
-function enqueueAiRun(sessionId,item){
+function enqueueAiRun(item){
   appendAiChatMessage('user',item.shownText,item.attachments);
-  if(!aiSessionTitles.has(sessionId))aiSessionTitles.set(sessionId,item.shownText.slice(0,30)||'新聊天');
   const last=document.querySelector('#aiChatMessages')?.lastElementChild;const tag=document.createElement('small');tag.className='ai-queue-tag';tag.textContent=`排队中（第 ${aiRunQueue.length+1} 位）`;last?.querySelector('div')?.append(tag);
-  aiRunQueue.push({...item,sessionId,tag});
-  void saveAiChatSession();// 排队消息同样立即落库，防止刷新后丢失
+  aiRunQueue.push({...item,tag});
   showToast('已有 AI 任务进行中，这条消息已排队，会按顺序自动执行');
-  renderAiSessionList();
 }
-function newAiRunRecord(sessionId,fields={}){const run={id:`run-${Date.now()}-${++aiRunLocalSeq}`,jobId:null,sessionId,mode:fields.mode||aiPermissionMode,startedAt:Date.now(),prompt:fields.prompt||'',shownText:fields.shownText||'',attachments:fields.attachments||[],chosenPresets:fields.chosenPresets||[],presetSnippets:fields.presetSnippets||[],history:fields.history||null,messageAppended:Boolean(fields.messageAppended),resumed:false,status:'running',snapshot:{status:'running',events:[]},payload:null};aiRuns.set(run.id,run);renderAiSessionList();return run}
-function runQueuedAiTask(sessionId,item){
+function newAiRunRecord(fields={}){const run={id:`run-${Date.now()}-${++aiRunLocalSeq}`,jobId:null,mode:fields.mode||aiPermissionMode,startedAt:Date.now(),prompt:fields.prompt||'',shownText:fields.shownText||'',attachments:fields.attachments||[],chosenPresets:fields.chosenPresets||[],presetSnippets:fields.presetSnippets||[],history:fields.history||null,messageAppended:Boolean(fields.messageAppended),resumed:false,status:'running',snapshot:{status:'running',events:[]},payload:null};aiRuns.set(run.id,run);return run}
+function runQueuedAiTask(item){
   if(item.tag)item.tag.textContent='执行中';
-  const run=newAiRunRecord(sessionId,{...item,messageAppended:true});
+  const run=newAiRunRecord({...item,messageAppended:true});
   void executeAiRun(run);
 }
 const AI_MODE_LABELS={chat:'仅聊天',plan:'plan模式',full:'完全访问'};
@@ -676,127 +717,61 @@ let aiPermissionMode='full';
 function loadAiPermissionMode(){try{const saved=localStorage.getItem(AI_MODE_KEY);if(saved&&AI_MODE_LABELS[saved])aiPermissionMode=saved}catch{}renderAiPermissionMode()}
 function renderAiPermissionMode(){const chip=document.querySelector('#aiModeBtn');if(!chip)return;chip.classList.remove('mode-chat','mode-plan','mode-full');chip.classList.add(`mode-${aiPermissionMode}`);chip.setAttribute('aria-expanded',String(!document.querySelector('#aiModeMenu')?.hidden));document.querySelector('#aiModeLabel').textContent=AI_MODE_LABELS[aiPermissionMode];document.querySelectorAll('#aiModeMenu [data-ai-mode]').forEach(item=>item.classList.toggle('active',item.dataset.aiMode===aiPermissionMode))}
 function setAiPermissionMode(mode){if(!AI_MODE_LABELS[mode])return;aiPermissionMode=mode;try{localStorage.setItem(AI_MODE_KEY,mode)}catch{}renderAiPermissionMode()}
-function closeAiModeMenu(){uiHide(document.querySelector('#aiModeMenu'));document.querySelector('#aiModeBtn')?.setAttribute('aria-expanded','false');uiHide(document.querySelector('#aiModelMenu'));document.querySelector('#aiModelBtn')?.setAttribute('aria-expanded','false')}
+function closeAiModeMenu(){uiHide(document.querySelector('#aiModeMenu'));document.querySelector('#aiModeBtn')?.setAttribute('aria-expanded','false')}
 document.querySelector('#aiModeBtn')?.addEventListener('click',event=>{event.stopPropagation();const menu=document.querySelector('#aiModeMenu');if(!menu)return;const open=menu.hidden||menu.classList.contains('is-closing');closeAiModeMenu();if(open){uiShow(menu);document.querySelector('#aiModeBtn').setAttribute('aria-expanded','true')}});
 document.querySelector('#aiModeMenu')?.addEventListener('click',event=>{const item=event.target.closest('[data-ai-mode]');if(!item)return;setAiPermissionMode(item.dataset.aiMode);closeAiModeMenu();showToast(`AI 权限模式：${AI_MODE_LABELS[aiPermissionMode]}`)});
 document.addEventListener('click',event=>{if(!event.target.closest('.ai-mode-wrap'))closeAiModeMenu()});
 loadAiPermissionMode();
 updateAiContextRing();
-// 模型与推理档位选择：菜单项来自 /api/ai/status（后端按提供方返回真实可用列表）
-let aiModelChoice={model:'',effort:''};
-let aiServiceCatalog={models:[],efforts:[],currentModel:'',currentEffort:''};
-function loadAiModelChoice(){try{const saved=JSON.parse(localStorage.getItem(AI_MODEL_KEY)||'null');if(saved&&typeof saved==='object')aiModelChoice={model:String(saved.model||''),effort:String(saved.effort||'')}}catch{}renderAiModelChoice()}
-function currentAiModelId(){return aiModelChoice.model||aiServiceCatalog.currentModel||''}
-function currentAiEffortId(){return aiModelChoice.effort||aiServiceCatalog.currentEffort||''}
-function renderAiModelChoice(){const label=document.querySelector('#aiModelLabel');if(!label)return;label.textContent=currentAiModelId()||'默认';const eff=aiServiceCatalog.efforts.find(item=>item.id===currentAiEffortId());const small=document.querySelector('#aiEffortLabel');if(small)small.textContent=eff?eff.name:'默认';buildAiModelMenu()}
-function buildAiModelMenu(){const menu=document.querySelector('#aiModelMenu');if(!menu)return;const mId=currentAiModelId(),eId=currentAiEffortId();const modelRows=(aiServiceCatalog.models||[]).map(item=>`<button type="button" data-ai-model="${esc(item.id)}" class="${item.id===mId?'active':''}"><b>${esc(item.name||item.id)}</b></button>`).join('');const effortRows=(aiServiceCatalog.efforts||[]).map(item=>`<button type="button" data-ai-effort="${esc(item.id)}" class="${item.id===eId?'active':''}"><b>${esc(item.name)}</b></button>`).join('');menu.innerHTML=(modelRows?`<div class="ai-menu-group">模型</div>${modelRows}`:'')+(effortRows?`<div class="ai-menu-group">推理档位</div>${effortRows}`:'')}
-document.querySelector('#aiModelBtn')?.addEventListener('click',event=>{event.stopPropagation();const menu=document.querySelector('#aiModelMenu');if(!menu)return;const open=menu.hidden||menu.classList.contains('is-closing');closeAiModeMenu();if(open){buildAiModelMenu();uiShow(menu);document.querySelector('#aiModelBtn').setAttribute('aria-expanded','true')}});
-document.querySelector('#aiModelMenu')?.addEventListener('click',event=>{const mItem=event.target.closest('[data-ai-model]'),eItem=event.target.closest('[data-ai-effort]');if(mItem)aiModelChoice.model=mItem.dataset.aiModel;else if(eItem)aiModelChoice.effort=eItem.dataset.aiEffort;else return;try{localStorage.setItem(AI_MODEL_KEY,JSON.stringify(aiModelChoice))}catch{}renderAiModelChoice();closeAiModeMenu()});
-loadAiModelChoice();
 void loadAiStatus();
 // ChatGPT 空状态：没有任何用户消息/运行卡片时，输入框与大标题居中
 function updateAiEmptyState(){const messages=document.querySelector('#aiChatMessages'),panel=document.querySelector('.ai-chat-panel');if(!messages||!panel)return;const hasUser=!!messages.querySelector('.ai-message.user');const card=document.querySelector('#aiRunCard'),result=document.querySelector('#aiResult');panel.classList.toggle('ai-empty',!(hasUser||(card&&!card.hidden)||(result&&!result.hidden)));const examples=document.querySelector('.ai-examples');if(examples)examples.hidden=hasUser}
-if(document.querySelector('#aiChatMessages'))new MutationObserver(updateAiEmptyState).observe(document.querySelector('#aiChatMessages'),{childList:true});
+if(document.querySelector('#aiChatMessages'))new MutationObserver(()=>{updateAiEmptyState();updateAiContextRing()}).observe(document.querySelector('#aiChatMessages'),{childList:true,subtree:true,characterData:true});
 updateAiEmptyState();
 const cloneJson=value=>JSON.parse(JSON.stringify(value));
 const AI_IMAGE_PLACEHOLDER='[本地图片数据已省略，但必须保留原值]';
 const AI_OBJECT_PLACEHOLDER='[页面浮动图片数据已省略，但必须保留原值]';
 const AI_PLACEHOLDERS=new Set([AI_IMAGE_PLACEHOLDER,AI_OBJECT_PLACEHOLDER]);
-let aiChatHistoryTimer=null;
 // 初始消息区快照（问候语 + 结果/运行卡片的干净副本），用于新聊天重置
 const AI_CHAT_INITIAL_HTML=document.querySelector('#aiChatMessages')?.innerHTML||'';
 function aiChatHistoryKey(){return `alchemyhatchery:${currentConsoleUser?.username||'guest'}:ai-chat:v1`}
-function aiSessionIdFromPath(){const match=location.pathname.match(/^\/c\/([0-9a-fA-F-]{32,36})\/?$/);return match?match[1]:null}
 function firstAiUserText(){return (document.querySelector('#aiChatMessages .ai-message.user p')?.textContent||'').trim()}
-function persistAiChatHistory(){
-  if(!currentConsoleUser)return;
-  clearTimeout(aiChatHistoryTimer);
-  // 任务进行中轮询每 500ms 触发一次保存调用，放宽防抖避免大 html 高频上传挤占链路
-  aiChatHistoryTimer=setTimeout(()=>{void saveAiChatSession()},anyAiRunActive()?2500:400);
+
+let aiConversationRequest=null;
+function fetchAiChatSession(){
+  // 单会话：没有 id 参数，也没有按 id 去重的必要；并发时复用同一个请求。
+  if(aiConversationRequest)return aiConversationRequest;
+  const user=currentConsoleUser;
+  const request=consoleRequest('/api/ai/conversation').then(payload=>{
+    if(user!==currentConsoleUser)return null;
+    const session=payload.session;
+    if(session){aiChatSessionId=session.id;aiSessionHtml=session.messagesHtml||AI_CHAT_INITIAL_HTML}
+    return session;
+  }).finally(()=>{if(aiConversationRequest===request)aiConversationRequest=null});
+  aiConversationRequest=request;
+  return request;
 }
-function cacheAiSessionHtml(id,html){
-  if(!id)return;
-  aiSessionHtmlCache.delete(id);aiSessionHtmlCache.set(id,html);
-  for(const key of aiSessionHtmlCache.keys()){
-    if(aiSessionHtmlCache.size<=30)break;
-    if(key===aiChatSessionId||activeRunForSession(key))continue;
-    aiSessionHtmlCache.delete(key);
-  }
-}
-function aiSessionFirstUserText(sessionId){
-  const html=aiSessionHtmlCache.get(sessionId);if(!html)return '';
-  const doc=document.createElement('div');doc.innerHTML=html;
-  return (doc.querySelector('.ai-message.user p')?.textContent||'').trim();
-}
-async function persistAiSessionHtml(sessionId,html){
-  if(!sessionId||aiSessionDeleted.has(sessionId))return;
-  if(aiSessionDirty.has(sessionId)){
-    const title=(aiSessionTitles.get(sessionId)||aiSessionFirstUserText(sessionId).slice(0,30)||'新聊天').slice(0,30)||'新聊天';
-    await consoleRequest('/api/ai/sessions',{method:'POST',body:{id:sessionId,title,messagesHtml:html}});
-    aiSessionDirty.delete(sessionId);
-    void refreshAiSessionList();
-    return;
-  }
-  try{
-    await consoleRequest(`/api/ai/sessions/${sessionId}`,{method:'POST',body:{messagesHtml:html}});
-  }catch(error){
-    if(error.status===404&&!aiSessionDeleted.has(sessionId)){aiSessionDirty.add(sessionId);await persistAiSessionHtml(sessionId,html);return}
-    throw error;
-  }
-}
-window.addEventListener('pagehide',()=>{
-  // 关页面/刷新前把当前会话立刻落库：否则刚发出的消息可能随页面一起消失，重开时只剩 AI 回复没有上下文
-  if(!currentConsoleUser||!aiChatSessionId||aiSessionDeleted.has(aiChatSessionId))return;
-  clearTimeout(aiChatHistoryTimer);
-  const messages=document.querySelector('#aiChatMessages');if(!messages)return;
-  if(!messages.querySelector('.ai-message.user'))return;
-  const html=messages.innerHTML;
-  cacheAiSessionHtml(aiChatSessionId,html);
-  const isNew=aiSessionDirty.has(aiChatSessionId);
-  const url=isNew?'/api/ai/sessions':`/api/ai/sessions/${aiChatSessionId}`;
-  const title=(aiSessionTitles.get(aiChatSessionId)||firstAiUserText().slice(0,30)||'新聊天').slice(0,30)||'新聊天';
-  const body=JSON.stringify(isNew?{id:aiChatSessionId,title,messagesHtml:html}:{messagesHtml:html});
-  // keepalive 上限 64KB：超出就退回普通请求（大概率被关页中断，但任务结果仍可由服务端 settle 找回）
-  const keepalive=new TextEncoder().encode(body).length<60000;
-  try{fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body,keepalive})}catch{}
-});
-async function saveAiChatSession(){
-  if(aiSessionSaving){clearTimeout(aiChatHistoryTimer);aiChatHistoryTimer=setTimeout(()=>{void saveAiChatSession()},800);return}
-  const messages=document.querySelector('#aiChatMessages');if(!messages||!currentConsoleUser)return;
-  const oldest=()=>messages.querySelector(':scope > .ai-message, :scope > .ai-run-archive');
-  while(messages.innerHTML.length>260000&&oldest())oldest().remove();
-  if(!messages.querySelector('.ai-message.user'))return;// 还没有实质内容：保持“新聊天”不落库
-  const sessionId=aiChatSessionId;if(!sessionId)return;
-  const html=messages.innerHTML;
-  cacheAiSessionHtml(sessionId,html);
-  aiSessionSaving=true;
-  try{await persistAiSessionHtml(sessionId,html)}catch{/* 网络失败时静默，下一次编辑会再试 */}
-  finally{aiSessionSaving=false}
+function acceptServerSession(session){
+  if(!session)return;
+  for(const job of session.jobs||[])rememberServerJob(job);
+  aiChatSessionId=session.id;
+  aiSessionHtml=session.messagesHtml||AI_CHAT_INITIAL_HTML;
+  applyAiChatHtml(aiSessionHtml);
 }
 function applyAiChatHtml(html){
-  aiChatViewEpoch+=1;
   const messages=document.querySelector('#aiChatMessages');if(!messages)return;
-  messages.innerHTML=html;
-  messages.querySelectorAll('.ai-preset-chip, .ai-preset-confirm').forEach(node=>{node.disabled=true});
-  const trace=messages.querySelector('#aiRunTrace');if(trace)trace.dataset.rendered=String(trace.childElementCount);
-  const runningRun=activeRunForSession(aiChatSessionId);
-  if(!runningRun){
-    const card=messages.querySelector('#aiRunCard');card?.querySelector('.ai-working-status')?.remove();card?.classList.remove('is-running');
-    // 卡片停在半截（页面关闭期间任务从服务端内存过期/丢失），既无活跃任务也无结果无报错：
-    // 补一句终态说明，避免出现一张毫无反应的空白运行卡片
-    const finalBox=card?.querySelector('#aiRunFinal');const summary=card?.querySelector('#aiRunSummary');
-    const errorNode=messages.querySelector('#aiResult');const hasError=errorNode&&!errorNode.hidden&&String(errorNode.textContent).trim();
-    if(card&&!card.hidden&&finalBox&&finalBox.hidden&&summary&&!String(summary.textContent).trim()&&!hasError){
-      summary.textContent='这个任务在页面关闭期间中断，结果未能取回。重新发送你的要求即可继续。';
-      finalBox.hidden=false;
-    }
+  if(messages._serverHtml!==html){
+    const conversation=document.querySelector('#aiConversation');
+    const atBottom=conversation.scrollHeight-conversation.scrollTop-conversation.clientHeight<120;
+    const expanded=new Set([...messages.querySelectorAll('[data-ai-job-id] details[open]')].map(el=>el.closest('[data-ai-job-id]').dataset.aiJobId));
+    messages.innerHTML=html;messages._serverHtml=html;
+    for(const el of messages.querySelectorAll('[data-ai-job-id] .ai-run-process'))if(expanded.has(el.closest('[data-ai-job-id]').dataset.aiJobId))el.open=true;
+    if(atBottom)scrollAiConversation(true);
   }
-  updateAiEmptyState();
-  updateAiContextRing();
-  updateAiBusy();
-  if(runningRun)renderAiRunProgress(runningRun.snapshot,runningRun);
+  updateAiEmptyState();updateAiContextRing();updateAiBusy();
 }
 function resetAiChatView(){
+  aiChatViewEpoch+=1;
   applyAiChatHtml(AI_CHAT_INITIAL_HTML);
   const conversation=document.querySelector('#aiConversation');if(conversation)conversation.scrollTop=0;
 }
@@ -805,127 +780,55 @@ function clearAiComposer(){
   aiAttachments=[];renderAiAttachments();
   updateAiContextRing();
 }
-function renderAiSessionList(){
-  const list=document.querySelector('#aiSessionList');if(!list)return;
-  const items=[...aiSessionList];
-  // 刚发消息、还没落库的会话也要立刻出现在列表里
-  if(aiChatSessionId&&!items.some(item=>item.id===aiChatSessionId)&&!aiSessionDeleted.has(aiChatSessionId))items.unshift({id:aiChatSessionId,title:aiSessionTitles.get(aiChatSessionId)||'新聊天'});
-  list.innerHTML=items.map(item=>{const running=!!activeRunForSession(item.id)||aiRunQueue.some(task=>task.sessionId===item.id);return `<button type="button" class="ai-session-item${item.id===aiChatSessionId?' active':''}" data-ai-session="${esc(item.id)}"><span>${esc(item.title||'新聊天')}</span>${running?'<em class="ai-session-spin" title="AI 任务进行中"></em>':''}<i data-ai-session-delete="${esc(item.id)}" title="删除会话" aria-label="删除会话">×</i></button>`}).join('')||'<p class="ai-session-empty">还没有历史会话</p>';
-}
-async function refreshAiSessionList(){
-  if(!currentConsoleUser)return;
-  try{const payload=await consoleRequest('/api/ai/sessions');aiSessionList=payload.sessions||[]}catch{aiSessionList=[]}
-  renderAiSessionList();
-}
-function leaveCurrentAiSession(){
-  // 切走前把当前会话的 DOM 固化进缓存并落库，保证另一个会话的任务/消息绝不写进来
-  clearTimeout(aiChatHistoryTimer);
-  const fromId=aiChatSessionId;
-  if(!fromId||aiSessionDeleted.has(fromId))return;
-  const messages=document.querySelector('#aiChatMessages');if(!messages)return;
-  finishAiSummaryTyping(messages);
-  const html=messages.innerHTML;
-  cacheAiSessionHtml(fromId,html);
-  if(messages.querySelector('.ai-message.user'))void persistAiSessionHtml(fromId,html).catch(()=>{});
-}
-async function loadAiChatSession(id,{silent=false}={}){
-  if(id===aiChatSessionId)return;
-  leaveCurrentAiSession();
-  const cached=aiSessionHtmlCache.get(id);
-  if(cached!==undefined){
-    aiChatSessionId=id;
-    applyAiChatHtml(cached);
-    clearAiComposer();
-    renderAiSessionList();
-    scrollAiConversation(true);
-    void syncAiChatSessionFromServer(id);
-    return;
-  }
+async function loadAiChatSession({silent=false}={}){
+  const epoch=++aiChatViewEpoch;
+  clearAiComposer();
+  // 先用上次服务端快照回显，再后台校准。
+  applyAiChatHtml(aiSessionHtml||'<article class="ai-message assistant" role="status"><div><p>正在加载对话…</p></div></article>');
+  scrollAiConversation(true);
   try{
-    const payload=await consoleRequest(`/api/ai/sessions/${id}`);
-    if(aiSessionIdFromPath()!==id)return;// 等待期间用户又切到别的会话
-    const html=payload.session.messagesHtml||AI_CHAT_INITIAL_HTML;
-    cacheAiSessionHtml(id,html);
-    aiChatSessionId=payload.session.id;
-    applyAiChatHtml(html);
-    clearAiComposer();
-    renderAiSessionList();
-    scrollAiConversation(true);
+    const session=await fetchAiChatSession();
+    if(!session||epoch!==aiChatViewEpoch)return;
+    acceptServerSession(session);
   }catch(error){
-    if(!silent)showToast(error.status===404?'会话不存在或已删除':`会话加载失败：${error.message}`);
-    if(aiSessionIdFromPath()===id)startNewAiChat('replace');
+    if(epoch!==aiChatViewEpoch)return;
+    if(!silent)showToast(`对话加载失败：${error.message}`);
+    if(!aiSessionHtml)applyAiChatHtml('<article class="ai-message assistant" role="alert"><div><p>对话加载失败，请重试。</p><button type="button" data-ai-session-retry>重新加载</button></div></article>');
   }
 }
-async function syncAiChatSessionFromServer(id){
-  // 命中缓存后后台校对一次：别的设备更新过就静默刷新
+async function syncAiChatSessionFromServer(){
   const epoch=aiChatViewEpoch;
-  const cached=aiSessionHtmlCache.get(id);
   try{
-    const payload=await consoleRequest(`/api/ai/sessions/${id}`);
-    if(activeRunForSession(id))return;// 进行中的任务持有更新的状态，DB 版本反而更旧
-    const fresh=payload.session.messagesHtml||AI_CHAT_INITIAL_HTML;
-    cacheAiSessionHtml(id,fresh);
-    if(id!==aiChatSessionId||epoch!==aiChatViewEpoch)return;
-    if(fresh!==cached)applyAiChatHtml(fresh);
+    const session=await fetchAiChatSession();
+    if(!session||epoch!==aiChatViewEpoch)return;
+    acceptServerSession(session);
   }catch{}
 }
-async function prefetchAiSessionHtml(){
-  if(!currentConsoleUser)return;
-  for(const item of aiSessionList.slice(0,5)){
-    if(aiSessionHtmlCache.has(item.id))continue;
-    try{const payload=await consoleRequest(`/api/ai/sessions/${item.id}`);if(!aiSessionHtmlCache.has(item.id)&&!activeRunForSession(item.id))cacheAiSessionHtml(item.id,payload.session.messagesHtml||'')}catch{}
-  }
-}
-function startNewAiChat(nav='push'){
-  leaveCurrentAiSession();
+
+function startNewAiChat(){
   aiChatSessionId=null;
+  try{localStorage.removeItem(aiSessionStorageKey())}catch{}
   resetAiChatView();
   clearAiComposer();
-  renderAiSessionList();
-  if(nav==='push')history.pushState(null,'','/');
-  else if(nav==='replace')history.replaceState(null,'','/');
   document.querySelector('#aiPrompt')?.focus();
 }
-async function deleteAiChatSession(id){
-  try{await consoleRequest(`/api/ai/sessions/${id}/delete`,{method:'POST',body:{}})}catch(error){showToast(error.message);return}
-  aiSessionDeleted.add(id);
-  aiSessionHtmlCache.delete(id);aiSessionTitles.delete(id);aiSessionDirty.delete(id);
-  for(let index=aiRunQueue.length-1;index>=0;index--)if(aiRunQueue[index].sessionId===id)aiRunQueue.splice(index,1);// 已删会话的排队任务一并丢弃
-  aiSessionList=aiSessionList.filter(item=>item.id!==id);
-  renderAiSessionList();
-  if(id===aiChatSessionId)startNewAiChat('replace');
-  showToast('会话已删除');
-}
+function aiChatRetryTarget(){return document.querySelector('#aiChatMessages')?.querySelector('[data-ai-session-retry]')?aiChatSessionId:null}
 async function initAiChatSessions(){
-  try{localStorage.removeItem(aiChatHistoryKey())}catch{}// 旧版本地聊天记录缓存不再使用
-  const id=aiSessionIdFromPath();
-  void refreshAiSessionList().then(()=>void prefetchAiSessionHtml());
-  if(id)await loadAiChatSession(id,{silent:true});
-  else{aiChatSessionId=null;resetAiChatView();renderAiSessionList()}
+  try{localStorage.removeItem(aiChatHistoryKey())}catch{}
+  await loadAiChatSession({silent:true});
 }
-document.querySelector('#aiSessionList')?.addEventListener('click',event=>{
-  const del=event.target.closest('[data-ai-session-delete]');
-  if(del){event.stopPropagation();void deleteAiChatSession(del.dataset.aiSessionDelete);return}
-  const item=event.target.closest('[data-ai-session]');
-  if(!item)return;
-  switchActivity('ai');
-  const id=item.dataset.aiSession;
-  if(id===aiChatSessionId)return;
-  history.pushState(null,'',`/c/${id}`);
-  void loadAiChatSession(id);
+document.querySelector('#aiChatMessages')?.addEventListener('click',event=>{
+  if(event.target.closest('[data-ai-session-retry]'))void loadAiChatSession()
 });
 document.querySelector('#aiNewChatBtn')?.addEventListener('click',()=>{
   switchActivity('ai');
   if(!aiChatSessionId&&!firstAiUserText()){document.querySelector('#aiPrompt')?.focus();return}
   startNewAiChat();
 });
-window.addEventListener('popstate',()=>{
-  if(!currentConsoleUser)return;
-  const id=aiSessionIdFromPath();
-  if(id&&id!==aiChatSessionId)void loadAiChatSession(id,{silent:true});
-  else if(!id&&aiChatSessionId)startNewAiChat('none');
-});
-function scrollAiConversation(force=false){const node=document.querySelector('#aiConversation');if(!force&&node.scrollHeight-node.scrollTop-node.clientHeight>120){persistAiChatHistory();return}requestAnimationFrame(()=>{node.scrollTop=node.scrollHeight});persistAiChatHistory()}
+// HatcheryStudy：暂时是空按钮。只提示，不抢高亮、不切面板——否则会把当前
+// 对话面板留在隐藏状态（它没有 data-activity，switchActivity 管不到它）。
+document.querySelector('#hatcheryStudyBtn')?.addEventListener('click',()=>{showToast('HatcheryStudy 还没做好')});
+function scrollAiConversation(force=false){const node=document.querySelector('#aiConversation');if(!force&&node.scrollHeight-node.scrollTop-node.clientHeight>120)return;requestAnimationFrame(()=>{node.scrollTop=node.scrollHeight})}
 let previewManualState=true;// 刷新后默认收起网站预览，本次会话内手动展开/收起后保持选择
 let previewAnimTimer=null;
 function updatePreviewVisibility(){
@@ -957,12 +860,9 @@ function togglePreviewCollapsed(){
 }
 document.querySelector('#previewCollapseBtn').addEventListener('click',togglePreviewCollapsed);
 document.querySelector('#previewExpandFab').addEventListener('click',togglePreviewCollapsed);
-function appendAiChatMessage(role,text,attachments=[]){const messages=document.querySelector('#aiChatMessages');const files=attachments.length?`<div class="ai-message-files">${attachments.map(item=>`<span>${item.kind==='image'?'▧':'▤'} ${esc(item.name)}</span>`).join('')}</div>`:'';if(role==='user')messages.querySelector('.ai-greeting')?.remove();messages.insertAdjacentHTML('beforeend',`<article class="ai-message ${role==='user'?'user':'assistant'}"><div><p>${esc(text)}</p>${files}</div></article>`);scrollAiConversation(true)}
+function appendAiChatMessage(role,text,attachments=[]){const messages=document.querySelector('#aiChatMessages');messages._serverHtml=null;const files=attachments.length?`<div class="ai-message-files">${attachments.map(item=>`<span>${item.kind==='image'?'▧':'▤'} ${esc(item.name)}</span>`).join('')}</div>`:'';if(role==='user')messages.querySelector('.ai-greeting')?.remove();messages.insertAdjacentHTML('beforeend',`<article class="ai-message ${role==='user'?'user':'assistant'}"><div><p>${esc(text)}</p>${files}</div></article>`);scrollAiConversation(true)}
 function aiSafeSnapshot(){
-  ensureAllPagesCode();
-  const snapshot=cloneJson(state);
-  snapshot.pages.forEach(page=>{if(typeof page.code==='string')page.code=page.code.replace(/data:image\/[^"'\s)]+/g,AI_IMAGE_PLACEHOLDER);(page.elements||[]).forEach(element=>{(element.items||[]).forEach(item=>{if(String(item.image||'').startsWith('data:'))item.image=AI_IMAGE_PLACEHOLDER });if(String(element.settings?.image||'').startsWith('data:'))element.settings.image=AI_IMAGE_PLACEHOLDER});(page.objects||[]).forEach(object=>{if(String(object.settings?.image||'').startsWith('data:'))object.settings.image=AI_OBJECT_PLACEHOLDER})});
-  return {site:snapshot,activePageId:state.activePageId,pageFormat:'pages[].code 是整页 HTML，直接整体修改；pages[].elements 仅旧数据兼容，通常为空',elementTypes:Object.keys(elementCatalog),elementCatalog:Object.entries(elementCatalog).filter(([type])=>type!=='detail').map(([type,item])=>({type,name:item.name})),rules:['未明确要求时保留全部现有内容与 ID','预览交互数据刷新后清空','发布站点使用服务端持久化']};
+  return {site:fileSite?.metadata||{siteName:state.siteName,description:state.description},activeFile:activeSiteFile,files:fileSite?.files||[]};
 }
 function syncEditorAfterAI(){
   updatePreviewVisibility();
@@ -1034,23 +934,28 @@ function typeAiSummary(text,root=document,instant=false){
   const node=root.querySelector('#aiRunSummary');if(!node)return;clearInterval(node._typingTimer);node._fullText=String(text||'');
   if(instant){node.textContent=node._fullText;node.classList.remove('is-typing');return}
   const chars=[...node._fullText];let index=0;node.textContent='';node.classList.add('is-typing');
-  node._typingTimer=setInterval(()=>{index=Math.min(chars.length,index+2);node.textContent=chars.slice(0,index).join('');if(index>=chars.length){clearInterval(node._typingTimer);node.classList.remove('is-typing');persistAiChatHistory()}},18);
+  node._typingTimer=setInterval(()=>{index=Math.min(chars.length,index+2);node.textContent=chars.slice(0,index).join('');if(index>=chars.length){clearInterval(node._typingTimer);node.classList.remove('is-typing')}},18);
 }
 function renderAiRunProgress(snapshot,run,root=document){
+  const card=root.querySelector('#aiRunCard');if(card&&run&&card.dataset.contextRun!==run.id){delete card.dataset.contextUsage;card.dataset.contextRun=run.id}
+  const usage=(snapshot.events||[]).find(item=>item.kind==='context')?.contextUsage;if(usage)setAiContextUsage(usage,root);
   const events=snapshot.events||[];const failed=snapshot.status==='failed';const panel=root.querySelector('#aiRunCard');if(!panel)return;panel.hidden=false;const finalBox=root.querySelector('#aiRunFinal');if(finalBox)finalBox.hidden=true;const checksBox=root.querySelector('#aiRunChecks');if(checksBox)checksBox.innerHTML='';const process=root.querySelector('#aiRunProcess');if(process)process.open=!failed;const summary=root.querySelector('#aiRunProcessLabel');if(summary){summary.hidden=!failed;summary.textContent='查看过程'}setAiWorkingStatus(!failed&&snapshot.status==='running',root,run?.mode);renderAiEvents(events,root);if(root===document)scrollAiConversation();
 }
 function renderAiRunResult(run,payload,root=document){
+  setAiContextUsage(payload.contextUsage,root);
   const resultNode=root.querySelector('#aiResult');if(resultNode)resultNode.hidden=true;const panel=root.querySelector('#aiRunCard');if(!panel)return;panel.hidden=false;setAiWorkingStatus(false,root,run.mode);typeAiSummary(payload.summary||'网站修改已完成。',root,root!==document);const finalBox=root.querySelector('#aiRunFinal');if(finalBox)finalBox.hidden=false;
   const planBox=root.querySelector('#aiPlanBox');if(planBox){const showPlan=payload.mode==='plan'&&String(payload.plan||'').trim().length>0;planBox.hidden=!showPlan;if(showPlan)planBox.querySelector('p').textContent=payload.plan}
   const events=payload.events||payload.trace||[];renderAiEvents(events,root);const process=root.querySelector('#aiRunProcess');if(process)process.open=false;const summary=root.querySelector('#aiRunProcessLabel');if(summary){summary.hidden=false;summary.textContent='查看过程'}
   const changes=[...(payload.changedFiles||[]).map(name=>`已修改文件：${name}`),...(payload.siteOperations||[]).map(item=>describeAiOperation(item))];const checksBox=root.querySelector('#aiRunChecks');if(checksBox)checksBox.innerHTML=changes.length?changes.map(item=>`<div class="ai-change">${esc(item)}</div>`).join(''):'<div class="ai-change">未产生文件或站点改动</div>';
   if(root===document)scrollAiConversation(true);
 }
-async function waitForAiRun(jobId,run){let badPolls=0;for(let attempt=0;attempt<4000;attempt++){let snapshot=null;let failure=null;try{const response=await fetch(`/api/ai/run/status?id=${encodeURIComponent(jobId)}&ts=${Date.now()}`,{cache:'no-store'});const text=await response.text();try{snapshot=text?JSON.parse(text):null}catch{snapshot=null}if(!response.ok){if(response.status===404)failure=new Error(snapshot?.error||'AI 任务不存在或已过期（可能刚重启过服务）');else if(!snapshot)failure='transient';else failure=new Error(snapshot.error||'无法读取 AI 执行状态')}else if(!snapshot){failure='transient'}}catch{failure='transient'}if(failure==='transient'){/* 公网链路（CF/网关）偶发返回 HTML 错误页或瞬断：单次抖动不该判死整个任务 */if(++badPolls>=10)throw new Error('与任务状态接口连续失联（网络或网关抖动）；任务可能仍在后台执行，刷新页面可尝试恢复进度');await new Promise(resolve=>setTimeout(resolve,1000));continue}if(failure)throw failure;badPolls=0;if(run){run.snapshot=snapshot;if(run.sessionId===aiChatSessionId)renderAiRunProgress(snapshot,run)}if(snapshot.status==='completed'){return snapshot.result?{...snapshot.result,events:snapshot.events||[]}:null}if(snapshot.status==='failed')throw new Error(snapshot.error||'AI 自动任务失败');await new Promise(resolve=>setTimeout(resolve,500))}throw new Error('AI 执行超时，请稍后重试')}
-async function loadAiStatus(){updateAiContextRing();try{const response=await fetch('/api/ai/status',{cache:'no-store'});const status=await response.json();const button=document.querySelector('#aiAdjustBtn');aiServiceConfigured=!!status.configured;aiServiceCatalog={models:status.models||[],efforts:status.efforts||[],currentModel:status.model||'',currentEffort:status.reasoningEffort||''};renderAiModelChoice();button.classList.toggle('ai-unavailable',!status.configured);button.title=status.configured?'发送修改要求':'AI 尚未配置：点击查看配置指引';const notice=document.querySelector('#aiServiceNotice');if(notice){if(status.degraded){notice.hidden=false;notice.innerHTML=`<b>AI 服务暂不可用</b> · ${esc(status.degraded.message||'上游额度或配额异常')}（恢复后此提示自动消失，仍可提交任务重试）`}else notice.hidden=true}}catch{/* 请求时再显示具体错误 */}}
-function saveDraftNow(){clearTimeout(draftSaveTimer);if(!currentConsoleUser)return;try{const snapshot=JSON.stringify(state);void persistDraftSnapshot(snapshot).catch(()=>setSaveState('同步失败',false))}catch{}}
+async function waitForAiRun(jobId,run){let badPolls=0;for(let attempt=0;attempt<4000;attempt++){let snapshot=null;let failure=null;try{const response=await fetch(`/api/ai/run/status?id=${encodeURIComponent(jobId)}&ts=${Date.now()}`,{cache:'no-store'});const text=await response.text();try{snapshot=text?JSON.parse(text):null}catch{snapshot=null}if(!response.ok){if(response.status===404)failure=new Error(snapshot?.error||'AI 任务不存在或已过期（可能刚重启过服务）');else if(!snapshot)failure='transient';else failure=new Error(snapshot.error||'无法读取 AI 执行状态')}else if(!snapshot){failure='transient'}}catch{failure='transient'}if(failure==='transient'){/* 公网链路（CF/网关）偶发返回 HTML 错误页或瞬断：单次抖动不该判死整个任务 */if(++badPolls>=10)throw new Error('与任务状态接口连续失联（网络或网关抖动）；任务可能仍在后台执行，刷新页面可尝试恢复进度');await new Promise(resolve=>setTimeout(resolve,1000));continue}if(failure)throw failure;badPolls=0;if(run){run.snapshot=snapshot;renderAiRunProgress(snapshot,run)}if(snapshot.status==='completed'){return snapshot.result?{...snapshot.result,events:snapshot.events||[]}:null}if(snapshot.status==='failed')throw new Error(snapshot.error||'AI 自动任务失败');await new Promise(resolve=>setTimeout(resolve,500))}throw new Error('AI 执行超时，请稍后重试')}
+async function loadAiStatus(){updateAiContextRing();try{const response=await fetch('/api/ai/status',{cache:'no-store'});const status=await response.json();const button=document.querySelector('#aiAdjustBtn');aiServiceConfigured=!!status.configured;if(Number.isFinite(status.contextWindow)&&status.contextWindow>0)aiContextWindow=status.contextWindow;updateAiContextRing();button.classList.toggle('ai-unavailable',!status.configured);button.title=status.configured?'发送修改要求':'AI 尚未配置：点击查看配置指引';const notice=document.querySelector('#aiServiceNotice');if(notice){if(status.degraded){notice.hidden=false;notice.innerHTML=`<b>AI 服务暂不可用</b> · ${esc(status.degraded.message||'上游额度或配额异常')}（恢复后此提示自动消失，仍可提交任务重试）`}else notice.hidden=true}}catch{/* 请求时再显示具体错误 */}}
+function saveDraftNow(){if(fileSite||fileSiteLoading)return;clearTimeout(draftSaveTimer);if(!currentConsoleUser)return;try{const snapshot=JSON.stringify(state);void persistDraftSnapshot(snapshot).catch(()=>setSaveState('同步失败',false))}catch{}}
 function ackAiRun(jobId){if(!jobId)return;void fetch('/api/ai/run/ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobId})}).catch(()=>{})}
 function applyAiRunResult(payload){
+  if(payload.siteFiles){applySiteFiles(payload.siteFiles);return null}
+  if(fileSite){void reloadSiteFiles().catch(()=>{});return null}
   let stateBackup=null;if(payload.siteReplace)stateBackup=applyAiSiteReplace(payload.siteReplace);const opsBackup=applyAiSiteOperations(payload.siteOperations||[]);return stateBackup||opsBackup;
 }
 function finishAiSummaryTyping(root){
@@ -1068,97 +973,44 @@ function archiveAiRunOutputInto(root){
   if(resultShown)freeze(result);
   freeze(card);
 }
-async function finalizeAiRunOffline(run,errorMessage){
-  // 任务完成时它的会话不在前台：把结果渲染进该会话的缓存 html 并直接落库，绝不动当前视图的 DOM
-  if(!run.sessionId)return;
-  let html=aiSessionHtmlCache.get(run.sessionId);
-  if(html===undefined){
-    try{const payload=await consoleRequest(`/api/ai/sessions/${run.sessionId}`);html=payload.session.messagesHtml||''}catch{html=''}
+const aiSeenCompletions=new Set();
+let aiHistoryPollBusy=false;
+let aiFilesNeedRefresh=false;
+function rememberServerJob(job){
+  const previous=aiRuns.get(job.jobId);
+  aiRuns.set(job.jobId,{id:job.jobId,jobId:job.jobId,mode:job.mode,status:job.status,
+    startedAt:Date.parse(job.startedAt||job.createdAt),snapshot:job,payload:job.result});
+    if(!['queued','running'].includes(job.status)&&!aiSeenCompletions.has(job.jobId)){
+    aiSeenCompletions.add(job.jobId);aiFilesNeedRefresh=true;
   }
-  if(!html)html=AI_CHAT_INITIAL_HTML;
-  const doc=document.createElement('div');doc.innerHTML=html;
-  if(!doc.querySelector('#aiRunCard')){
-    const tpl=document.createElement('div');tpl.innerHTML=AI_CHAT_INITIAL_HTML;
-    ['aiResult','aiRunCard'].forEach(elId=>{const node=tpl.querySelector(`#${elId}`);if(node)doc.append(node)});
-  }
-  if(errorMessage)showAiError(errorMessage,doc);
-  else if(run.payload){renderAiRunResult(run,run.payload,doc)}
-  cacheAiSessionHtml(run.sessionId,doc.innerHTML);
-  try{await persistAiSessionHtml(run.sessionId,doc.innerHTML)}catch{}
-  if(run.sessionId===aiChatSessionId&&!activeRunForSession(run.sessionId))applyAiChatHtml(doc.innerHTML);// 落库期间用户切回了该会话：直接刷新视图
-  renderAiSessionList();
-  showToast(errorMessage?'另一个会话的 AI 任务失败了':'另一个会话的 AI 任务已完成');
 }
 async function resumeAiRuns(){
-  // 任务状态以服务端为准：关掉网页/换设备后重开，从这里找回进行中的进度和没人取走的结果
-  let jobs=[];
-  try{const payload=await consoleRequest('/api/ai/run/active');jobs=payload.jobs||[]}catch{return}
-  if(!Array.isArray(jobs)||!jobs.length)return;
-  for(const job of jobs){
-    if(!job||typeof job.jobId!=='string')continue;
-    const run=newAiRunRecord(typeof job.sessionId==='string'?job.sessionId:'',{});
-    run.jobId=job.jobId;run.resumed=true;run.snapshot={status:job.status,events:job.events||[]};
-    if(job.status==='running')void resumeAiRun(run);
-    else void settleFinishedAiRun(run,job);
-  }
-  updateAiBusy();renderAiSessionList();
-}
-async function resumeAiRun(run){
-  if(!run.sessionId&&aiChatSessionId)run.sessionId=aiChatSessionId;
-  const live=()=>Boolean(run.sessionId)&&run.sessionId===aiChatSessionId;
-  if(live()){renderAiRunProgress(run.snapshot,run);scrollAiConversation()}
-  let stateBackup=null;
+  if(!currentConsoleUser||aiHistoryPollBusy)return;
+  aiHistoryPollBusy=true;
   try{
-    const payload=await waitForAiRun(run.jobId,run);
-    if(!payload){ // 任务已成功完结但结果不在此处（另一页面先取走并 ack / 服务重启后按落库终态恢复）：不是失败，不弹"未能恢复"
-      run.status='completed';ackAiRun(run.jobId);
-      if(live())showToast('此 AI 任务已完成');
-      else await finalizeAiRunOffline(run,null);
-      return;
+    const payload=await consoleRequest('/api/ai/run/active');
+    const listed=new Set((payload.jobs||[]).map(job=>job.jobId));
+    // Another tab may already have acknowledged a job this tab was watching.
+    for(const run of activeAiRuns())if(run.jobId&&!listed.has(run.jobId)){
+      try{rememberServerJob(await consoleRequest(`/api/ai/run/status?id=${encodeURIComponent(run.jobId)}`))}catch{}
     }
-    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);saveDraftNow()});
-    run.status='completed';run.payload=payload;ackAiRun(run.jobId);
-    if(live())renderAiRunResult(run,payload);else await finalizeAiRunOffline(run,null);
-    if(payload.restartRequired)await restartLocalServer();
-    showToast(payload.restartRequired?'AI 已完成修改并重启服务':'页面关闭期间的 AI 任务已完成');
-  }catch(error){
-    run.status='failed';ackAiRun(run.jobId);
-    await withAiApplyLock(()=>{if(stateBackup)restoreState(stateBackup)});
-    const message=`后台 AI 任务未能恢复：${error.message}`;
-    if(live())showAiError(message);else await finalizeAiRunOffline(run,message);
-  }finally{updateAiBusy();updateAiContextRing();renderAiSessionList();if(live())scrollAiConversation()}
+    for(const job of payload.jobs||[]){
+      rememberServerJob(job);
+      if(!['queued','running'].includes(job.status))ackAiRun(job.jobId);
+    }
+    if(aiChatSessionId)await syncAiChatSessionFromServer();
+    if(aiFilesNeedRefresh){aiFilesNeedRefresh=false;try{await reloadSiteFiles()}catch(error){aiFilesNeedRefresh=true;throw error}}
+  }catch{/* Keep the existing transcript during a network outage. */}
+  finally{aiHistoryPollBusy=false;updateAiBusy()}
 }
-async function settleFinishedAiRun(run,job){
-  // 页面不在时跑完的任务：结果（或错误）直接落进对应会话，不用再轮询
-  if(!run.sessionId&&aiChatSessionId)run.sessionId=aiChatSessionId;
-  const live=()=>Boolean(run.sessionId)&&run.sessionId===aiChatSessionId;
-  let stateBackup=null;
-  try{
-    if(job.status!=='completed'||!job.result)throw new Error(job.error||'AI 自动任务失败');
-    const payload={...job.result,events:job.events||[]};
-    run.status='completed';run.payload=payload;
-    let liveFiles={editorReloadNeeded:false,viewerReloaded:false};
-    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);saveDraftNow()});
-    liveFiles=refreshAiChangedFiles(payload.changedFiles||[]);
-    if(live())renderAiRunResult(run,payload);else await finalizeAiRunOffline(run,null);
-    if(payload.restartRequired)await restartLocalServer();
-    showToast('页面关闭期间的 AI 任务已完成');
-    if(liveFiles.editorReloadNeeded)scheduleEditorReload('AI 网站代理已自动修改、验证并刷新编辑器。');
-  }catch(error){
-    run.status='failed';
-    await withAiApplyLock(()=>{if(stateBackup)restoreState(stateBackup)});
-    const message=`页面关闭期间的 AI 任务失败：${error.message}`;
-    if(live())showAiError(message);else await finalizeAiRunOffline(run,message);
-  }finally{
-    ackAiRun(run.jobId);
-    updateAiBusy();updateAiContextRing();renderAiSessionList();if(live())scrollAiConversation();
-  }
-}
+setInterval(()=>{if(currentConsoleUser&&document.visibilityState==='visible')void resumeAiRuns()},1800);
+window.addEventListener('focus',()=>{void resumeAiRuns();if(currentConsoleUser)void reloadSiteFiles().catch(()=>{})});
+window.addEventListener('online',()=>void resumeAiRuns());
+
 function notifyPublishedReload(reason){try{const channel=new BroadcastChannel('alchemyhatchery-live-preview');channel.postMessage({type:'reload',reason,at:Date.now()});channel.close()}catch{}try{localStorage.setItem('alchemyhatchery:published-reload',JSON.stringify({reason,at:Date.now()}))}catch{}}
 function refreshAiChangedFiles(files=[]){
-  const changedStyles=files.filter(name=>['styles.css','mica.css','ai-chat.css'].includes(name));if(changedStyles.length)document.querySelectorAll('link[rel="stylesheet"]').forEach(link=>{const url=new URL(link.href,location.href);if(changedStyles.some(name=>url.pathname.endsWith(`/${name}`))){url.searchParams.set('ai',String(Date.now()));link.href=url.toString()}});
-  const viewerReloaded=files.some(name=>['viewer.html','viewer.js'].includes(name));if(viewerReloaded)notifyPublishedReload('AI 已更新发布站点运行代码');
-  return {editorReloadNeeded:files.some(name=>['index.html','script.js'].includes(name)),viewerReloaded};
+  if(fileSite&&files.length){renderCanvas();notifyPublishedReload('网站文件已更新')}
+  return {editorReloadNeeded:false,viewerReloaded:files.length>0};
 }
 async function restartLocalServer(){
   const response=await fetch('/api/server/restart',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const payload=await response.json();if(!response.ok)throw new Error(payload.error||'本地服务重启失败');
@@ -1179,29 +1031,53 @@ async function consoleRequest(path,options={}){
   if(!response.ok){const error=new Error(payload.error||`请求失败（${response.status}）`);error.status=response.status;throw error}return payload;
 }
 function showAuthGate(message=''){
-  currentConsoleUser=null;aiChatSessionId=null;aiSessionList=[];aiRuns.clear();aiRunQueue.length=0;aiSessionHtmlCache.clear();aiSessionDirty.clear();aiSessionTitles.clear();updateAiBusy();renderAiSessionList();if(window.AIchemyHatcheryAuth){window.AIchemyHatcheryAuth.showGate(message);return}uiShow(document.querySelector('#authGate'));const error=document.querySelector('#authError');error.textContent=message;error.hidden=!message;setSaveState('等待登录',false);
+  currentConsoleUser=null;aiChatSessionId=null;aiSessionHtml='';aiRuns.clear();aiRunQueue.length=0;updateAiBusy();if(window.AIchemyHatcheryAuth){window.AIchemyHatcheryAuth.showGate(message);return}uiShow(document.querySelector('#authGate'));const error=document.querySelector('#authError');error.textContent=message;error.hidden=!message;setSaveState('等待登录',false);
 }
 function updateConsoleAccount(){
   if(!currentConsoleUser)return;const username=currentConsoleUser.username;const initial=username.slice(0,1).toUpperCase();
-  document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#menuUsername').textContent=username;const railName=document.querySelector('#activityAccountName');if(railName)railName.textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPreviewPath').textContent=currentConsoleUser.previewId?`/preview/${currentConsoleUser.previewId}`:'首次预览后生成';document.querySelector('#accountPublishPath').textContent=currentConsoleUser.publishSlug?`${currentConsoleUser.publishSlug}.${currentConsoleUser.publishDomain||'hatchery.mizusumi.com'}`:'未发布';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
+  document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#menuUsername').textContent=username;const railName=document.querySelector('#activityAccountName');if(railName)railName.textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPreviewPath').textContent=currentConsoleUser.previewId?`/preview/${currentConsoleUser.previewId}`:'首次预览后生成';document.querySelector('#accountPublishPath').textContent=currentConsoleUser.publishSlug?new URL(currentConsoleUser.publishUrl||`/pages/${currentConsoleUser.publishSlug}/`,location.origin).href:'未发布';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
 }
 async function enterConsole(user){
-  currentConsoleUser=user;const username=user.username;aiRuns.clear();aiRunQueue.length=0;aiSessionHtmlCache.clear();aiSessionDirty.clear();aiSessionTitles.clear();aiSessionDeleted.clear();updateAiBusy();DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;AI_MODE_KEY=`alchemyhatchery:${username}:ai-mode:v1`;AI_MODEL_KEY=`alchemyhatchery:${username}:ai-model:v1`;
-  let draft=null;try{draft=(await consoleRequest('/api/console/draft')).draft}catch(error){if(error.status===401){showAuthGate('登录已过期，请重新登录');return}showToast(`读取云端草稿失败：${error.message}`)}
-  if(!draft){try{draft=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null')}catch{}}
-  const next=draft?.pages?.length?{...INITIAL_STATE,...draft}:INITIAL_STATE;restoreState(next);ensureForumAccounts();syncEditorAfterAI();historyStack=[JSON.stringify(state)];historyIndex=0;updateHistoryButtons();
-  updateConsoleAccount();loadAiPermissionMode();loadAiModelChoice();uiHide(document.querySelector('#authGate'));setSaveState(draft?'草稿已同步':'新草稿',false);restoreAiReloadUi();void initAiChatSessions();void loadAiStatus();if(!draft)scheduleDraftSave();void resumeAiRuns();
+  currentConsoleUser=user;fileSite=null;fileSiteLoading=true;activeSiteFile='index.html';
+  document.querySelector('#canvasContent').textContent='正在加载网站文件…';
+  const username=user.username;aiRuns.clear();aiRunQueue.length=0;aiSessionHtml='';updateAiBusy();DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;AI_MODE_KEY=`alchemyhatchery:${username}:ai-mode:v1`;
+  // 网站文件与 AI 会话互不依赖，同时发起；逐个串行会让每次网络抖动直接叠加。
+  const loadSiteFiles=(async()=>{
+    try{
+      let info=await consoleRequest('/api/site/files');
+      if(info.format!=='files'){
+        let draft=(await consoleRequest('/api/console/draft')).draft;
+        if(!draft){try{draft=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null')}catch{}}
+        restoreState(draft?.pages?.length?{...INITIAL_STATE,...draft}:INITIAL_STATE);
+        // One-time export of existing visual-editor drafts. Normal authoring never sends page JSON.
+        info=await consoleRequest('/api/site/files',{method:'POST',body:{legacy:draft?.pages?.length?buildLegacyExportPayload(true):null}});
+      }
+      applySiteFiles(info);
+    }catch(error){showToast(`读取网站文件失败：${error.message}`);if(error.status===401){showAuthGate('登录已过期，请重新登录');return}}
+    finally{fileSiteLoading=false}
+  })();
+  const loadAiSessions=initAiChatSessions().then(()=>void resumeAiRuns());
+  // loadAiStatus 已在脚本加载时发起过（/api/ai/status 不依赖登录），这里不再重复一次。
+  updateConsoleAccount();loadAiPermissionMode();uiHide(document.querySelector('#authGate'));restoreAiReloadUi();
+  await Promise.all([loadSiteFiles,loadAiSessions]);
 }
+
 function sessionLabel(userAgent=''){
   const browser=/Edg/i.test(userAgent)?'Edge':/Chrome/i.test(userAgent)?'Chrome':/Firefox/i.test(userAgent)?'Firefox':/Safari/i.test(userAgent)?'Safari':'浏览器';const system=/Windows/i.test(userAgent)?'Windows':/Mac OS/i.test(userAgent)?'macOS':/Android/i.test(userAgent)?'Android':/iPhone|iPad/i.test(userAgent)?'iOS':'未知系统';return `${browser} · ${system}`;
 }
 async function openPasswordSettings(){
   try{const payload=await consoleRequest('/api/auth/sessions');const sessions=(payload.sessions||[]).map(item=>`<div class="security-session${item.current?' current':''}"><div><b>${item.current?'当前会话':sessionLabel(item.userAgent)}</b><small>${item.current?sessionLabel(item.userAgent):`最后活动 ${esc(String(item.lastSeenAt||item.createdAt||'').replace('T',' '))}`}</small></div><span>${item.current?'正在使用':'已登录'}</span></div>`).join('');openModal('账号安全',`<div class="account-security"><header><span class="console-avatar">${esc(currentConsoleUser?.username?.slice(0,1).toUpperCase()||'?')}</span><div><b>${esc(currentConsoleUser?.username||'')}</b><small>${currentConsoleUser?.role==='admin'?'管理员':'普通用户'} · 随机预览地址</small></div></header><section><h3>修改密码</h3><p>修改密码后会注销其他所有设备，当前设备自动换发新会话。</p><form class="account-settings-form" data-console-form="password"><label>当前密码<input name="oldPassword" type="password" autocomplete="current-password" required></label><label>新密码<input name="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label><label>确认新密码<input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label><button>确认修改密码</button></form></section><section><div class="security-title"><div><h3>登录设备</h3><p>${(payload.sessions||[]).length} 个有效会话</p></div><button data-revoke-other-sessions>退出其他设备</button></div><div class="security-sessions">${sessions}</div></section></div>`)}catch(error){showToast(error.message)}
 }
-const fmtTokenCount=value=>Number(value||0).toLocaleString('en-US');
+const fmtTokenCount=value=>value==null?'未知':Number(value).toLocaleString('en-US');
+function renderAiServiceSettings(config){
+  const provider=['deepseek','kimi','glm'].includes(config.provider)?config.provider:'deepseek';
+  const name={deepseek:'DeepSeek',kimi:'Kimi',glm:'GLM'}[provider];
+  const configured=Boolean(config[`${provider}KeySet`]);
+  return `<section class="ai-key-manager"><header><div><small>AI SERVICE</small><h3>AI 服务配置</h3></div><b>${esc(config.providerLabel)}</b></header><div class="ai-key-status"><span>当前模型：${esc(config.model)}</span><span>${name} Key：${configured?`已配置 ${esc(config[`${provider}KeyMask`]||'')}`:'未配置'}</span></div><form class="ai-key-form" data-console-form="ai-service-key" data-key-field="${provider}ApiKey"><input name="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新的 ${name} API Key"><button>保存 Key</button><button type="button" data-ai-key-clear="${provider}"${configured?'':' disabled'}>清除</button></form><p>密钥保存后立即生效，界面仅显示末 4 位。所有会话统一使用当前模型。</p></section>`;
+}
 async function openInviteManager(){
   openModal('账号与注册管理','<div class="invite-empty">正在加载管理后台…</div>');
-  try{const [userPayload,usagePayload,aiConfig,sitesPayload]=await Promise.all([consoleRequest('/api/admin/users'),consoleRequest('/api/admin/ai-usage'),consoleRequest('/api/admin/ai-config'),consoleRequest('/api/admin/sites')]);const users=(userPayload.users||[]).map(item=>{const own=item.username.toLowerCase()===currentConsoleUser?.username?.toLowerCase();const status=item.status==='active'?'正常':'已停用';return `<div class="admin-user-row"><span class="console-avatar">${esc(item.username.slice(0,1).toUpperCase())}</span><div><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${item.role==='admin'?'管理员':'用户'} · ${item.published?'已发布':'未发布'} · ${item.sessionCount} 个会话</small></div><em class="${item.status}">${status}</em>${own?'<i>当前账号</i>':`<button data-user-status="${item.status==='active'?'disabled':'active'}" data-user-name="${esc(item.username)}">${item.status==='active'?'停用':'启用'}</button>`}</div>`}).join('')||'<div class="invite-empty">暂无用户</div>';const usageRows=(usagePayload.usage||[]).map(item=>`<div class="admin-usage-row"><span><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${esc(item.campusId||'')} · ${item.runs} 次任务</small></span><em>${fmtTokenCount(item.dayTokens)}</em><em>${fmtTokenCount(item.weekTokens)}</em><em>${fmtTokenCount(item.totalTokens)}</em><button data-ai-chats="${esc(String(item.userId))}" data-user-name="${esc(item.username)}">记录</button></div>`).join('')||'<div class="invite-empty">还没有 AI 使用记录</div>';const siteRows=(sitesPayload.sites||[]).map(item=>`<div class="admin-site-row"><span class="console-avatar">${esc((item.siteName||item.slug).slice(0,1).toUpperCase())}</span><div><b>${esc(item.siteName||item.slug)}</b><small>${esc(item.owner||'未知')}${item.ownerCampusId?' · '+esc(item.ownerCampusId):''} · 更新于 ${esc(String(item.updatedAt||'').slice(0,10))}</small><small class="admin-site-url">${esc(String(item.publicUrl||'').replace(/^https?:\/\//,''))}</small></div><em class="${item.onDisk===false?'missing':item.listed?'active':'disabled'}">${item.onDisk===false?'文件缺失':item.listed?'已收录':'未收录'}</em><a href="${esc(item.publicUrl)}" target="_blank" rel="noopener">打开 ↗</a></div>`).join('')||'<div class="invite-empty">还没有发布的网站</div>';const totals=usagePayload.totals||{};const kimiStatus=aiConfig.kimiKeySet?`已配置 ${esc(aiConfig.kimiKeyMask)}`:'未配置';const glmStatus=aiConfig.glmKeySet?`已配置 ${esc(aiConfig.glmKeyMask)}`:'未配置';const explicitNote=aiConfig.explicitProvider?`<span>注意：.env 中 MIAODA_LLM=${esc(aiConfig.explicitProvider)} 显式指定了提供方，改动 Key 不会切换当前服务。</span>`:'';const aiKeySection=`<section class="ai-key-manager"><header><div><small>AI SERVICE</small><h3>AI 服务配置</h3></div><b>${esc(aiConfig.providerLabel)}</b></header><div class="ai-key-status"><span>当前生效：${esc(aiConfig.providerLabel)} · 模型 ${esc(aiConfig.model)}</span><span>Kimi Key：${kimiStatus} · GLM Key：${glmStatus}${aiConfig.deepseekKeySet?' · DeepSeek Key：已配置':''}</span>${explicitNote}</div><form class="ai-key-form" data-console-form="ai-key"><input name="kimiApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新的 Kimi API Key（sk-…）"><button>保存 Key</button><button type="button" data-ai-key-clear${aiConfig.kimiKeySet?'':' disabled'}>清除</button></form><form class="ai-key-form" data-console-form="ai-key-glm"><input name="glmApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新的智谱 GLM API Key（open.bigmodel.cn）"><button>保存 GLM Key</button><button type="button" data-ai-key-clear="glm"${aiConfig.glmKeySet?'':' disabled'}>清除</button></form><p>Key 写入服务器 .env 并立即生效；界面只显示末 4 位，完整内容不会回传。未显式指定 MIAODA_LLM 时，Kimi 与 GLM Key 同时存在优先用 Kimi；只想用 GLM 请清除 Kimi Key 或在 .env 设 MIAODA_LLM=glm。</p></section>`;openModal('账号与注册管理',`<div class="admin-console"><section><header><div><small>USERS</small><h3>控制台用户</h3></div><b>${userPayload.total||0}</b></header><div class="admin-user-list">${users}</div></section><section class="ai-usage-manager"><header><div><small>AI TOKENS</small><h3>AI 用量统计</h3></div><button data-ai-chats="" data-user-name="全部用户">全部记录</button></header><p>今日 ${fmtTokenCount(totals.dayTokens)} · 近 7 天 ${fmtTokenCount(totals.weekTokens)} · 累计 ${fmtTokenCount(totals.totalTokens)} tokens</p><div class="admin-usage-head"><span>用户</span><span>今日</span><span>近 7 天</span><span>累计</span><span></span></div><div class="admin-usage-list">${usageRows}</div></section><section class="admin-sites-manager"><header><div><small>PUBLISHED SITES</small><h3>已发布网站</h3></div><a href="/gallery" target="_blank" rel="noopener">Gallery ↗</a></header><div class="admin-site-list">${siteRows}</div></section>${aiKeySection}</div>`)}catch(error){openModal('账号与注册管理',`<div class="invite-empty">${esc(error.message)}</div>`)}
+  try{const [userPayload,usagePayload,aiConfig,sitesPayload]=await Promise.all([consoleRequest('/api/admin/users'),consoleRequest('/api/admin/ai-usage'),consoleRequest('/api/admin/ai-config'),consoleRequest('/api/admin/sites')]);const users=(userPayload.users||[]).map(item=>{const own=item.username.toLowerCase()===currentConsoleUser?.username?.toLowerCase();const status=item.status==='active'?'正常':'已停用';return `<div class="admin-user-row"><span class="console-avatar">${esc(item.username.slice(0,1).toUpperCase())}</span><div><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${item.role==='admin'?'管理员':'用户'} · ${item.published?'已发布':'未发布'} · ${item.sessionCount} 个会话</small></div><em class="${item.status}">${status}</em>${own?'<i>当前账号</i>':`<button data-user-status="${item.status==='active'?'disabled':'active'}" data-user-name="${esc(item.username)}">${item.status==='active'?'停用':'启用'}</button>`}</div>`}).join('')||'<div class="invite-empty">暂无用户</div>';const usageRows=(usagePayload.usage||[]).map(item=>`<div class="admin-usage-row"><span><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${esc(item.campusId||'')} · ${item.runs} 次任务</small></span><em>${fmtTokenCount(item.dayTokens)}</em><em>${fmtTokenCount(item.weekTokens)}</em><em>${fmtTokenCount(item.totalTokens)}</em><button data-ai-chats="${esc(String(item.userId))}" data-user-name="${esc(item.username)}">记录</button></div>`).join('')||'<div class="invite-empty">还没有 AI 使用记录</div>';const siteRows=(sitesPayload.sites||[]).map(item=>`<div class="admin-site-row"><span class="console-avatar">${esc((item.siteName||item.slug).slice(0,1).toUpperCase())}</span><div><b>${esc(item.siteName||item.slug)}</b><small>${esc(item.owner||'未知')}${item.ownerCampusId?' · '+esc(item.ownerCampusId):''} · 更新于 ${esc(String(item.updatedAt||'').slice(0,10))}</small><small class="admin-site-url">${esc(String(item.publicUrl||'').replace(/^https?:\/\//,''))}</small></div><em class="${item.onDisk===false?'missing':item.listed?'active':'disabled'}">${item.onDisk===false?'文件缺失':item.listed?'已收录':'未收录'}</em><a href="${esc(item.publicUrl)}" target="_blank" rel="noopener">打开 ↗</a></div>`).join('')||'<div class="invite-empty">还没有发布的网站</div>';const totals=usagePayload.totals||{};const aiKeySection=renderAiServiceSettings(aiConfig);openModal('账号与注册管理',`<div class="admin-console"><section><header><div><small>USERS</small><h3>控制台用户</h3></div><b>${userPayload.total||0}</b></header><div class="admin-user-list">${users}</div></section><section class="ai-usage-manager"><header><div><small>AI TOKENS</small><h3>AI 用量统计</h3></div><button data-ai-chats="" data-user-name="全部用户">全部记录</button></header><p>今日 ${fmtTokenCount(totals.dayTokens)} · 近 7 天 ${fmtTokenCount(totals.weekTokens)} · 累计 ${fmtTokenCount(totals.totalTokens)} tokens（已知用量；${totals.unknownRuns||0} 次任务用量未知）</p><div class="admin-usage-head"><span>用户</span><span>今日</span><span>近 7 天</span><span>累计</span><span></span></div><div class="admin-usage-list">${usageRows}</div></section><section class="admin-sites-manager"><header><div><small>PUBLISHED SITES</small><h3>已发布网站</h3></div><a href="/gallery" target="_blank" rel="noopener">Gallery ↗</a></header><div class="admin-site-list">${siteRows}</div></section>${aiKeySection}</div>`)}catch(error){openModal('账号与注册管理',`<div class="invite-empty">${esc(error.message)}</div>`)}
 }
 async function openAiChats(userId,username){
   try{const payload=await consoleRequest(`/api/admin/ai-chats${userId?`?userId=${encodeURIComponent(userId)}`:''}`);const rows=(payload.chats||[]).map(item=>{const time=esc(String(item.createdAt||'').replace('T',' ').slice(0,19));const atts=(item.attachments||[]).map(att=>`<i>${att.kind==='image'?'图片':'附件'} · ${esc(att.name||'')}</i>`).join('');return `<article class="ai-chat-item"><header><b>${esc(item.username)}</b><span>${time} · ${esc(item.model||item.provider||'AI')} · ${fmtTokenCount(item.totalTokens)} tokens（入 ${fmtTokenCount(item.inputTokens)} / 出 ${fmtTokenCount(item.outputTokens)}）· ${item.status==='completed'?'完成':'失败'}</span></header><p>${esc(item.prompt)}</p>${atts?`<div class="ai-chat-atts">${atts}</div>`:''}</article>`}).join('')||'<div class="invite-empty">暂无聊天记录</div>';openModal(`AI 记录 · ${username||'全部用户'}`,`<div class="ai-chat-manager"><button class="ai-chat-back" data-ai-chats-back>← 返回管理后台</button><div class="ai-chat-list">${rows}</div></div>`)}catch(error){showToast(error.message)}
@@ -1210,7 +1086,7 @@ async function logoutConsole(){
   try{await persistDraftSnapshot(JSON.stringify(state))}catch{}uiHide(document.querySelector('#consoleAccountMenu'));if(window.AIchemyHatcheryAuth)await window.AIchemyHatcheryAuth.logout();else showAuthGate();showToast('已退出控制台账号');
 }
 document.querySelector('#aiAdjustBtn').addEventListener('click',async()=>{
-  if(!aiServiceConfigured){showToast('AI 尚未配置：请管理员在「管理后台 → AI 服务配置」中添加 Kimi API Key');return}
+  if(!aiServiceConfigured){showToast('AI 尚未配置：请管理员配置 DeepSeek API Key');return}
   const promptInput=document.querySelector('#aiPrompt');const typedPrompt=promptInput.value.trim();if(!typedPrompt&&!aiAttachments.length){showToast('输入修改要求，或先添加附件');promptInput.focus();return}
   const prompt=typedPrompt||'请根据附件内容调整网站。';const requestAttachments=aiAttachments.map(item=>({...item}));promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();
   await startAiRun(prompt,requestAttachments);
@@ -1231,78 +1107,55 @@ function archiveAiRunOutput(){
 }
 async function startAiRun(prompt,requestAttachments=[],chosenPresets=[],presetSnippets=[],runOptions={}){
   if(!currentConsoleUser)return;
-  const sessionId=ensureAiSessionId();
+  if(!fileSite||fileSiteLoading){showToast('网站文件尚未加载，请稍后重试');return}
   const shownText=aiRunShownText(prompt,chosenPresets,runOptions.displayText||'');
-  const item={prompt,shownText,attachments:requestAttachments,chosenPresets,presetSnippets,mode:runOptions.mode||aiPermissionMode,history:aiChatHistoryForContext()};
-  if(anyAiRunActive()||aiRunQueue.length){enqueueAiRun(sessionId,item);return}
-  const run=newAiRunRecord(sessionId,item);
+  // 会话唯一，记录不再携带会话 id；服务端受理后回填真实 jobId。
+  const run=newAiRunRecord({prompt,shownText,attachments:requestAttachments,chosenPresets,presetSnippets,
+    mode:runOptions.mode||aiPermissionMode});
+  run.requestId=newAiSessionId();
   await executeAiRun(run);
 }
 async function executeAiRun(run){
-  updateAiBusy();
-  const live=()=>run.sessionId===aiChatSessionId;
-  if(!aiSessionTitles.has(run.sessionId))aiSessionTitles.set(run.sessionId,run.shownText.slice(0,30)||'新聊天');
-  if(live()){
-    archiveAiRunOutput();
-    if(!run.messageAppended)appendAiChatMessage('user',run.shownText,run.attachments);
-    const messages=document.querySelector('#aiChatMessages');const result=document.querySelector('#aiResult');const card=document.querySelector('#aiRunCard');
-    if(messages&&result&&card)messages.append(result,card);
-    if(result){result.hidden=true;result.classList.remove('error')}
-    renderAiRunProgress(run.snapshot,run);
-    void saveAiChatSession();// 用户消息立即落库：任务期间的防抖放宽到 2.5s，中途刷新不能把消息弄丢
-    scrollAiConversation();
-  }else{
-    // 离线启动（排队任务轮到执行时已切走）：先在该会话的缓存 html 里固化上一轮输出、重置卡片
-    const html=aiSessionHtmlCache.get(run.sessionId);
-    if(html!==undefined){
-      const doc=document.createElement('div');doc.innerHTML=html;
-      archiveAiRunOutputInto(doc);
-      const staleResult=doc.querySelector('#aiResult');if(staleResult){staleResult.hidden=true;staleResult.classList.remove('error')}
-      renderAiRunProgress(run.snapshot,run,doc);
-      doc.querySelectorAll('.ai-queue-tag').forEach(tag=>{tag.textContent='执行中'});
-      cacheAiSessionHtml(run.sessionId,doc.innerHTML);
-      void persistAiSessionHtml(run.sessionId,doc.innerHTML).catch(()=>{});
-    }
-  }
-  let payload=null;let stateBackup=null;
+  const request={prompt:run.prompt,mode:run.mode,
+    attachments:run.attachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),
+    context:{activeFile:activeSiteFile},includeSite:true,chosenPresets:run.chosenPresets,presetSnippets:run.presetSnippets};
+  const pendingKey=`alchemyhatchery:${currentConsoleUser.id}:pending-ai-request`,serialized=JSON.stringify(request);
   try{
-    let started=null;let gatewayFails=0;
-    for(let attempt=0;;attempt++){
-      let response=null;let startText='';
+    const pending=JSON.parse(sessionStorage.getItem(pendingKey)||'null');
+    if(pending?.request===serialized)run.requestId=pending.id;
+    sessionStorage.setItem(pendingKey,JSON.stringify({id:run.requestId,request:serialized}));
+  }catch{}
+  const body=JSON.stringify({...request,requestId:run.requestId});
+  appendAiChatMessage('user',run.shownText,run.attachments);scrollAiConversation(true)
+  updateAiBusy();
+  try{
+    let job;
+    for(let attempt=0;attempt<4;attempt++){
       try{
-        response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:run.prompt,sessionId:run.sessionId,mode:run.mode,model:aiModelChoice.model,reasoningEffort:aiModelChoice.effort,attachments:run.attachments.map(({name,type,size,kind,content})=>({name,type,size,kind,content})),context:aiSafeSnapshot(),includeSite:true,includeSource:true,chosenPresets:run.chosenPresets,presetSnippets:run.presetSnippets,history:run.history||[]})});
-        startText=await response.text();
-      }catch{/* 部署重启/网络抖动时连接会被直接拒绝，按网关瞬时故障走退避重试 */}
-      try{started=startText?JSON.parse(startText):null}catch{/* 网关瞬时故障会回 HTML 错误页 */}
-      if(response&&response.status===409&&started?.busy&&started.jobId&&attempt<200){try{await waitForAiRun(started.jobId,null)}catch{/* 挡路的任务已被发起页取走结果（ack 后移除）或网络抖动：直接重试发送即可 */}continue}
-      if(!started){
-        // CF 边缘在 origin 不可达时回 HTML 错误页（部署重启窗口/隧道抖动）：退避重试几次，都失败才报错
-        gatewayFails++;
-        if(gatewayFails<=4){await new Promise(resolve=>setTimeout(resolve,Math.min(1500*Math.pow(2,gatewayFails-1),12000)));continue}
-        throw new Error('网关返回了无效响应，任务未能启动；请稍后重试');
+        const response=await fetch('/api/ai/run?async=1',{method:'POST',headers:{'Content-Type':'application/json'},body,
+          keepalive:new TextEncoder().encode(body).length<60000});
+        const payload=await response.json();
+        if(!response.ok){const error=new Error(payload.error||'请求未被接受');if(response.status<500)error.status=response.status;throw error}
+        job=payload;break;
+      }catch(error){
+        if(error.status||attempt===3)throw error;
+        await new Promise(resolve=>setTimeout(resolve,1000*(attempt+1)));
       }
-      if(!response.ok)throw new Error(started.error||'AI 自动任务启动失败');
-      break;
     }
-    const jobId=started.jobId||null;if(jobId)run.jobId=jobId;payload=jobId?await waitForAiRun(jobId,run):started;
-    run.status='completed';run.payload=payload;ackAiRun(run.jobId);
-    await withAiApplyLock(async()=>{stateBackup=applyAiRunResult(payload);saveDraftNow()});
-    const liveFiles=refreshAiChangedFiles(payload.changedFiles||[]);
-    if(live())renderAiRunResult(run,payload);else await finalizeAiRunOffline(run,null);
-    if(payload.restartRequired){const button=document.querySelector('#aiAdjustBtn');button.querySelector('b').textContent='重启中…';await restartLocalServer()}
-    if(liveFiles.editorReloadNeeded){scheduleEditorReload('AI 网站代理已自动修改、验证并刷新编辑器。')}else showToast(payload.restartRequired?'AI 已完成修改并重启服务':(live()?'AI 已自动完成并验证网站修改':'另一个会话的 AI 任务已完成'));
+    aiRuns.delete(run.id);rememberServerJob(job);
+    try{if(JSON.parse(sessionStorage.getItem(pendingKey)||'null')?.id===run.requestId)sessionStorage.removeItem(pendingKey)}catch{}
+    await syncAiChatSessionFromServer();
+    showToast(job.status==='queued'?'已在服务器排队，关闭页面后仍会继续':'请求已受理');
   }catch(error){
-    run.status='failed';ackAiRun(run.jobId);
-    await withAiApplyLock(()=>{if(stateBackup)restoreState(stateBackup)});if(payload?.undoAvailable){try{await fetch('/api/ai/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proposalId:payload.runId})})}catch{}}const failText=String(error.message||'');
-    const message=failText.includes('配额已用尽')?failText:`自动执行失败，修改已回滚：${failText}`;
-    if(live())showAiError(message);else await finalizeAiRunOffline(run,message);
-    loadAiStatus();
-  }finally{
-    updateAiBusy();updateAiContextRing();renderAiSessionList();if(live())scrollAiConversation();
-    const next=aiRunQueue.shift();
-    if(next)runQueuedAiTask(next.sessionId,next);
-  }
+    aiRuns.delete(run.id);
+    if(error.status)try{sessionStorage.removeItem(pendingKey)}catch{}
+    showToast(error.status?error.message:'暂时无法确认请求是否受理，请恢复网络后查看该会话历史');
+    if(!document.querySelector('#aiPrompt').value){
+      document.querySelector('#aiPrompt').value=run.prompt;
+    }
+  }finally{updateAiBusy();void resumeAiRuns()}
 }
+
 const TEMPLATE_GROUPS=[
   {title:'页面结构',en:'STRUCTURE',items:['nav','hero','footer','cta']},
   {title:'内容展示',en:'CONTENT',items:['projects','blog','gallery','stats','team','timeline']},
@@ -1380,7 +1233,7 @@ async function runSecurityChecks(){
 }
 document.querySelector('#securityRunBtn').addEventListener('click',()=>void runSecurityChecks());
 let buildingPreviewHtml=false;
-function buildPublishPayload(preview=false){
+function buildLegacyExportPayload(preview=false){
   ensureForumAccounts();ensureAllPagesCode();
   const previousPage=state.activePageId,previousAccountState=previewDB.accountLoggedIn;previewDB.accountLoggedIn=false;buildingPreviewHtml=preview;
   const pages=state.pages.map(page=>{state.activePageId=page.id;return {id:page.id,name:page.name,path:pageFullPath(page),parentId:page.parentId,kind:page.kind,html:isolatePageCode(page.code)+floatingObjectLayer(page,false)}});
@@ -1388,44 +1241,35 @@ function buildPublishPayload(preview=false){
 }
 // 预览持续在后台更新：已有 previewId 时点开即是当前内容，再后台补一次最新推送；
 // 首次使用还没有 previewId，走一次即时生成拿到地址
-document.querySelector('#previewSiteBtn').addEventListener('click',async()=>{
-  const button=document.querySelector('#previewSiteBtn');
-  if(currentConsoleUser?.previewId){
-    window.open(`/preview/${currentConsoleUser.previewId}`,'_blank');
-    void pushPreviewSnapshot(true);
-    return;
-  }
-  const popup=window.open('about:blank','_blank');button.disabled=true;button.firstChild.textContent='生成中 ';
-  try{
-    await persistDraftSnapshot(JSON.stringify(state));
-    const payload=await pushPreviewSnapshot(true);
-    if(!payload)throw new Error('预览生成失败，请重试');
-    if(popup)popup.location.replace(payload.url);else window.open(payload.url,'_blank');
-    showToast('预览已开启，之后编辑会自动实时更新');
-  }catch(error){popup?.close();if(error.status===401)showAuthGate('登录已过期，请重新登录');showToast(`预览失败：${error.message}`)}
-  finally{button.disabled=false;button.firstChild.textContent='预览 '}
+// 已发布：预览按钮直接打开公开地址（xxx.aichemy.club）；未发布：仍打开草稿预览
+document.querySelector('#previewSiteBtn').addEventListener('click',()=>{
+  const publishedSlug=String(currentConsoleUser?.publishSlug||'');
+  if(publishedSlug){window.open(userPublishAddress(publishedSlug),'_blank','noopener');return}
+  if(!fileSite){showToast('网站文件尚未加载，请刷新后重试');return}
+  window.open(siteFilePreviewUrl(),'_blank','noopener');
 });
 function siteAdminCredentialMarkup(admin){return `<div class="site-admin-credential"><small>本站独立管理员 · 仅显示这一次</small><b>${esc(admin.username)}</b><code>${esc(admin.password)}</code><button type="button" data-modal-action="copy" data-copy="用户名：${esc(admin.username)}\n密码：${esc(admin.password)}">复制管理员凭据</button><p>请登录发布网站后妥善保管。它不等于炼丹社Hatchery控制台账号，也不能登录其他网站。</p></div>`}
+function userPublishAddress(slug){
+  return currentConsoleUser?.publishSubdomainsEnabled?`https://${slug}.${currentConsoleUser.publishDomain}/`:`${location.origin}/pages/${slug}/`;
+}
 function openPublishModal(){
   if(!currentConsoleUser){showAuthGate('请先登录');return}
   const current=String(currentConsoleUser.publishSlug||'');
-  const publishDomain=String(currentConsoleUser.publishDomain||'hatchery.mizusumi.com');
   const listed=true;// 每次打开发布弹窗都默认勾选收录进 Gallery；取消勾选仅对当次发布生效
-  openModal('发布网站',`<form class="account-settings-form publish-form" data-console-form="publish"><p>输入发布路径，网站将发布在 <b class="publish-domain" data-publish-domain>${esc(current||'xxx')}.${esc(publishDomain)}</b>。</p><label>发布路径<input name="slug" required minlength="3" maxlength="32" pattern="[a-z0-9](-?[a-z0-9])+" placeholder="例如 campus-news" value="${esc(current)}" autocomplete="off" spellcheck="false"><small>3–32 位小写字母、数字或短横线；已被他人占用的路径不能取。</small></label>${current?`<p class="publish-warning" data-publish-warning hidden>更改路径后，旧地址 <b>${esc(current)}.${esc(publishDomain)}</b> 的页面（含论坛、成员账号数据）会被删除。</p>`:''}<div class="publish-gallery-opt"><label><input name="listed" type="checkbox"${listed?' checked':''}><span>收录进 Hatchery Gallery</span></label><small>收录后公开展示在 <a href="/gallery" target="_blank" rel="noopener">/gallery</a>；取消勾选不影响网站访问，只是不出现在收录页。</small></div><button>确认发布</button></form>`);
+  openModal('发布网站',`<form class="account-settings-form publish-form" data-console-form="publish"><p>输入发布路径，网站将发布在 <b class="publish-domain" data-publish-domain>${esc(userPublishAddress(current||'xxx'))}</b>。</p><label>发布路径<input name="slug" required minlength="3" maxlength="32" pattern="[a-z0-9](-?[a-z0-9])+" placeholder="例如 campus-news" value="${esc(current)}" autocomplete="off" spellcheck="false"><small>3–32 位小写字母、数字或短横线；已被他人占用的路径不能取。</small></label>${current?`<p class="publish-warning" data-publish-warning hidden>更改路径后，旧地址 <b>${esc(userPublishAddress(current))}</b> 将停止使用，网站文件与成员数据会保留。</p>`:''}<div class="publish-gallery-opt"><label><input name="listed" type="checkbox"${listed?' checked':''}><span>收录进 Hatchery Gallery</span></label><small>收录后公开展示在 <a href="/gallery" target="_blank" rel="noopener">/gallery</a>；取消勾选不影响网站访问，只是不出现在收录页。</small></div><button>确认发布</button></form>`);
   const form=document.querySelector('#previewModal [data-console-form="publish"]');if(!form)return;const input=form.elements.slug,domain=form.querySelector('[data-publish-domain]'),warning=form.querySelector('[data-publish-warning]');
-  const sync=()=>{const value=input.value.trim().toLowerCase();if(input.value!==value)input.value=value;if(domain)domain.textContent=`${value||'xxx'}.${publishDomain}`;if(warning)warning.hidden=!value||value===current};
+  const sync=()=>{const value=input.value.trim().toLowerCase();if(input.value!==value)input.value=value;if(domain)domain.textContent=userPublishAddress(value||'xxx');if(warning)warning.hidden=!value||value===current};
   input.addEventListener('input',sync);sync();input.focus();
 }
 async function submitPublish(slug,listed=true){
-  await persistDraftSnapshot(JSON.stringify(state));
-  await new Promise(resolve=>setTimeout(resolve,40));// 打包整站是同步计算，先让转圈动画绘制出来
-  const payload=await consoleRequest('/api/publish',{method:'POST',body:{...buildPublishPayload(),slug,listed}});
-  currentConsoleUser.publishSlug=payload.slug;currentConsoleUser.publishListed=listed;updateConsoleAccount();notifyPublishedReload('站点已重新发布');
+  if(!fileSite)throw new Error('网站文件尚未加载');
+  const payload=await consoleRequest('/api/publish',{method:'POST',body:{siteName:fileSite.metadata.siteName,description:fileSite.metadata.description,slug,listed}});
+  applySiteFiles(payload.siteFiles);currentConsoleUser.publishListed=listed;updateConsoleAccount();notifyPublishedReload('站点地址已更新');
   const credential=payload.siteAdmin?siteAdminCredentialMarkup(payload.siteAdmin):payload.accountEnabled?'<div class="site-account-existing"><p>本站独立账号数据已保留，重新发布不会覆盖用户和登录密码。</p><button type="button" data-site-account-reset>忘记站长密码？重置密码</button></div>':'';
-  const replaced=payload.replacedSlug?`<p class="publish-warning">旧地址 ${esc(payload.replacedSlug)}.${esc(currentConsoleUser.publishDomain||'hatchery.mizusumi.com')} 的页面已删除。</p>`:'';
-  const publicUrl=payload.publicUrl||payload.url;
+  const publicUrl=payload.publicUrl?new URL(payload.publicUrl,location.origin).href:new URL(payload.url,location.origin).href;
+  const replaced=payload.replacedSlug?`<p class="publish-warning">旧地址 ${esc(userPublishAddress(payload.replacedSlug))} 已停用，网站文件和成员数据已迁移到新地址。</p>`:'';
   const galleryNote=listed?'<p class="publish-gallery-note">已收录进 <a href="/gallery" target="_blank" rel="noopener">Hatchery Gallery ↗</a>，其他同学能在收录页看到它。</p>':'<p class="publish-gallery-note">本次未收录进 Gallery；下次发布时勾选「收录进 Hatchery Gallery」即可出现在收录页。</p>';
-  openModal('发布成功',`<p>网站已发布到 <b>${esc(publicUrl)}</b>，已经打开的发布页面会自动刷新。</p>${galleryNote}${replaced}${credential}<a class="modal-action" href="${esc(publicUrl)}" target="_blank">打开 ${esc(publicUrl)} ↗</a>`);
+  openModal('发布成功',`<p>网站已发布在 <b>${esc(publicUrl)}</b>。此后 AI 保存文件会直接更新网站。</p><a class="modal-action" href="${esc(publicUrl)}" target="_blank" rel="noopener">打开 ${esc(publicUrl)} ↗</a>${galleryNote}${replaced}${credential}`);
 }
 document.querySelector('#publishBtn').addEventListener('click',openPublishModal);
 document.querySelector('#consoleAccountBtn').addEventListener('click',event=>{event.stopPropagation();const menu=document.querySelector('#consoleAccountMenu');const opening=menu.hidden||menu.classList.contains('is-closing');if(opening)uiShow(menu);else uiHide(menu);document.querySelector('#consoleAccountBtn').setAttribute('aria-expanded',String(opening))});
@@ -1433,12 +1277,12 @@ document.querySelector('#consoleAccountMenu').addEventListener('click',event=>ev
 document.querySelector('#consoleAccountAction').addEventListener('click',openPasswordSettings);
 document.querySelector('#inviteManagerBtn').addEventListener('click',()=>void openInviteManager());
 document.querySelector('#consoleLogoutBtn').addEventListener('click',()=>void logoutConsole());
-document.querySelector('#previewModal').addEventListener('submit',event=>{const form=event.target.closest('[data-console-form]');if(!form)return;event.preventDefault();const data=new FormData(form);const button=form.querySelector('button');button.disabled=true;button.classList.add('is-loading');void(async()=>{try{if(form.dataset.consoleForm==='password'){const next=String(data.get('newPassword')||'');if(next!==String(data.get('confirmPassword')||''))throw new Error('两次输入的新密码不一致');await consoleRequest('/api/auth/change-password',{method:'POST',body:{oldPassword:String(data.get('oldPassword')||''),newPassword:next}});closeModal();showToast('密码已修改，其他设备的会话已退出')}else if(form.dataset.consoleForm==='ai-key'){const key=String(data.get('kimiApiKey')||'').trim();if(!key)throw new Error('请输入 Kimi API Key');await consoleRequest('/api/admin/ai-config',{method:'POST',body:{kimiApiKey:key}});showToast('Kimi Key 已保存并生效');void loadAiStatus();await openInviteManager()}else if(form.dataset.consoleForm==='ai-key-glm'){const key=String(data.get('glmApiKey')||'').trim();if(!key)throw new Error('请输入智谱 GLM API Key');await consoleRequest('/api/admin/ai-config',{method:'POST',body:{glmApiKey:key}});showToast('GLM Key 已保存并生效');void loadAiStatus();await openInviteManager()}else if(form.dataset.consoleForm==='publish'){await submitPublish(String(data.get('slug')||'').trim().toLowerCase(), data.get('listed')==='on')}}catch(error){showToast(error.message)}finally{button.disabled=false;button.classList.remove('is-loading')}})()});
-document.querySelector('#previewModal').addEventListener('click',event=>{const aiChats=event.target.closest('[data-ai-chats]');if(aiChats){void openAiChats(aiChats.dataset.aiChats||'',aiChats.dataset.userName||'');return}if(event.target.closest('[data-ai-chats-back]')){void openInviteManager();return}const otherSessions=event.target.closest('[data-revoke-other-sessions]');if(otherSessions){otherSessions.disabled=true;void consoleRequest('/api/auth/sessions/revoke-others',{method:'POST',body:{}}).then(payload=>{showToast(`已退出其他设备（${payload.removed} 个会话）`);return openPasswordSettings()}).catch(error=>{otherSessions.disabled=false;showToast(error.message)});return}const userStatus=event.target.closest('[data-user-status]');if(userStatus){const verb=userStatus.dataset.userStatus==='disabled'?'停用':'启用';if(!window.confirm(`确认${verb}用户 ${userStatus.dataset.userName}？`))return;userStatus.disabled=true;void consoleRequest('/api/admin/users/status',{method:'POST',body:{username:userStatus.dataset.userName,status:userStatus.dataset.userStatus}}).then(()=>{showToast(`已${verb}用户`);return openInviteManager()}).catch(error=>{userStatus.disabled=false;showToast(error.message)});return}const aiKeyClear=event.target.closest('[data-ai-key-clear]');if(aiKeyClear){const isGlm=aiKeyClear.dataset.aiKeyClear==='glm';if(!window.confirm(isGlm?'确认清除服务器上的智谱 GLM API Key？':'确认清除服务器上的 Kimi API Key？若未配置 DeepSeek Key，AI 服务将不可用。'))return;aiKeyClear.disabled=true;void consoleRequest('/api/admin/ai-config',{method:'POST',body:isGlm?{glmApiKey:''}:{kimiApiKey:''}}).then(()=>{showToast(isGlm?'已清除 GLM Key':'已清除 Kimi Key');void loadAiStatus();return openInviteManager()}).catch(error=>{aiKeyClear.disabled=false;showToast(error.message)});return}const reset=event.target.closest('[data-site-account-reset]');if(reset){if(!window.confirm('重置后，原站长密码会立即失效。确认继续？'))return;reset.disabled=true;void consoleRequest('/api/site-account/reset-owner',{method:'POST',body:{}}).then(payload=>{openModal('管理员密码已重置',siteAdminCredentialMarkup(payload.siteAdmin));showToast('本站管理员密码已重置')}).catch(error=>{reset.disabled=false;showToast(error.message)});return}const modalCopy=event.target.closest('[data-modal-action="copy"]');if(modalCopy){void navigator.clipboard?.writeText(modalCopy.dataset.copy||'');showToast('已复制本站管理员凭据');return}});
+document.querySelector('#previewModal').addEventListener('submit',event=>{const form=event.target.closest('[data-console-form]');if(!form)return;event.preventDefault();const data=new FormData(form);const button=form.querySelector('button');button.disabled=true;button.classList.add('is-loading');void(async()=>{try{if(form.dataset.consoleForm==='password'){const next=String(data.get('newPassword')||'');if(next!==String(data.get('confirmPassword')||''))throw new Error('两次输入的新密码不一致');await consoleRequest('/api/auth/change-password',{method:'POST',body:{oldPassword:String(data.get('oldPassword')||''),newPassword:next}});closeModal();showToast('密码已修改，其他设备的会话已退出')}else if(form.dataset.consoleForm==='ai-service-key'){const key=String(data.get('apiKey')||'').trim();if(!key)throw new Error('请输入 API Key');await consoleRequest('/api/admin/ai-config',{method:'POST',body:{[form.dataset.keyField]:key}});showToast('API Key 已保存');void loadAiStatus();await openInviteManager()}else if(form.dataset.consoleForm==='publish'){await submitPublish(String(data.get('slug')||'').trim().toLowerCase(), data.get('listed')==='on')}}catch(error){showToast(error.message)}finally{button.disabled=false;button.classList.remove('is-loading')}})()});
+document.querySelector('#previewModal').addEventListener('click',event=>{const aiChats=event.target.closest('[data-ai-chats]');if(aiChats){void openAiChats(aiChats.dataset.aiChats||'',aiChats.dataset.userName||'');return}if(event.target.closest('[data-ai-chats-back]')){void openInviteManager();return}const otherSessions=event.target.closest('[data-revoke-other-sessions]');if(otherSessions){otherSessions.disabled=true;void consoleRequest('/api/auth/sessions/revoke-others',{method:'POST',body:{}}).then(payload=>{showToast(`已退出其他设备（${payload.removed} 个会话）`);return openPasswordSettings()}).catch(error=>{otherSessions.disabled=false;showToast(error.message)});return}const userStatus=event.target.closest('[data-user-status]');if(userStatus){const verb=userStatus.dataset.userStatus==='disabled'?'停用':'启用';if(!window.confirm(`确认${verb}用户 ${userStatus.dataset.userName}？`))return;userStatus.disabled=true;void consoleRequest('/api/admin/users/status',{method:'POST',body:{username:userStatus.dataset.userName,status:userStatus.dataset.userStatus}}).then(()=>{showToast(`已${verb}用户`);return openInviteManager()}).catch(error=>{userStatus.disabled=false;showToast(error.message)});return}const aiKeyClear=event.target.closest('[data-ai-key-clear]');if(aiKeyClear){const provider=aiKeyClear.dataset.aiKeyClear||'kimi';const name={deepseek:'DeepSeek',kimi:'Kimi',glm:'GLM'}[provider];if(!name||!window.confirm(`确认清除服务器上的 ${name} API Key？清除后当前 AI 服务可能不可用。`))return;aiKeyClear.disabled=true;void consoleRequest('/api/admin/ai-config',{method:'POST',body:{[`${provider}ApiKey`]:''}}).then(()=>{showToast(`已清除 ${name} Key`);void loadAiStatus();return openInviteManager()}).catch(error=>{aiKeyClear.disabled=false;showToast(error.message)});return}const reset=event.target.closest('[data-site-account-reset]');if(reset){if(!window.confirm('重置后，原站长密码会立即失效。确认继续？'))return;reset.disabled=true;void consoleRequest('/api/site-account/reset-owner',{method:'POST',body:{}}).then(payload=>{openModal('管理员密码已重置',siteAdminCredentialMarkup(payload.siteAdmin));showToast('本站管理员密码已重置')}).catch(error=>{reset.disabled=false;showToast(error.message)});return}const modalCopy=event.target.closest('[data-modal-action="copy"]');if(modalCopy){void navigator.clipboard?.writeText(modalCopy.dataset.copy||'');showToast('已复制本站管理员凭据');return}});
 document.querySelectorAll('[data-context-action]').forEach(button=>button.addEventListener('click',()=>{const id=contextElementId;if(!id)return;const action=button.dataset.contextAction;hideElementContext();if(action==='edit')openElementEditor(id)}));document.addEventListener('click',event=>{if(!event.target.closest('#elementContextMenu'))hideElementContext()});document.addEventListener('scroll',hideElementContext,true);window.addEventListener('resize',hideElementContext);
 document.addEventListener('click',()=>{const menu=document.querySelector('#consoleAccountMenu');if(menu&&!menu.hidden)uiHide(menu);document.querySelector('#consoleAccountBtn').setAttribute('aria-expanded','false')});
 
 bindCanvasObjectChrome();renderPages();renderCanvas();
 window.addEventListener('alchemyhatchery:authenticated',event=>void enterConsole(event.detail.user));
-window.addEventListener('alchemyhatchery:logged-out',()=>{currentConsoleUser=null;setSaveState('等待登录',false)});
+window.addEventListener('alchemyhatchery:logged-out',()=>{fileSite=null;currentConsoleUser=null;setSaveState('等待登录',false)});
 window.addEventListener('alchemyhatchery:toast',event=>showToast(event.detail.message));
