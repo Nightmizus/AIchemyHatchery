@@ -80,7 +80,7 @@ class FakeConn:
 
 
 @contextmanager
-def fake_neon_db():
+def fake_neon_db(autocommit=False):
     yield FakeConn()
 
 
@@ -395,4 +395,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit('旧内存队列测试器已停用。请运行 scripts/ai_jobs_tests.py 和 scripts/ai_browser_regressions.py；它们使用隔离 PostgreSQL，不调用真实模型。')

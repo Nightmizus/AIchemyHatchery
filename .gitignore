@@ -9,6 +9,10 @@
 published/
 sites/
 .ai-backups/
+.ai-job-results/
+# Raw session exports and test captures can contain credentials or private conversations.
+codex-session-*.md
+output/
 
 __pycache__/
 *.py[cod]

@@ -132,7 +132,7 @@ class FakeConn:
 
 
 @contextmanager
-def fake_neon_db():
+def fake_neon_db(autocommit=False):
     yield FakeConn()
 
 

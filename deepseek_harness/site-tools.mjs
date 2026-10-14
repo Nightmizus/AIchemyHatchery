@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, lstat, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -19,30 +19,40 @@ function objectArgs(value) {
 
 // The agent may only touch files inside the current website's own folder.
 // Everything else on the host is out of reach by construction.
-function sitePath(value) {
+async function sitePath(value) {
   if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\')) {
     throw new Error('path must be a relative POSIX path inside the website folder')
   }
-  if (value.startsWith('/') || /^[A-Za-z]:/.test(value)) {
+  if (value.startsWith('/') || /^[A-Za-z]:/.test(value) || value.split('/').some(p => !p || p === '.' || p === '..')) {
     throw new Error('absolute paths are outside the website folder')
   }
+  if (value.startsWith('site.json/')) throw new Error('site.json is a metadata file, not a directory')
   const target = resolve(workspace, value)
   if (target !== workspace && !target.startsWith(`${workspace}${sep}`)) {
     throw new Error('path is outside the website folder')
   }
+  const rootInfo = await lstat(workspace)
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error('invalid website root')
+  let current = workspace
+  for (const part of value.split('/')) {
+    current = join(current, part)
+    const info = await lstat(current).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+    if (info?.isSymbolicLink() || (info?.isFile() && info.nlink !== 1)) throw new Error('links are outside website permissions')
+  }
   return target
 }
 
-async function listSiteFiles(directory = workspace, prefix = '', limit = { count: 200 }) {
+async function listSiteFiles(directory = workspace, prefix = '', limit = { count: 2000 }) {
   if (limit.count <= 0) return []
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => [])
   const files = []
-  for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.name.startsWith('.hatchery-write-')) continue
     const relative = prefix ? `${prefix}/${entry.name}` : entry.name
     if (entry.isDirectory()) {
       files.push(...await listSiteFiles(join(directory, entry.name), relative, limit))
     } else if (entry.isFile()) {
+      try { await sitePath(relative) } catch { continue }
       files.push(relative)
       limit.count -= 1
     }
@@ -52,7 +62,7 @@ async function listSiteFiles(directory = workspace, prefix = '', limit = { count
 }
 
 function localUrl(value) {
-  const path = typeof value === 'string' && value.trim() ? value.trim() : '/'
+  const path = typeof value === 'string' && value.trim() ? value.trim() : (process.env.MIAODA_PREVIEW_PATH || '/')
   if (!path.startsWith('/') || path.startsWith('//') || path.includes('\\') || path.includes('\0')) {
     throw new Error('browser tools only accept a local path beginning with /')
   }
@@ -60,6 +70,8 @@ function localUrl(value) {
   if (url.hostname !== '127.0.0.1' || Number(url.port || '80') !== previewPort || url.protocol !== 'http:') {
     throw new Error('browser tools can only open the current local preview')
   }
+  const allowed = process.env.MIAODA_PREVIEW_PATH || '/__preview_unavailable__/'
+  if (!url.pathname.startsWith(allowed)) throw new Error('browser path must stay inside this website preview')
   return url.toString()
 }
 
@@ -159,15 +171,40 @@ function register(ctx, definition) {
   ctx.tools.register(definition)
 }
 
+
+const metadataKeys = new Set(['format', 'siteName', 'description', 'slug', 'url', 'createdAt', 'updatedAt'])
+function validateMetadata(path, data) {
+  if (path !== 'site.json') return
+  const meta = JSON.parse(data.toString('utf8'))
+  if (!meta || Array.isArray(meta) || typeof meta !== 'object' || Object.keys(meta).some(key => !metadataKeys.has(key)) || Object.values(meta).some(value => typeof value !== 'string')) {
+    throw new Error('site.json stores only string metadata: format, siteName, description, slug, url, createdAt, updatedAt. Write page content directly into HTML/CSS/JS files.')
+  }
+  if (meta.format !== 'files') throw new Error('site.json format must be files')
+}
+async function saveFile(name, data) {
+  const path = await sitePath(name)
+  validateMetadata(name, data)
+  await mkdir(dirname(path), { recursive: true })
+  await sitePath(name)
+  const temporary = join(dirname(path), `.hatchery-write-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+  try {
+    await writeFile(temporary, data, { flag: 'wx' })
+    await rename(temporary, path)
+  } finally { await rm(temporary, { force: true }) }
+}
+
 export function apply(ctx) {
   register(ctx, {
     name: 'list_files',
     description: 'List the files inside the current website folder that this agent is allowed to inspect and edit.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    parameters: { type: 'object', properties: { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 2000 } }, additionalProperties: false },
     output: stringOutput(),
-    async execute() {
-      const files = await listSiteFiles()
-      return files.length ? files.join('\n') : '(empty website folder)'
+    async execute(value) {
+      const args = objectArgs(value), offset = Number.isInteger(args.offset) ? Math.max(0, args.offset) : 0
+      const limit = Number.isInteger(args.limit) ? Math.max(1, Math.min(2000, args.limit)) : 500
+      const files = await listSiteFiles(workspace, '', { count: offset + limit + 1 })
+      const shown = files.slice(offset, offset + limit)
+      return (shown.length ? shown.join('\n') : '(no files)') + (files.length > offset + limit ? `\nMore files: call list_files with offset=${offset + limit}` : '')
     },
   })
 
@@ -178,6 +215,7 @@ export function apply(ctx) {
       type: 'object',
       properties: {
         path: { type: 'string' },
+        encoding: { type: 'string', enum: ['utf8', 'base64'] },
         startLine: { type: 'integer', minimum: 1 },
         endLine: { type: 'integer', minimum: 1 },
       },
@@ -187,7 +225,8 @@ export function apply(ctx) {
     output: stringOutput(),
     async execute(value) {
       const args = objectArgs(value)
-      const path = sitePath(args.path)
+      const path = await sitePath(args.path)
+      if (args.encoding === 'base64') return (await readFile(path)).toString('base64')
       const text = await readFile(path, 'utf8')
       const lines = text.split(/\r?\n/u)
       const start = Number.isInteger(args.startLine) ? Math.max(1, args.startLine) : 1
@@ -212,7 +251,7 @@ export function apply(ctx) {
       const names = args.path === undefined ? await listSiteFiles() : [args.path]
       const matches = []
       for (const file of names) {
-        const lines = (await readFile(sitePath(file), 'utf8')).split(/\r?\n/u)
+        const lines = (await readFile(await sitePath(file), 'utf8')).split(/\r?\n/u)
         lines.forEach((line, index) => {
           if (line.includes(args.query) && matches.length < 200) matches.push(`${file}:${index + 1}: ${line.slice(0, 500)}`)
         })
@@ -238,18 +277,50 @@ export function apply(ctx) {
     output: stringOutput(),
     async execute(value) {
       const args = objectArgs(value)
-      if (typeof args.search !== 'string' || !args.search || args.search.length > 60000) throw new Error('search must be 1-60000 characters')
-      if (typeof args.replace !== 'string' || args.replace.length > 60000) throw new Error('replace must be at most 60000 characters')
-      const path = sitePath(args.path)
+      if (typeof args.search !== 'string' || !args.search || args.search.length > 1_000_000) throw new Error('search must be 1-1000000 characters')
+      if (typeof args.replace !== 'string' || args.replace.length > 4_000_000) throw new Error('replace must be at most 4000000 characters')
+      const path = await sitePath(args.path)
       const before = await readFile(path, 'utf8')
       const occurrences = before.split(args.search).length - 1
       if (occurrences !== 1) throw new Error(`search text must occur exactly once; found ${occurrences}`)
       const after = before.replace(args.search, args.replace)
-      const info = await stat(path)
-      const temporary = join(dirname(path), `.${basename(path)}.miaoda-${process.pid}-${Date.now()}.tmp`)
-      await writeFile(temporary, after, { encoding: 'utf8', mode: info.mode })
-      await rename(temporary, path)
+      await saveFile(args.path, Buffer.from(after))
       return `Updated ${basename(path)}${typeof args.reason === 'string' && args.reason.trim() ? `: ${args.reason.trim().slice(0, 240)}` : ''}`
+    },
+  })
+
+  register(ctx, {
+    name: 'write_file',
+    description: 'Create or overwrite any file inside this website. Parent directories are created. Read existing files first. HTML, CSS, JavaScript and assets are real files; site.json holds metadata only.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, encoding: { type: 'string', enum: ['utf8', 'base64'] } }, required: ['path', 'content'], additionalProperties: false },
+    output: stringOutput(),
+    async execute(value) {
+      const args = objectArgs(value)
+      if (typeof args.content !== 'string' || args.content.length > 8_000_000) throw new Error('content must be at most 8 MB')
+      if (args.encoding === 'base64' && !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(args.content)) throw new Error('invalid base64')
+      await saveFile(args.path, Buffer.from(args.content, args.encoding === 'base64' ? 'base64' : 'utf8'))
+      return `Saved ${args.path}`
+    },
+  })
+  register(ctx, {
+    name: 'make_directory', description: 'Create a directory and parents inside this website.',
+    parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false }, output: stringOutput(),
+    async execute(value) { const args = objectArgs(value); if (args.path === 'site.json') throw new Error('site.json must be a metadata file'); await mkdir(await sitePath(args.path), { recursive: true }); return `Created ${args.path}` },
+  })
+  register(ctx, {
+    name: 'delete_file', description: 'Delete a file or directory inside this website. To remove a nonempty directory set recursive=true. The website root cannot be removed.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, recursive: { type: 'boolean' } }, required: ['path'], additionalProperties: false }, output: stringOutput(),
+    async execute(value) { const args = objectArgs(value); await rm(await sitePath(args.path), { recursive: args.recursive === true }); return `Deleted ${args.path}` },
+  })
+  register(ctx, {
+    name: 'move_file', description: 'Move or rename a file or directory within this website. Destination must not exist.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, destination: { type: 'string' } }, required: ['path', 'destination'], additionalProperties: false }, output: stringOutput(),
+    async execute(value) {
+      const args = objectArgs(value), from = await sitePath(args.path), to = await sitePath(args.destination)
+      if (existsSync(to)) throw new Error('destination already exists')
+      if (args.destination === 'site.json') validateMetadata(args.destination, await readFile(from))
+      await mkdir(dirname(to), { recursive: true }); await rename(from, to)
+      return `Moved ${args.path} to ${args.destination}`
     },
   })
 
