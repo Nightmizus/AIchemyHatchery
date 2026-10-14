@@ -1,11 +1,13 @@
 # Miaoda's constrained DeepSeek Harness profile. This overlays sdk-minimal and
-# deliberately removes every shipped model-facing capability before mounting
-# the local website-only tool plugin.
+# removes the shipped shell/editor tools before mounting website file tools
+# and the native, read-only web search/fetch tools.
 
 - id: sandbox-policy
   config:
     mode: workspace-write
-    workspaceRoot: !!js process.cwd()
+    # 沙盒根必须是"本用户网站目录"，不能用 process.cwd()（那是仓库根，
+    # 会把平台源码一起纳入可写范围）。MIAODA_AI_WORKSPACE 由适配器按用户注入。
+    workspaceRoot: !!js process.env.MIAODA_AI_WORKSPACE || process.cwd()
 
 - id: sandbox
   disabled: true
@@ -40,6 +42,27 @@
     compression: none
 
 - insert:
+    - id: web
+      name: '@deepseek-ai/dsh-web'
+      config:
+        searchProvider: deepseek-official
+        fetchProvider: http
+
+    - id: web-search-deepseek
+      name: '@deepseek-ai/dsh-web-search-deepseek'
+      config:
+        apiKeyEnv: HATCHERY_DEEPSEEK_SEARCH_API_KEY
+        model: !!js process.env.HATCHERY_DEEPSEEK_SEARCH_MODEL || 'deepseek-v4-flash'
+
+    - id: web-fetch-http
+      name: '@deepseek-ai/dsh-web-fetch-http'
+
+    - id: tool-web
+      name: '@deepseek-ai/dsh-tool-web'
+
+    - id: tool-call-timeout-policy
+      name: '@deepseek-ai/dsh-tool-call-timeout-policy'
+
     - id: attachments
       name: '@deepseek-ai/dsh-attachment-local'
 
