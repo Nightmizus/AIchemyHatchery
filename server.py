@@ -38,6 +38,7 @@ import urllib.parse as urlparse_mod
 import site_files
 import ai_jobs
 import login_links
+import study_engine
 
 from deepseek_harness_adapter import HarnessRuntimeError, dsh_session_id, harness_status, reap_idle_dsh_session, resolve_llm_provider, run_deepseek_harness
 
@@ -252,7 +253,7 @@ AI_UPSTREAM_DEGRADED: dict | None = None
 # 前端静态文件统一放在 frontend/；对外 URL 仍是根路径（/styles.css…），由 handler 翻译
 FRONTEND_DIR = "frontend"
 AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/motion.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
-PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js"))
+PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js", "/study.css", "/study.js"))
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}
@@ -346,6 +347,28 @@ def user_site_directory(user_id) -> tuple[Path, str]:
 
 def ai_site_workspace(user_id) -> Path:
     return user_site_directory(user_id)[0]
+
+
+# ===== StudyPanel：每用户站点目录下的学习面板存储 =====
+STUDY_OUTLINE_MAX_SIZE = 500_000   # 单份大纲文件上限 500 KB
+STUDY_OUTLINE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9一-鿿_\-\.（）()【】 ]{1,120}\.[A-Za-z0-9]{1,10}$")
+
+
+def study_panel_dir(user_id) -> Path:
+    """返回该用户的 studypanel 根目录，不保证已创建。"""
+    site_dir, _ = user_site_directory(user_id)
+    return site_dir / "studypanel"
+
+
+def ensure_study_panel_dirs(user_id) -> Path:
+    """确保 studypanel/ outlines/ 和 progress.md 都存在，返回 studypanel 根目录。"""
+    sp = study_panel_dir(user_id)
+    outlines = sp / "outlines"
+    outlines.mkdir(parents=True, exist_ok=True)
+    progress_file = sp / "progress.md"
+    if not progress_file.exists():
+        progress_file.write_text("# 学习进度\n\n", encoding="utf-8")
+    return sp
 
 
 # ===== 用户上传给 AI 的附件：统一落到服务器临时目录，换取稳定 URL 供 AI 嵌入网页 =====
@@ -787,6 +810,23 @@ def initialize_database() -> None:
         updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS hatchery_ai_chat_sessions_user_idx ON hatchery_ai_chat_sessions(user_id, updated_at DESC);
+    -- HatcheryStudy 学习对话：账号唯一会话，消息独立成行便于增量拉取
+    CREATE TABLE IF NOT EXISTS hatchery_study_messages(
+        id BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        markdown TEXT NOT NULL DEFAULT '',
+        raw_text TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS hatchery_study_messages_user_idx ON hatchery_study_messages(user_id, id);
+    -- 多会话：每条消息归属一个会话；会话本身由首条消息的 session_id 隐式定义
+    ALTER TABLE hatchery_study_messages ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE hatchery_study_messages ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT '';
+    ALTER TABLE hatchery_study_messages ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS hatchery_study_messages_session_idx
+        ON hatchery_study_messages(user_id, session_id, id);
     ALTER TABLE hatchery_published_sites ADD COLUMN IF NOT EXISTS listed_in_gallery BOOLEAN NOT NULL DEFAULT TRUE;
     -- 失败原因落库：任务失败时排障不必依赖转瞬即逝的内存与容器日志
     ALTER TABLE hatchery_ai_usage ADD COLUMN IF NOT EXISTS error TEXT;
@@ -1634,6 +1674,378 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             invalidate_console_sessions()
         self.send_json({"ok": True, "username": target["name"], "status": status})
 
+    def handle_admin_impersonate(self) -> None:
+        admin = self.require_console_user(admin=True)
+        if not admin:
+            return
+        data = self.read_json()
+        username = str(data.get("username", "")).strip()
+        if not username:
+            raise ValueError("未指定用户名")
+        with neon_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute('SELECT * FROM "User" WHERE LOWER(name) = LOWER(%s)', (username,))
+                target = cur.fetchone()
+                if not target:
+                    raise ValueError("用户不存在")
+                if row_value(target, "bannedUntil"):
+                    raise ValueError("不能登录已停用的账号")
+                if str(target["id"]) == str(admin["id"]):
+                    raise ValueError("不能登录自己的账号")
+            result = login_links.issue(
+                conn,
+                str(target["id"]),
+                f"管理员 {admin['username']} 从后台登录用户 {target['name']}",
+                ttl_seconds=300
+            )
+            with conn.cursor() as cur:
+                audit_event(cur, str(admin["id"]), "admin.impersonate", {"target_username": target["name"], "target_user_id": str(target["id"])})
+        self.send_json({"ok": True, "loginUrl": result["url"], "expiresAt": result["expires_at"].isoformat()})
+
+    def require_study_access(self) -> dict | None:
+        user = self.require_console_user()
+        if not user:
+            return None
+        if not is_site_owner_campus_id(user.get("campusId")):
+            self.send_json({"error": "HatcheryStudy 当前仅对站长账号开放"}, 403)
+            return None
+        return user
+
+    def handle_study_outlines(self) -> None:
+        user = self.require_study_access()
+        if not user:
+            return
+        sp = ensure_study_panel_dirs(user["id"])
+        outlines_dir = sp / "outlines"
+        # POST — upload outline file
+        content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if content_type == "application/json":
+            data = self.read_json()
+            name = str(data.get("name", "")).strip()
+            content = str(data.get("content", ""))
+            if not name or not STUDY_OUTLINE_NAME_PATTERN.fullmatch(name):
+                raise ValueError("大纲文件名格式无效（支持 txt/md，120 字以内）")
+            content_bytes = content.encode("utf-8")
+            if len(content_bytes) > STUDY_OUTLINE_MAX_SIZE:
+                raise ValueError("大纲文件超过 500 KB 限制")
+            (outlines_dir / name).write_bytes(content_bytes)
+            self.send_json({"ok": True, "name": name})
+        else:
+            raise ValueError("请发送 application/json 格式的请求")
+
+    def handle_study_progress(self) -> None:
+        user = self.require_study_access()
+        if not user:
+            return
+        sp = ensure_study_panel_dirs(user["id"])
+        progress_file = sp / "progress.md"
+        if self.command == "GET":
+            self.send_json({"content": progress_file.read_text(encoding="utf-8")})
+            return
+        data = self.read_json()
+        content = str(data.get("content", ""))
+        if len(content.encode("utf-8")) > 200_000:
+            raise ValueError("进度内容超过 200 KB 限制")
+        progress_file.write_text(content, encoding="utf-8")
+        self.send_json({"ok": True})
+
+    def study_history(self, user_id: str, session_id: str = "", limit: int = 100) -> list[dict]:
+        """读取某会话的对话（时间正序）。session_id 为空时读最早的那个会话。"""
+        sid = session_id.strip() or self.study_latest_session(user_id) or "default"
+        with neon_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT role, title, markdown, raw_text, session_id, provider, model, created_at FROM ("
+                    "  SELECT id, role, title, markdown, raw_text, session_id, provider, model, created_at"
+                    "  FROM hatchery_study_messages"
+                    "  WHERE user_id = %s AND session_id = %s ORDER BY id DESC LIMIT %s"
+                    ") t ORDER BY id ASC",
+                    (str(user_id), sid, limit),
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def study_sessions(self, user_id: str) -> list[dict]:
+        """列出该账号的全部学习会话（按最后消息时间倒序）。"""
+        with neon_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT session_id,"
+                    "       count(*) FILTER (WHERE role='user') AS turns,"
+                    "       max(created_at) AS updated_at,"
+                    "       (array_agg(title ORDER BY id DESC) FILTER (WHERE role='assistant' AND title <> ''))[1] AS last_title,"
+                    "       (array_agg(raw_text ORDER BY id ASC) FILTER (WHERE role='user'))[1] AS first_prompt"
+                    " FROM hatchery_study_messages WHERE user_id = %s"
+                    " GROUP BY session_id ORDER BY max(id) DESC",
+                    (str(user_id),),
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def study_latest_session(self, user_id: str) -> str:
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT session_id FROM hatchery_study_messages WHERE user_id = %s"
+                    " ORDER BY id DESC LIMIT 1",
+                    (str(user_id),),
+                )
+                row = cur.fetchone()
+                return str(row[0]) if row else ""
+
+    def study_progress_file(self, user_id, session_id: str):
+        """进度文件按会话隔离：默认会话沿用旧的 studypanel/progress.md。"""
+        sp = ensure_study_panel_dirs(user_id)
+        sid = (session_id or "").strip()
+        if not sid or sid == "default":
+            return sp / "progress.md"
+        safe = re.sub(r"[^A-Za-z0-9_-]", "", sid)[:40] or "session"
+        return sp / f"progress-{safe}.md"
+
+    def handle_study_history(self) -> None:
+        user = self.require_study_access()
+        if not user:
+            return
+        parsed = urlparse(self.path)
+        session_id = parse_qs(parsed.query).get("session", [""])[0]
+        progress_file = self.study_progress_file(user["id"], session_id)
+        try:
+            has_progress = bool(progress_file.read_text(encoding="utf-8").strip())
+        except OSError:
+            has_progress = False
+        resolved = session_id.strip() or self.study_latest_session(user["id"]) or "default"
+        self.send_json({
+            "messages": self.study_history(user["id"], session_id),
+            "hasProgress": has_progress,
+            "sessionId": resolved,
+            "sessions": self.study_sessions(user["id"]),
+        })
+
+    def handle_study_session_delete(self) -> None:
+        user = self.require_study_access()
+        if not user:
+            return
+        data = self.read_json()
+        session_id = str(data.get("sessionId", "")).strip()
+        if not session_id:
+            raise ValueError("未指定会话")
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM hatchery_study_messages WHERE user_id = %s AND session_id = %s",
+                    (str(user["id"]), session_id),
+                )
+                removed = cur.rowcount
+        try:
+            progress_file = self.study_progress_file(user["id"], session_id)
+            if progress_file.name != "progress.md" and progress_file.exists():
+                progress_file.unlink()
+        except OSError:
+            pass
+        self.send_json({"ok": True, "removed": removed})
+
+    # ===== 自定义 provider 配置（简陋版，仅站长可用）=====
+    def handle_study_providers(self) -> None:
+        user = self.require_study_access()
+        if not user:
+            return
+        if self.command == "GET":
+            items = study_engine.load_providers()
+            base, key, model = study_engine.gateway_config()
+            self.send_json({
+                "providers": [
+                    {"id": "default", "label": "默认（Hatchery 网关）",
+                     "base_url": base, "model": model, "hasKey": bool(key), "builtin": True}
+                ] + [
+                    {"id": p["id"], "label": p["label"], "base_url": p["base_url"],
+                     "model": p["model"], "hasKey": bool(p["api_key"]), "builtin": False}
+                    for p in items
+                ]
+            })
+            return
+        data = self.read_json()
+        action = str(data.get("action", "")).strip()
+        items = study_engine.load_providers()
+        if action == "save":
+            pid = str(data.get("id", "")).strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", pid) or pid == "default":
+                raise ValueError("provider id 需为 1-40 位字母数字（不能用 default）")
+            label = str(data.get("label", "")).strip()[:80] or pid
+            base_url = str(data.get("baseUrl", "")).strip()
+            if not re.fullmatch(r"https?://\S+", base_url):
+                raise ValueError("Base URL 需以 http:// 或 https:// 开头")
+            model = str(data.get("model", "")).strip()[:120]
+            api_key = str(data.get("apiKey", "")).strip()
+            existing = next((p for p in items if p["id"] == pid), None)
+            if existing is None:
+                items.append({"id": pid, "label": label, "base_url": base_url,
+                              "api_key": api_key, "model": model})
+            else:
+                existing.update({"label": label, "base_url": base_url, "model": model})
+                # 留空表示不改动已存的 Key
+                if api_key:
+                    existing["api_key"] = api_key
+            study_engine.save_providers(items)
+            self.send_json({"ok": True})
+            return
+        if action == "delete":
+            pid = str(data.get("id", "")).strip()
+            study_engine.save_providers([p for p in items if p["id"] != pid])
+            self.send_json({"ok": True})
+            return
+        if action == "models":
+            # 拉取某个 endpoint 的模型列表，方便挑模型名
+            pid = str(data.get("id", "")).strip()
+            if pid and pid != "default":
+                item = study_engine.find_provider(pid)
+                if not item:
+                    raise ValueError("provider 不存在")
+                base_url, api_key = item["base_url"], item["api_key"]
+            else:
+                base_url, api_key, _ = study_engine.gateway_config()
+            if not api_key:
+                raise ValueError("该平台尚未配置 API Key")
+            self.send_json({"models": study_engine.fetch_models(base_url, api_key)})
+            return
+        raise ValueError("未知操作")
+
+    def handle_study_chat(self) -> None:
+        """直连网关的流式学习对话；进度由模型通过 write_progress 工具自行维护。"""
+        user = self.require_study_access()
+        if not user:
+            return
+        data = self.read_json()
+        prompt = str(data.get("prompt", "")).strip()
+        if not prompt or len(prompt) > 20000:
+            raise ValueError("学习问题不能为空，且不超过 20000 字")
+        session_id = str(data.get("sessionId", "")).strip()[:64] or "default"
+        provider_id = str(data.get("provider", "")).strip()[:40]
+        model_override = str(data.get("model", "")).strip()[:120]
+        history_limit = 30
+        history = []
+        for item in (data.get("history") or [])[-history_limit:]:
+            if not isinstance(item, dict) or item.get("role") not in ("user", "assistant"):
+                continue
+            text = str(item.get("text", "")).strip()[:4000]
+            if text:
+                history.append({"role": item["role"], "text": text})
+
+        progress_file = self.study_progress_file(user["id"], session_id)
+        try:
+            progress = progress_file.read_text(encoding="utf-8")
+        except OSError:
+            progress = ""
+
+        messages = study_engine.build_messages(progress, history, prompt)
+        started_at = iso_time()
+
+        # 先把用户消息落库，保证刷新后不丢
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO hatchery_study_messages(user_id,role,raw_text,session_id,provider,model,created_at)"
+                    " VALUES(%s,'user',%s,%s,%s,%s,%s)",
+                    (str(user["id"]), prompt, session_id, provider_id, model_override, started_at),
+                )
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        # 流式响应一旦开始就不能再走 send_json 错误分支（会重复发响应头）
+        self._streaming_response_started = True
+
+        def emit(event: dict) -> None:
+            self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        content_parts: list[str] = []
+        try:
+            # 第一步：只取课程正文。下发工具定义但 tool_choice=none——不给定义时
+            # 模型会自己编造 <|DSML|> 伪调用文本混进正文，给定义但不许调用最稳。
+            for chunk in study_engine.stream_completion(
+                messages, tools=[study_engine.PROGRESS_TOOL], tool_choice="none",
+                provider_id=provider_id, model_override=model_override,
+            ):
+                if "content" in chunk:
+                    content_parts.append(chunk["content"])
+                    emit({"type": "delta", "text": chunk["content"]})
+        except study_engine.StudyGatewayError as error:
+            emit({"type": "error", "message": str(error)})
+            self.finish()
+            return
+
+        raw_text = "".join(content_parts)
+        lesson = study_engine.parse_lesson_answer(raw_text)
+        title, markdown = lesson["title"], lesson["markdown"]
+        if not markdown and raw_text.strip():
+            markdown = raw_text
+
+        # 第二步：单独一轮让模型维护学习进度（用户不可见）
+        progress_written = False
+        try:
+            summary_for_progress = (markdown or raw_text)[:4000]
+            progress_messages = messages + [
+                {"role": "assistant", "content": raw_text or "(无正文)"},
+                {"role": "user", "content": study_engine.PROGRESS_UPDATE_INSTRUCTION.format(
+                    question=prompt[:1500], answer=summary_for_progress)},
+            ]
+            tool_args: dict[int, dict] = {}
+            for chunk in study_engine.stream_completion(
+                progress_messages, tools=[study_engine.PROGRESS_TOOL], timeout=180,
+                provider_id=provider_id, model_override=model_override,
+            ):
+                tool = chunk.get("tool")
+                if not tool:
+                    continue
+                slot = tool_args.setdefault(tool["index"], {"name": "", "arguments": ""})
+                if tool["name"]:
+                    slot["name"] = tool["name"]
+                slot["arguments"] += tool.get("arguments", "")
+            for slot in tool_args.values():
+                if slot["name"] != "write_progress":
+                    continue
+                try:
+                    arguments = json.loads(slot["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    continue
+                body = arguments.get("markdown")
+                if isinstance(body, str) and body.strip():
+                    try:
+                        progress_file.write_text(body, encoding="utf-8")
+                        progress_written = True
+                    except OSError:
+                        pass
+        except study_engine.StudyGatewayError:
+            # 进度更新失败不影响已经拿到的课程内容
+            pass
+
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO hatchery_study_messages(user_id,role,title,markdown,raw_text,session_id,provider,model,created_at)"
+                    " VALUES(%s,'assistant',%s,%s,%s,%s,%s,%s,%s)",
+                    (str(user["id"]), title, markdown, raw_text, session_id,
+                     provider_id, model_override, iso_time()),
+                )
+        emit({"type": "done", "title": title, "markdown": markdown, "progressUpdated": progress_written})
+        self.finish()
+
+    def handle_study_outline_delete(self) -> None:
+        user = self.require_console_user()
+        if not user:
+            return
+        data = self.read_json()
+        name = str(data.get("name", "")).strip()
+        if not name or not STUDY_OUTLINE_NAME_PATTERN.fullmatch(name):
+            raise ValueError("大纲文件名无效")
+        sp = ensure_study_panel_dirs(user["id"])
+        target = sp / "outlines" / name
+        if not target.exists() or not target.is_file():
+            raise ValueError("大纲文件不存在")
+        target.unlink()
+        self.send_json({"ok": True})
+
     def handle_admin_ai_config_update(self) -> None:
         # 改 AI Key 影响全站 AI 服务，只有管理员可用；Key 本身永远不进日志与审计
         admin = self.require_console_user(admin=True)
@@ -1700,6 +2112,20 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_change_password()
             elif path == "/api/admin/users/status":
                 self.handle_admin_user_status()
+            elif path == "/api/admin/impersonate":
+                self.handle_admin_impersonate()
+            elif path == "/api/study/outlines":
+                self.handle_study_outlines()
+            elif path == "/api/study/outlines/delete":
+                self.handle_study_outline_delete()
+            elif path == "/api/study/progress":
+                self.handle_study_progress()
+            elif path == "/api/study/chat":
+                self.handle_study_chat()
+            elif path == "/api/study/session/delete":
+                self.handle_study_session_delete()
+            elif path == "/api/study/providers":
+                self.handle_study_providers()
             elif path == "/api/admin/ai-config":
                 self.handle_admin_ai_config_update()
             elif path == "/api/auth/sessions/revoke-others":
@@ -1771,13 +2197,21 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             else:
                 self.send_json({"error": "接口不存在"}, 404)
         except ValueError as exc:
-            self.send_json({"error": str(exc)}, 400)
+            if getattr(self, "_streaming_response_started", False):
+                print(f"[error] POST {self.path}（流式已开始）：{exc}", file=sys.stderr)
+            else:
+                self.send_json({"error": str(exc)}, 400)
         except RuntimeError as exc:
-            self.send_json({"error": str(exc)}, 502)
+            if getattr(self, "_streaming_response_started", False):
+                print(f"[error] POST {self.path}（流式已开始）：{exc}", file=sys.stderr)
+            else:
+                self.send_json({"error": str(exc)}, 502)
         except Exception as exc:
             # 不把内部异常（数据库报错、SQL 片段、文件路径等）回显给客户端
             print(f"[error] POST {self.path}：{type(exc).__name__}: {exc}", file=sys.stderr)
-            self.send_json({"error": "服务器内部错误，请稍后重试"}, 500)
+            # 流式响应已经发出 200 与响应头，再补一次 JSON 会与已写出的正文冲突
+            if not getattr(self, "_streaming_response_started", False):
+                self.send_json({"error": "服务器内部错误，请稍后重试"}, 500)
     # DeepSeek Harness is the only automatic execution engine. Its file access is
     # confined to the current website's own persistent published directory; the AI may
     # not read or modify anything else on the host.
@@ -2789,6 +3223,32 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             user = self.require_console_user()
             if user:
                 self.handle_ai_run_active(user)
+            return
+        if parsed.path == "/api/study/providers":
+            self.handle_study_providers()
+            return
+        if parsed.path == "/api/study/history":
+            self.handle_study_history()
+            return
+        if parsed.path == "/api/study/outlines":
+            user = self.require_study_access()
+            if not user:
+                return
+            sp = ensure_study_panel_dirs(user["id"])
+            outlines_dir = sp / "outlines"
+            files = sorted(
+                [{"name": f.name, "size": f.stat().st_size, "updatedAt": f.stat().st_mtime}
+                 for f in outlines_dir.iterdir() if f.is_file()],
+                key=lambda x: x["updatedAt"], reverse=True
+            )
+            self.send_json({"outlines": files})
+            return
+        if parsed.path == "/api/study/progress":
+            user = self.require_study_access()
+            if not user:
+                return
+            sp = ensure_study_panel_dirs(user["id"])
+            self.send_json({"content": (sp / "progress.md").read_text(encoding="utf-8")})
             return
         if parsed.path == "/api/ai/status":
             status = harness_status(ROOT)
