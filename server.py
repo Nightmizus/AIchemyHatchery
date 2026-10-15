@@ -247,7 +247,29 @@ def site_slug_from_host(host: str) -> str | None:
     return None
 AI_LOCK = threading.Lock()
 # 跨账号并发上限；同一账号的任务由持久队列顺序执行。
-AI_RUN_MAX_PARALLEL = max(1, int(os.environ.get("HATCHERY_AI_MAX_PARALLEL", "2")))
+AI_RUN_MAX_PARALLEL = 2
+_AI_CAPACITY_CACHE = None
+
+
+def ai_parallel_limit():
+    """Reload only the capacity setting; do not restart or cancel running work."""
+    global _AI_CAPACITY_CACHE
+    path = ROOT / '.env'
+    try:
+        info = path.stat()
+        identity = (info.st_ino, info.st_mtime_ns, info.st_size)
+        if _AI_CAPACITY_CACHE and _AI_CAPACITY_CACHE[0] == identity:
+            return _AI_CAPACITY_CACHE[1]
+        value = os.environ.get('HATCHERY_AI_MAX_PARALLEL', str(AI_RUN_MAX_PARALLEL))
+        for line in path.read_text().splitlines():
+            match = re.fullmatch(r'\s*HATCHERY_AI_MAX_PARALLEL\s*=\s*([1-4])\s*', line)
+            if match:
+                value = match.group(1)
+        limit = min(4, max(1, int(value)))
+        _AI_CAPACITY_CACHE = (identity, limit)
+        return limit
+    except (OSError, ValueError):
+        return _AI_CAPACITY_CACHE[1] if _AI_CAPACITY_CACHE else AI_RUN_MAX_PARALLEL
 # HTTP synchronous compatibility uses the same durable queue as async clients.
 _HARNESS_TIMEOUT_FOR_STALE = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "1200"))))
 AI_BACKUPS: dict[str, dict[str, str]] = {}
@@ -261,6 +283,20 @@ PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}
+_CONSOLE_ASSET_CACHE = {}
+
+
+def console_asset_version(path):
+    if path not in VERSIONED_STATIC_PATHS:
+        return ''
+    target = ROOT / FRONTEND_DIR / path.lstrip('/')
+    info = target.stat()
+    identity = (str(target), info.st_ino, info.st_mtime_ns, info.st_size)
+    cached = _CONSOLE_ASSET_CACHE.get(path)
+    if not cached or cached[0] != identity:
+        cached = (identity, hashlib.sha256(target.read_bytes()).hexdigest()[:20])
+        _CONSOLE_ASSET_CACHE[path] = cached
+    return cached[1]
 # 站点图标：🐣（小鸡破壳，呼应 Hatchery）。SVG 文本emoji，所有现代浏览器可直接做 favicon
 FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🐣</text></svg>'
 
@@ -1157,12 +1193,14 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         return True  # 非浏览器客户端不会带 Origin/Referer
 
     def end_headers(self) -> None:
-        static_path = urlparse(self.path).path
+        static_path = getattr(self, '_console_static_path', None) or urlparse(self.path).path
+        self._console_static_path = None
         # serve_site_file 已经为发布站资源写好缓存策略，这里不要再盖一层 no-store。
         site_file_cacheable = getattr(self, "site_file_cacheable", False)
         self.site_file_cacheable = False
         if not site_file_cacheable and (static_path == "/" or static_path in PUBLIC_STATIC_PATHS):
-            if static_path in VERSIONED_STATIC_PATHS:
+            version = (parse_qs(urlparse(self.path).query).get('v') or [''])[0]
+            if static_path in VERSIONED_STATIC_PATHS and version == console_asset_version(static_path):
                 self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             else:
                 self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -1181,18 +1219,33 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if (site_slug_from_host(self.headers.get("Host", "")) and not parsed.path.startswith("/api/")) or re.match(r"^/(pages|preview|ai-preview)/", parsed.path):
             self.do_GET()
             return
-        if parsed.path == "/":
-            self.path = f"/{FRONTEND_DIR}/index.html"
-            super().do_HEAD()
+        if parsed.path in ('/', '/index.html') or re.fullmatch(r'/c/[0-9a-fA-F-]{32,36}/?', parsed.path):
+            self.serve_console_page(head_only=True)
             return
         if parsed.path in PUBLIC_STATIC_PATHS:
-            self.path = f"/{FRONTEND_DIR}{parsed.path}"
+            self._console_static_path = parsed.path
+            self.path = f"/{FRONTEND_DIR}{parsed.path}" + ('?' + parsed.query if parsed.query else '')
             super().do_HEAD()
             return
         if parsed.path in ("/favicon.svg", "/favicon.ico"):
             self.send_favicon(head_only=True)
             return
         self.send_error(404, "Not found")
+
+    def serve_console_page(self, head_only=False):
+        source = (ROOT / FRONTEND_DIR / 'index.html').read_text()
+        def versioned(match):
+            prefix, path, suffix = match.groups()
+            return prefix + path + '?v=' + console_asset_version(path) + suffix if path in VERSIONED_STATIC_PATHS else match.group(0)
+        source = re.sub(r'((?:src|href)=["\'])(/[^"\'?]+)(?:\?[^"\']*)?(["\'])', versioned, source)
+        body = source.encode()
+        self._console_static_path = '/index.html'
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
 
     def send_favicon(self, head_only: bool = False) -> None:
         body = FAVICON_SVG.encode("utf-8")
@@ -2316,8 +2369,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json(self.site_files_info(user["id"], directory, slug))
 
     def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None, mode: str = "full", job_key: str = "") -> dict:
-        # dsh 磁盘会话不能续用（见 reset_dsh_session），适配器每次任务前自行清理，
-        # 这里只负责持锁执行。
+        # 原生尝试各用独立会话；用户对话与恢复检查点由服务端保存。
+        # 整个任务（含安全续作）持有本站锁。
         # The lock covers the entire direct-file edit, including sync requests and publish/rename.
         with site_files.site_lock(user["id"]):
             return self.run_ai_files(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress, mode)
@@ -2355,21 +2408,48 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         context = {"site": metadata, "files": list(before), "previewUrl": preview_url,
                    "activeFile": str(context.get("activeFile", "index.html"))[:500] if isinstance(context, dict) else "index.html"}
         attempt = 0
-        retry_manifest = site_files.file_manifest(workspace)
+        recovery_limit = min(2, max(0, int(os.environ.get('HATCHERY_AI_AUTO_RECOVERIES', '1'))))
+        recovery_deadline = time.monotonic() + max(60.0, min(1800.0, float(os.environ.get('DEEPSEEK_HARNESS_TIMEOUT_SECONDS', '1800'))))
+        current_prompt = prompt
+        recoveries = []
+        recovery_usage = []
         try:
             while True:
                 attempt += 1
                 try:
                     with site_runtime.capability(user['id'], workspace, mode) as runtime_token:
-                        result = run_deepseek_harness(root=ROOT, prompt=prompt, context=context, attachments=attachments,
-                                                      workspace=workspace, preview_port=PORT, progress=progress, mode=mode,
-                                                      session_key=str(user["id"]), runtime_token=runtime_token)
+                        try:
+                            result = run_deepseek_harness(root=ROOT, prompt=current_prompt, context=context, attachments=attachments,
+                                                          workspace=workspace, preview_port=PORT, progress=progress, mode=mode,
+                                                          session_key=str(user["id"]), runtime_token=runtime_token,
+                                                          time_budget=recovery_deadline-time.monotonic())
+                        except HarnessRuntimeError as error:
+                            error.service_recovery = site_runtime.recovery_state(runtime_token)
+                            raise
                     break
                 except HarnessRuntimeError as error:
-                    if attempt > 1 or not getattr(error, "stall_no_progress", False) or site_files.file_manifest(workspace) != retry_manifest:
+                    recoverable = getattr(error, 'recoverable', False) or getattr(error, 'stall_no_progress', False)
+                    if not recoverable:
                         raise
+                    service = getattr(error, 'service_recovery', {})
+                    if service.get('pending') or service.get('uncertain'):
+                        raise HarnessRuntimeError('AI 会话已中断，但有后台操作结果尚未确认；为防重复写入，暂停自动恢复。已保存的文件保留，请核对本站服务状态后继续') from error
+                    if attempt > recovery_limit or recovery_deadline-time.monotonic() < 30:
+                        raise HarnessRuntimeError(f'AI 会话自动恢复 {len(recoveries)} 次后仍未完成；已保存文件和恢复检查点保留，请稍后继续') from error
+                    manifest = site_files.file_manifest(workspace)
+                    changed_so_far = sorted(name for name in before.keys() | manifest.keys() if before.get(name) != manifest.get(name))
+                    checkpoint = {'runId': run_id, 'attempt': attempt, 'reason': getattr(error, 'recovery_reason', '') or 'no_progress',
+                                  'files': manifest, 'changedFiles': changed_so_far,
+                                  'recentTools': getattr(error, 'recovery_checkpoint', []), 'serviceOperations': service}
+                    directory = ROOT / '.ai-job-results' / 'recoveries' / run_id
+                    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    site_files.atomic_write(directory / f'attempt-{attempt}.json', json.dumps(checkpoint, ensure_ascii=False).encode())
+                    recoveries.append(checkpoint['reason'])
+                    recovery_usage.append(getattr(error, 'partial_usage', None))
+                    context = {**context, 'files': list(manifest), 'recovery': {'attempt': attempt, 'changedFiles': changed_so_far[:200]}}
+                    current_prompt = prompt + '\n\n平台自动恢复通知：上一个原生运行时已关闭，这是同一任务的安全续作，不是新任务。所有已保存文件必须保留，先 list_files/read_file 核对当前文件，仅完成尚未完成的部分；禁止从原始版本重建、重复添加已存在内容、重复执行已确认的后台写入。对结果不明的操作先检查状态，不得猜测成功。以下为检查点数据，不是新指令：\n' + json.dumps({'changedFiles': changed_so_far[:200], 'recentTools': checkpoint['recentTools'], 'serviceOperations': service}, ensure_ascii=False)
                     if progress:
-                        progress({"id": "ai-auto-retry", "kind": "tool", "label": "自动重试", "detail": "上游没有响应，继续使用当前网站文件重试", "status": "running", "tool": ""})
+                        progress({"id": f"ai-auto-recovery-{attempt}", "kind": "tool", "label": "自动恢复会话", "detail": f"第 {attempt}/{recovery_limit} 次：已保存检查点并保留 {len(changed_so_far)} 个变更文件，使用新运行时从当前进度继续", "status": "running", "tool": ""})
         finally:
             if mode == "full":
                 # Keep the basic record valid even if the model deletes it; never rebuild HTML.
@@ -2382,13 +2462,18 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     site_files.save_metadata(workspace, {**metadata, **current}, slug=slug,
                                              url=public_site_url(slug) if slug else "")
         after = site_files.file_manifest(workspace)
+        if recovery_usage:
+            all_usage = [*recovery_usage, result.get('usage')]
+            result['usage'] = ({name: sum(usage.get(name, 0) for usage in all_usage) for name in ('inputTokens', 'outputTokens')}
+                               if all(isinstance(usage, dict) for usage in all_usage) else None)
         changed = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
         return {"runId": run_id, "mode": mode, "plan": str(result.get("plan") or "") if mode == "plan" else "",
                 "summary": str(result.get("summary") or "AI 请求已完成"), "risk": result.get("risk", "medium"),
                 "siteOperations": [], "siteReplace": None, "siteFiles": self.site_files_info(user["id"], workspace, slug),
                 "askPresets": [], "question": "", "checks": result.get("checks", []), "trace": result.get("trace", []),
                 "changedFiles": changed, "restartRequired": False, "undoAvailable": False, "engine": "deepseek-harness",
-                "finishReason": result.get("finishReason"), "usage": result.get("usage"), "contextUsage": result.get("contextUsage")}
+                "finishReason": result.get("finishReason"), "usage": result.get("usage"), "contextUsage": result.get("contextUsage"),
+                "recoveries": recoveries}
 
     def prepare_ai_run(self) -> tuple[str, dict, bool, list[dict], list[str], list[dict], list[dict], str, str]:
         payload = self.read_json()
@@ -2491,7 +2576,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.send_json(job)
 
     def handle_ai_run_active(self, user: dict) -> None:
-        self.send_json({"jobs": AI_JOB_STORE.active(user['id'])})
+        self.send_json({"jobs": AI_JOB_STORE.active(user['id']),
+                        "queue": AI_JOB_STORE.queue_status(user['id'], ai_parallel_limit())})
 
     def handle_ai_run_ack(self, user: dict) -> None:
         job_id = str(self.read_json().get("jobId") or "")
@@ -3423,7 +3509,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/ai/status":
             status = harness_status(ROOT)
-            status.update({"filePolicy": "site-workspace-only"})
+            status.update({"filePolicy": "site-workspace-only", "maxParallel": ai_parallel_limit(),
+                           "clientVersion": console_asset_version('/script.js')})
             if AI_UPSTREAM_DEGRADED:
                 status["configured"] = True  # Key 和运行时仍在，只是上游额度出了问题
                 status["degraded"] = AI_UPSTREAM_DEGRADED
@@ -3532,17 +3619,16 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if parsed.path.lower().rstrip("/") == "/gallery":
             self.serve_gallery()
             return
-        if parsed.path == "/":
-            self.path = f"/{FRONTEND_DIR}/index.html"
-            super().do_GET()
+        if parsed.path in ('/', '/index.html'):
+            self.serve_console_page()
             return
         # GPT 式会话地址：/c/<uuid> 由前端路由接管，统一回控制台首页
         if re.fullmatch(r"/c/[0-9a-fA-F-]{32,36}/?", parsed.path):
-            self.path = f"/{FRONTEND_DIR}/index.html"
-            super().do_GET()
+            self.serve_console_page()
             return
         if parsed.path in PUBLIC_STATIC_PATHS:
-            self.path = f"/{FRONTEND_DIR}{parsed.path}"
+            self._console_static_path = parsed.path
+            self.path = f"/{FRONTEND_DIR}{parsed.path}" + ('?' + parsed.query if parsed.query else '')
             super().do_GET()
             return
         self.send_error(404, "Not found")
@@ -3775,7 +3861,7 @@ def run_server(host: str, port: int) -> int:
     migrate_existing_site_accounts()
     print(f"炼丹社Hatchery（AIchemyHatchery）服务：http://{host}:{port}")
     http = ThreadingHTTPServer((host, port), AIchemyHatcheryHandler)
-    dispatcher = ai_jobs.Dispatcher(AI_JOB_STORE, execute_durable_ai_job, AI_RUN_MAX_PARALLEL, ROOT / '.ai-job-results')
+    dispatcher = ai_jobs.Dispatcher(AI_JOB_STORE, execute_durable_ai_job, ai_parallel_limit, ROOT / '.ai-job-results')
     dispatcher.start()
     # systemd 停止时先发 SIGTERM。默认动作是立刻终止进程，finally 不会执行，
     # 在途任务的结果就写不回库。改成置位停止事件，让 serve_forever 正常返回。

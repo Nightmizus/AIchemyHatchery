@@ -12,18 +12,21 @@ import deepseek_harness_adapter as dsh
 
 
 class WatchdogTests(unittest.TestCase):
-    def run_protocol(self, notifications, *, step=0, timeout=600):
+    def run_protocol(self, notifications, *, step=0, timeout=600, exited=False):
         clock = [0]
         stream = iter(notifications)
+        owner = self
+        if not hasattr(self, 'sessions'): self.sessions = []
         class Runtime:
             def __init__(self, *a, **k): pass
             def __enter__(self): return self
             def __exit__(self, *a): pass
-            def exited(self): return False
+            def exited(self): return exited
             def _diagnostics(self): return ''
             def request(self, method, params, *a):
                 if method == 'session/prompt':
                     self.sid = params['sessionId']
+                    owner.sessions.append(self.sid)
                     return {'messageId': 'message-1'}
             def next_notification(self, deadline):
                 clock[0] += step
@@ -39,7 +42,7 @@ class WatchdogTests(unittest.TestCase):
                                          'HATCHERY_AI_STALL_SECONDS': '120', 'DEEPSEEK_HARNESS_TIMEOUT_SECONDS': str(timeout)}, clear=True), \
                  patch.object(dsh, 'resolve_harness_binary', return_value=Path('/test/runtime')), \
                  patch.object(dsh, '_JsonRpcRuntime', Runtime), patch.object(dsh.time, 'monotonic', lambda: clock[0]):
-                return dsh.run_deepseek_harness(root=root, prompt='test', context={}, attachments=[], workspace=root, preview_port=1)
+                return dsh.run_deepseek_harness(root=root, prompt='test', context={}, attachments=[], workspace=root, preview_port=1, session_key='same-account')
 
     def events(self, summary='ok', finish='completed'):
         return [
@@ -72,6 +75,25 @@ class WatchdogTests(unittest.TestCase):
         with self.assertRaises(dsh.HarnessRuntimeError) as raised:
             self.run_protocol([], step=31)
         self.assertTrue(raised.exception.stall_no_progress)
+        self.assertTrue(raised.exception.recoverable)
+
+    def test_native_attempt_ids_are_fresh_while_account_scope_remains_identical(self):
+        self.run_protocol(self.events())
+        self.run_protocol(self.events())
+        self.assertNotEqual(self.sessions[0], self.sessions[1])
+        for session in self.sessions:
+            self.assertTrue(session.startswith(dsh.dsh_session_id('same-account') + '-'))
+
+    def test_dead_native_process_is_recoverable_without_waiting_for_stall_cap(self):
+        with self.assertRaises(dsh.HarnessRuntimeError) as raised:
+            self.run_protocol([dsh.NotificationTimeout('empty slice')], step=1, exited=True)
+        self.assertTrue(raised.exception.recoverable)
+        self.assertEqual(raised.exception.recovery_reason, 'runtime_exit')
+
+    def test_native_attempt_stream_counts_as_real_progress(self):
+        events = [{'method': 'session.event', 'params': {'event': {'type': 'assistant/attempt',
+                    'data': {'stream': [{'type': 'reasoning-delta', 'text': 'working'}]}}}}] * 6
+        self.assertEqual(self.run_protocol(events + self.events(), step=31)['summary'], 'ok')
 
     def test_total_deadline_even_with_useful_events(self):
         events = [{'method': 'session.event', 'params': {'event': {'type': 'assistant/chunk', 'data': {'chunk': {'type': 'text-delta', 'text': 'x'}}}}}] * 10

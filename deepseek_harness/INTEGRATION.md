@@ -165,6 +165,10 @@ DNS, nginx path routing or TLS for the independent site domains.
 
 异步与同步请求共用 PostgreSQL 的 `hatchery_ai_jobs`。客户端传入稳定的 `requestId`，相同请求重试返回同一任务；同账号按入队顺序执行，跨账号遵守 `HATCHERY_AI_MAX_PARALLEL`。浏览器只提交请求和读取历史，不能用 `messagesHtml` 覆盖已存会话。确认接收结果不会删除任务结果。
 
+2026-10-15 排队修复：跨账号并发默认 2，`.env` 中的 `HATCHERY_AI_MAX_PARALLEL` 支持运行中热更新（1–4），调小上限不会取消在途任务。`/api/ai/run/active` 返回不含其他账号标识/内容的排队原因、并发占用和前方等待数，区分“本账号前一条未结束”和“全局容量已满”。前端只有取得有效 jobId/requestId 确认才显示服务器排队；提交与轮询请求有超时，明确 404 会清除本地幽灵等待，但不会自动重放执行。损坏结果缓冲保留为 `.invalid` 私有文件，不得阻塞其他任务。控制台 HTML 强制不缓存，JS/CSS URL 由文件内容哈希生成，修复不会再依赖人工改资源版本号。回归新增 `scripts/ai_queue_browser_tests.py`，与真实临时 PostgreSQL 的任务测试配套执行，不调用真实模型。
+
+会话自恢复：`HATCHERY_AI_STALL_SECONDS=180`，原生进程退出、通信管道断开、初始化/投递超时、原生会话冲突、无完整结果或持续无有效进展时，可在同一个持久任务和网站锁内续作。`HATCHERY_AI_AUTO_RECOVERIES=1` 默认最多自动恢复一次（0 关闭，硬上限 2），所有尝试共用原总时间上限。每次使用新的原生进程与随机尝试 ID，用户账号对话 ID 不变；保留失败尝试日志与 `.ai-job-results/recoveries/<runId>/` 私有检查点，刷新当前文件清单后继续，不能从旧页面快照覆盖已保存成果。真实 `assistant/attempt` 流式进展计入看门狗，其他会话通知不能延长等待。配额/认证错误不自动重试；若有未确认完成的后台写操作，停止恢复以防重复写入。已确认操作仅以名称记录，命令和密钥不进恢复记录；新能力令牌重新按同一账号/目录/模式绑定，旧令牌撤销。无法取得所有尝试的 usage 时总用量标未知，不把最后一次调用当全部用量。回归为 `scripts/ai_recovery_tests.py` 与 `scripts/ai_watchdog_tests.py`，均不调用真实模型。
+
 执行中任务有租约。服务中断后，过期任务显示为中断，排队任务保留，系统不会自动重放已经开始的文件操作。`.ai-job-results/` 是数据库暂不可用时的私有结果缓冲，`.ai-backups/site-runs/` 保存修改前的文件；备份和缓冲需要持久磁盘与服务账号写入权限，不能放进公共站点或发布包。`site_files.py` 的锁同时覆盖线程和 Linux 进程。
 
 默认发布链接为当前入口的 `/pages/<slug>/`。只有 DNS 和 HTTPS 已就绪时才设置 `ALCHEMY_HATCHERY_SITE_SUBDOMAINS_ENABLED=1`。本次生产按用户选择继续使用 IP，未启用域名。首次使用旧站点会导出真实页面和资源，保留原 JSON 私有备份；只读聊天与规划本身不做文件初始化。

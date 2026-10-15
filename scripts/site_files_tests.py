@@ -3,6 +3,8 @@ from contextlib import contextmanager, ExitStack
 import functools
 import http.client
 import json
+import hashlib
+import re
 from pathlib import Path
 import sqlite3
 import shutil
@@ -119,6 +121,30 @@ class FileFixture:
 
 
 class FilesTests(unittest.TestCase):
+    def test_console_shell_and_script_versions_cannot_remain_stale(self):
+        with FileFixture() as f:
+            version = hashlib.sha256((PROJECT / 'frontend/script.js').read_bytes()).hexdigest()[:20]
+            for path in ('/', '/index.html', '/c/11111111-1111-4111-8111-111111111111'):
+                status, headers, body = f.request(path)
+                self.assertEqual(status, 200)
+                self.assertIn('no-store', headers['Cache-Control'])
+                self.assertIn('/script.js?v=' + version, body.decode())
+                self.assertEqual(f.request(path, 'HEAD')[2], b'')
+            for path in ('/script.js', '/script.js?v=old-browser-version'):
+                self.assertIn('no-store', f.request(path)[1]['Cache-Control'])
+            status, headers, body = f.request('/script.js?v=' + version)
+            self.assertEqual(status, 200)
+            self.assertIn('immutable', headers['Cache-Control'])
+            self.assertEqual(body, (PROJECT / 'frontend/script.js').read_bytes())
+
+    def test_asset_version_is_derived_from_content_without_manual_version_bumps(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(server, 'ROOT', Path(folder)):
+            target = Path(folder) / 'frontend/script.js'; target.parent.mkdir()
+            target.write_text('first build')
+            first = server.console_asset_version('/script.js')
+            target.write_text('second build')
+            self.assertNotEqual(server.console_asset_version('/script.js'), first)
+
     def test_metadata_only_and_files_survive_reinitialize(self):
         with FileFixture() as f:
             index = f.directory / 'index.html'; index.write_text('<h1>direct edit</h1>')

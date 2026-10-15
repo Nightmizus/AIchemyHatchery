@@ -26,21 +26,28 @@
       requestOptions.headers['Content-Type'] = 'application/json';
       requestOptions.body = JSON.stringify(options.body);
     }
-    const response = await fetch(path, requestOptions);
-    let payload = {};
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
     try {
-      payload = await response.json();
-    } catch {
-      // 非 JSON 响应（多半是代理/网关的 HTML 错误页）：带上状态码，方便定位是哪一层出的问题
-      payload = { error: `服务返回了无法解析的内容（HTTP ${response.status}，可能是服务重启中或网关故障）` };
+      const response = await fetch(path, { ...requestOptions, signal: controller.signal });
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch {
+        const message = `服务返回了无法解析的内容（HTTP ${response.status}，可能是服务重启中或网关故障）`;
+        if (response.ok) throw new Error(message);
+        payload = { error: message };
+      }
+      if (!response.ok) {
+        const error = new Error(payload.error || `请求失败（${response.status}）`);
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
+      }
+      return payload;
+    } finally {
+      clearTimeout(timer);
     }
-    if (!response.ok) {
-      const error = new Error(payload.error || `请求失败（${response.status}）`);
-      error.status = response.status;
-      error.payload = payload;
-      throw error;
-    }
-    return payload;
   }
 
   function authError(message = '') {
