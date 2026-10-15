@@ -356,6 +356,16 @@ class Site:
                 raise ValueError('Website secret storage is full')
             save_json(self.secret_path, combined)
             return {'names': sorted(combined), 'restartRequired': self.status()['active']}
+        if operation == 'delete_secrets':
+            names = args.get('names')
+            if not isinstance(names, list) or not 1 <= len(names) <= 32 or any(not isinstance(name, str) for name in names):
+                raise ValueError('Provide 1–32 website secret names')
+            values = load_json(self.secret_path)
+            for name in names:
+                values.pop(name, None)
+            if self.secret_path.exists():
+                save_json(self.secret_path, values)
+            return {'names': sorted(values), 'restartRequired': self.status()['active']}
         raise ValueError('Unknown website runtime operation')
 
 

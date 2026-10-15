@@ -112,7 +112,7 @@ site.json 只存字符串基本信息：format（固定 files）、siteName、de
 """
 
 DYNAMIC_SITE_RULES = """
-本轮已为当前子网站开通 site_service：可查看 status/logs/secret_names；完全访问模式可 exec（隔离 shell）、install（pip/npm 依赖）、deploy（Python/Node 常驻服务）、stop、set_secrets。此授权只属于当前网站，不能把权限扩展至宿主机或其他网站。
+本轮已为当前子网站开通 site_service：可查看 status/logs/secret_names；完全访问模式可 exec（隔离 shell）、install（pip/npm 依赖）、deploy（Python/Node 常驻服务）、stop、set_secrets/delete_secrets。此授权只属于当前网站，不能把权限扩展至宿主机或其他网站。
 网站源码在沙箱中只读映射为 /app，修改源码仍使用 write_file/replace_file；命令的临时与持久写入使用本网站私有 /data，SQLite 默认路径为环境变量 DATABASE_PATH（/data/site.sqlite3），重启保留。不要把数据库或密钥放入公开网站目录。密钥用 set_secrets 保存为本网站后台的环境变量，不能写进前端、公开文件、回复或日志；不会提供平台数据库或平台密钥。
 后台源码必须保存在本网站 backend/ 子目录（不对公网提供），使用 deploy 指定 runtime=python 或 node 和相对 entry，如 backend/app.py。程序必须监听环境变量 SOCKET_PATH 指定的 Unix socket，不要绑定宿主端口；平台自动把本网站 /_api/ 代理至后台并移除此前缀。前端使用相对 URL（如 ./_api/records），后台路由为 /records。Python 可用 socketserver.UnixStreamServer + BaseHTTPRequestHandler，或 uvicorn.run(app,uds=os.environ['SOCKET_PATH'])；Node 使用 http.createServer(handler).listen(process.env.SOCKET_PATH)。后端重启前应删除本网站的旧 SOCKET_PATH 文件。
 普通后台和 exec 不具备外部网络，不能访问宿主或其他站点；install 专用工具可从公共包仓库安装当前网站的依赖，不能访问私网、平台服务或云元数据。Python 包安装至 /data/python，Node 包至 /data/node/node_modules，环境已配置搜索路径。文件系统与服务资源均有独立限制，不可尝试提权、越界或规避限制。

@@ -198,16 +198,17 @@ export function apply(ctx) {
     name: 'site_service',
     description: 'Manage ONLY this website’s isolated backend. Source is /app (read-only to commands); edit source with website file tools. Private persistent data/SQLite: /data, dependencies: /data/python or /data/node/node_modules. Backend must listen on SOCKET_PATH; the platform serves it at this website’s /_api/. No host shell, host ports, platform credentials or other websites are available.',
     parameters: { type: 'object', properties: {
-      action: { type: 'string', enum: TOOL_ALLOW[toolsMode] ? ['status', 'logs', 'secret_names'] : ['status', 'logs', 'secret_names', 'exec', 'install', 'deploy', 'stop', 'set_secrets'] },
+      action: { type: 'string', enum: TOOL_ALLOW[toolsMode] ? ['status', 'logs', 'secret_names'] : ['status', 'logs', 'secret_names', 'exec', 'install', 'deploy', 'stop', 'set_secrets', 'delete_secrets'] },
       command: { type: 'string' }, manager: { type: 'string', enum: ['pip', 'npm'] }, packages: { type: 'array', items: { type: 'string' }, maxItems: 20 },
       runtime: { type: 'string', enum: ['python', 'node'] }, entry: { type: 'string' }, healthPath: { type: 'string' },
       values: { type: 'object', additionalProperties: { type: 'string' } },
+      names: { type: 'array', items: { type: 'string' }, maxItems: 32 },
     }, required: ['action'], additionalProperties: false }, output: stringOutput(),
     async execute(value, execution) {
       const { action, ...args } = objectArgs(value)
       const readonly = TOOL_ALLOW[toolsMode]
       if (readonly && !['status', 'logs', 'secret_names'].includes(action)) throw new Error('This mode cannot change website services')
-      if (!['status', 'logs', 'secret_names', 'exec', 'install', 'deploy', 'stop', 'set_secrets'].includes(action)) throw new Error('Unknown website service action')
+      if (!['status', 'logs', 'secret_names', 'exec', 'install', 'deploy', 'stop', 'set_secrets', 'delete_secrets'].includes(action)) throw new Error('Unknown website service action')
       const response = await fetch(`http://127.0.0.1:${previewPort}/api/ai/site-runtime`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.MIAODA_SITE_RUNTIME_TOKEN}` },
         body: JSON.stringify({ operation: action, args }), signal: execution?.signal,

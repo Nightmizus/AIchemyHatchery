@@ -46,7 +46,7 @@ class CapabilityTests(unittest.TestCase):
             for mode in ('chat', 'plan'):
                 with site_runtime.capability('one', '/current', mode) as token:
                     site_runtime.authorized_call(token, 'status', {})
-                    for operation in ('exec', 'install', 'deploy', 'stop', 'set_secrets'):
+                    for operation in ('exec', 'install', 'deploy', 'stop', 'set_secrets', 'delete_secrets'):
                         with self.assertRaises(ValueError):
                             site_runtime.authorized_call(token, operation, {})
             self.assertEqual(call.call_count, 2)
@@ -111,6 +111,7 @@ class BrokerTests(unittest.TestCase):
         self.site.secret_path.write_text(json.dumps({'OWN_KEY': 'private-value'}))
         self.assertEqual(self.site.redact('test private-value'), 'test ***')
         self.assertEqual(self.site.dispatch('secret_names', {}), {'names': ['OWN_KEY']})
+        self.assertEqual(self.site.dispatch('delete_secrets', {'names': ['OWN_KEY']})['names'], [])
 
 
 class HttpBoundaryTests(unittest.TestCase):
@@ -136,6 +137,13 @@ class HttpBoundaryTests(unittest.TestCase):
             self.assertEqual(args[3]['path'], '/records?limit=2')
             self.assertNotIn('console-', str(args[3]))
             self.assertEqual(fixture.request('/pages/one/_api/records', headers={'Origin': 'https://other.example'})[0], 403)
+            call.return_value['headers'].append(['Set-Cookie', 'own=value; Domain=.aichemy.club; Path=/'])
+            status, headers, _ = fixture.request('/_api/records', host='one.' + server.SITE_BASE_DOMAIN,
+                headers={'Cookie': 'alchemy_hatchery_console_session=console-private; own=website'})
+            self.assertEqual(status, 200)
+            self.assertNotIn('console-private', str(call.call_args.args[3]))
+            self.assertIn('own=website', call.call_args.args[3]['headers']['Cookie'])
+            self.assertNotIn('domain=', headers['Set-Cookie'].lower())
 
 
 if __name__ == '__main__':

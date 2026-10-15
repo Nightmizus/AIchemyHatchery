@@ -16,7 +16,7 @@ SOCKET = '/run/hatchery-sites/control.sock'
 _capabilities = {}
 _lock = threading.Lock()
 READ_ONLY = frozenset({'status', 'logs', 'secret_names'})
-OPERATIONS = READ_ONLY | {'exec', 'install', 'deploy', 'stop', 'set_secrets'}
+OPERATIONS = READ_ONLY | {'exec', 'install', 'deploy', 'stop', 'set_secrets', 'delete_secrets'}
 
 
 def site_key(user_id):
