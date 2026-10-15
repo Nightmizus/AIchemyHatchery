@@ -3,11 +3,13 @@ from socketserver import BaseRequestHandler, ThreadingTCPServer
 import importlib.util
 import json
 from pathlib import Path
+import runpy
 import ssl
 import subprocess
 import sys
 import tempfile
 import threading
+from types import ModuleType
 from unittest.mock import patch
 import unittest
 
@@ -89,6 +91,23 @@ class PublicationTests(unittest.TestCase):
             info = fixture.handler.site_files_info(USER['id'], fixture.published / 'new-site', 'new-site')
             self.assertEqual(info['publicUrl'], 'https://new-site.aichemy.test/')
             self.assertFalse(info['httpsPending'])
+
+
+class CertbotTimeoutTests(unittest.TestCase):
+    def test_actual_network_default_changes_and_explicit_values_are_preserved(self):
+        acme = ModuleType('acme')
+        client = ModuleType('acme.client')
+        class Network:
+            def __init__(self, key, timeout=45):
+                self.timeout = timeout
+        client.ClientNetwork = Network
+        client.DEFAULT_NETWORK_TIMEOUT = 45
+        acme.client = client
+        with patch.dict(sys.modules, {'acme': acme, 'acme.client': client}):
+            runpy.run_path(str(ROOT / 'ops/certbot-sitecustomize.py'))
+            self.assertEqual(Network('fixture-key').timeout, 180)
+            self.assertEqual(Network('fixture-key', timeout=240).timeout, 240)
+            self.assertEqual(Network('fixture-key', 90).timeout, 90)
 
 
 class ReconciliationTests(unittest.TestCase):

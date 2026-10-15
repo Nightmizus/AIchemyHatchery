@@ -175,7 +175,7 @@ DNS, nginx path routing or TLS for the independent site domains.
 
 启用子域名后，`public_site_url()` 对本机 TLS 代理执行带 SNI 的实际握手，验证信任链、有效期和主机名；未通过时，发布响应、账号地址与 Gallery 都使用 `/pages/<slug>/`。发布响应和文件接口通过 `httpsPending` 告知前端等待，发布弹窗自动查询并在验证通过后切换到独立域名。证书文件已生成、签发命令成功或服务处于 active 均不能代替此检查。
 
-原生部署将 `ops/hatchery-cert-sync.py` 安装为 root 所有的 `/usr/local/sbin/hatchery-cert-sync`，三个同名 systemd 单元安装到 `/etc/systemd/system/`。path 单元即时响应发布，timer 每两分钟补偿丢失触发与失败重试；普通失败从两分钟开始退避至十五分钟，CA 限流至少等待一小时。脚本会确认 nginx 实际提供的新证书；同一轮签发期间的新请求由下一次 path/timer 激活处理。脚本与单元随源码提交，避免仅在线上反复修补。
+原生部署将 `ops/hatchery-cert-sync.py` 安装为 root 所有的 `/usr/local/sbin/hatchery-cert-sync`，三个同名 systemd 单元安装到 `/etc/systemd/system/`。`ops/certbot-sitecustomize.py` 安装为 `/usr/local/lib/hatchery-certbot/sitecustomize.py`，向 ACME 网络客户端实际传入 180 秒超时；仅在导入后修改模块常量无法改变 Python 已绑定的默认参数。path 单元即时响应发布，timer 每两分钟补偿丢失触发与失败重试；普通失败从两分钟开始退避至十五分钟，CA 限流至少等待一小时。脚本会确认 nginx 实际提供的新证书；同一轮签发期间的新请求由下一次 path/timer 激活处理。脚本与单元随源码提交，避免仅在线上反复修补。
 
 默认 TLS 代理为 `127.0.0.1:443`。容器环境需用 `ALCHEMY_HATCHERY_TLS_PROBE_HOST` / `ALCHEMY_HATCHERY_TLS_PROBE_PORT` 指向可达的代理；探测失败会保留可用路径地址。
 
