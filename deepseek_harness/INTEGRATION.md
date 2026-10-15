@@ -183,7 +183,7 @@ DNS, nginx path routing or TLS for the independent site domains.
 
 ## 本网站动态服务权限（2026-10-15）
 
-动态服务按网站单独开通，默认关闭。应用 `.env` 的 `HATCHERY_DYNAMIC_SITE_KEYS` 填账号 ID 的 SHA-256；root 所有的 `/etc/hatchery-sites/allowed-sites.json` 将同一标识绑定到实际网站目录的 `[st_dev, st_ino]`。目录改名保留 inode，因此授权可随发布路径迁移；不同网站即使提交相同标识，也不能选择其他目录。当前仅授权 `sleepsdsz` 的网站拥有者。
+动态服务在未配置的环境默认关闭。应用 `.env` 的 `HATCHERY_DYNAMIC_SITE_KEYS` 可以填账号 ID 的 SHA-256（逗号分隔）逐站授权，也可以填 `*` 对全部现有及以后新增的账号开放。全账号模式同时要求 root 私有的 `/etc/hatchery-sites/policy.json` 设置 `{"allowAllAccounts":true}`；broker 首次收到已初始化网站的请求时，以非特权 `hatchery` 身份独立查询真实账号及数据库中的网站归属，验证服务端绑定的账号 ID、SHA-256 和目录完全一致，再原子写入 root 所有的 `/etc/hatchery-sites/allowed-sites.json`，绑定实际目录的 `[st_dev, st_ino]`。不能用网站元数据或模型传入的路径证明归属；并发授权串行合并，已有绑定不能被其他账号接管。目录改名保留 inode，因此授权可随发布路径迁移。生产现按用户要求面向全部账号开放，无需逐个维护白名单；尚未建站的账号在初始化网站后首次使用时自动绑定，不预创建网站或启动后台进程。
 
 `ops/site-runtime-broker.py` 安装为 root 所有的 `/usr/local/sbin/hatchery-site-runtime`，配合同名 `ops/hatchery-site-runtime.service` 与 `ops/hatchery-sites.slice`。应用和 AI 不获得 root、sudo、systemctl 或宿主 shell。应用通过受限 Unix socket 请求 broker，AI 使用任务内、可撤销、不可自选账号/目录的能力令牌。只读模式只能查看状态、日志和密钥名称。
 

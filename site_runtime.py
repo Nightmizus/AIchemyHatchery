@@ -24,8 +24,10 @@ def site_key(user_id):
 
 
 def enabled(user_id):
-    allowed = os.environ.get('HATCHERY_DYNAMIC_SITE_KEYS', '').split(',')
-    return site_key(user_id) in {value.strip() for value in allowed}
+    if user_id is None or not str(user_id):
+        return False
+    allowed = {value.strip() for value in os.environ.get('HATCHERY_DYNAMIC_SITE_KEYS', '').split(',')}
+    return '*' in allowed or site_key(user_id) in allowed
 
 
 class UnixConnection(http.client.HTTPConnection):
@@ -46,7 +48,8 @@ def call(user_id, workspace, operation, args=None):
         raise ValueError('未知的网站运行操作')
     connection = UnixConnection()
     try:
-        body = json.dumps({'siteKey': site_key(user_id), 'workspace': str(Path(workspace).absolute()),
+        body = json.dumps({'siteKey': site_key(user_id), 'ownerId': str(user_id),
+                           'workspace': str(Path(workspace).absolute()),
                            'operation': operation, 'args': args or {}}).encode()
         connection.request('POST', '/', body, {'Content-Type': 'application/json'})
         response = connection.getresponse()
