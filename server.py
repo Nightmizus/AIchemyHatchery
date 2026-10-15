@@ -42,6 +42,7 @@ import site_files
 import ai_jobs
 import login_links
 import study_engine
+import site_runtime
 
 from deepseek_harness_adapter import HarnessRuntimeError, harness_status, resolve_llm_provider, run_deepseek_harness
 
@@ -2142,6 +2143,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
+            if self.proxy_site_backend():
+                return
             # CSRF：所有写操作都要求同源发起（原先仅依赖 SameSite=Strict，同站子域可绕过）
             if not self.same_origin_request():
                 self.send_json({"error": "请求来源不被允许"}, 403)
@@ -2178,6 +2181,13 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_revoke_other_sessions()
             elif path == "/api/site/files":
                 self.handle_site_files()
+            elif path == "/api/ai/site-runtime":
+                token = self.headers.get('Authorization', '').removeprefix('Bearer ')
+                data = self.read_json()
+                args = data.get('args', {})
+                if not isinstance(args, dict):
+                    raise ValueError('运行参数必须是对象')
+                self.send_json(site_runtime.authorized_call(token, data.get('operation'), args))
             elif path == "/api/console/draft":
                 self.handle_save_draft()
             elif path == "/api/site-account/reset-owner":
@@ -2350,9 +2360,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             while True:
                 attempt += 1
                 try:
-                    result = run_deepseek_harness(root=ROOT, prompt=prompt, context=context, attachments=attachments,
-                                                  workspace=workspace, preview_port=PORT, progress=progress, mode=mode,
-                                                  session_key=str(user["id"]))
+                    with site_runtime.capability(user['id'], workspace, mode) as runtime_token:
+                        result = run_deepseek_harness(root=ROOT, prompt=prompt, context=context, attachments=attachments,
+                                                      workspace=workspace, preview_port=PORT, progress=progress, mode=mode,
+                                                      session_key=str(user["id"]), runtime_token=runtime_token)
                     break
                 except HarnessRuntimeError as error:
                     if attempt > 1 or not getattr(error, "stall_no_progress", False) or site_files.file_manifest(workspace) != retry_manifest:
@@ -2579,6 +2590,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 record_site_audit(slug, username, "site.publish", f"/pages/{slug}/", "website files")
             if SITE_SUBDOMAINS_ENABLED:
                 request_cert_sync()
+            if moved and site_runtime.enabled(user_id):
+                try:
+                    site_runtime.call(user_id, target, 'relocate')
+                except RuntimeError:
+                    print('[site-runtime] 网站地址已更新，后台服务需重新部署', file=sys.stderr)
             info = self.site_files_info(user_id, target, slug)
             self.send_json({"ok": True, "url": f"/pages/{slug}/", "slug": slug,
                             "publicUrl": info['publicUrl'], "httpsPending": info['httpsPending'], "subdomainsEnabled": SITE_SUBDOMAINS_ENABLED, "accountEnabled": has_account,
@@ -3011,6 +3027,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         # GET 路由无兜底时任何 ValueError 都会掐断连接（前端拿到的是网络错误而非可读 JSON）
         try:
+            if self.proxy_site_backend():
+                return
             self._do_GET()
         except ValueError as exc:
             try:
@@ -3028,6 +3046,112 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "服务器内部错误，请稍后重试"}, 500)
             except Exception:
                 pass
+
+    def proxy_site_backend(self) -> bool:
+        """Route only this website's /_api/ requests to its private backend socket."""
+        parsed = urlparse(self.path)
+        path = parsed.path
+        slug = site_slug_from_host(self.headers.get('Host', ''))
+        prefix = ''
+        user_id = None
+        if slug and (path == '/_api' or path.startswith('/_api/')):
+            prefix = '/_api'
+        else:
+            match = re.match(r'^/pages/([A-Za-z0-9_-]{3,32})/_api(?:/|$)', path)
+            if match:
+                slug = match.group(1)
+                prefix = f'/pages/{slug}/_api'
+            else:
+                match = re.match(r'^/(preview|ai-preview)/([0-9a-f]{32})(/run/[A-Za-z0-9_-]+)?/_api(?:/|$)', path)
+                if match:
+                    with neon_db(autocommit=True) as conn, conn.cursor() as cur:
+                        cur.execute('SELECT user_id FROM hatchery_user_extras WHERE preview_id=%s', (match.group(2),))
+                        row = cur.fetchone()
+                    user_id = str(row[0]) if row else None
+                    prefix = match.group(0).rstrip('/')
+        if not prefix:
+            return False
+        if slug:
+            with neon_db(autocommit=True) as conn, conn.cursor() as cur:
+                cur.execute('SELECT user_id FROM hatchery_published_sites WHERE slug=%s', (slug,))
+                row = cur.fetchone()
+            user_id = str(row[0]) if row else None
+        if not user_id or not site_runtime.enabled(user_id):
+            self.send_json({'error': '当前网站没有已开通的动态服务'}, 404)
+            return True
+        opaque_preview = bool(prefix.startswith(('/preview/', '/ai-preview/', '/pages/')))
+        origin = self.headers.get('Origin', '')
+        if origin and not (opaque_preview and origin == 'null') and urlparse(origin).netloc.lower() != self.request_host():
+            self.send_json({'error': '请求来源不被允许'}, 403)
+            return True
+        if self.headers.get('Transfer-Encoding'):
+            raise ValueError('动态接口不接受分块请求体')
+        length = int(self.headers.get('Content-Length', '0'))
+        if not 0 <= length <= 1_000_000:
+            raise ValueError('动态接口请求体不能超过 1 MB')
+        if self.command == 'OPTIONS':
+            self.send_response(204)
+            self.send_header('Access-Control-Allow-Origin', '*' if opaque_preview else origin or '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+            self.send_header('Content-Length', '0'); self.end_headers()
+            return True
+        directory, _ = user_site_directory(user_id)
+        headers = {name: value for name, value in self.headers.items()
+                   if name.lower() not in {'cookie', 'authorization', 'host', 'connection', 'content-length', 'transfer-encoding'}
+                   and not name.lower().startswith('x-')}
+        # Console credentials must never enter a user backend, including path previews.
+        if not opaque_preview:
+            cookie = SimpleCookie()
+            cookie.load(self.headers.get('Cookie', ''))
+            if 'alchemy_hatchery_console_session' in cookie:
+                del cookie['alchemy_hatchery_console_session']
+            if cookie:
+                headers['Cookie'] = '; '.join(morsel.OutputString() for morsel in cookie.values())
+            if 'Authorization' in self.headers:
+                headers['Authorization'] = self.headers['Authorization']
+        headers['Host'] = slug + '.' + SITE_BASE_DOMAIN if slug else 'website.local'
+        backend_path = path[len(prefix):] or '/'
+        if parsed.query:
+            backend_path += '?' + parsed.query
+        result = site_runtime.call(user_id, directory, 'proxy', {'method': self.command,
+            'path': backend_path, 'headers': headers, 'body': base64.b64encode(self.rfile.read(length)).decode()})
+        body = base64.b64decode(result['body'])
+        self.send_response(result['status'])
+        for name, value in result['headers']:
+            if any(c in name + value for c in '\r\n\0'):
+                continue
+            if name.lower() not in {'content-length', 'connection', 'transfer-encoding', 'access-control-allow-origin'} and not (opaque_preview and name.lower() == 'set-cookie'):
+                if name.lower() == 'set-cookie':
+                    value = re.sub(r';\s*domain=[^;]*', '', value, flags=re.IGNORECASE)
+                self.send_header(name, value)
+        if opaque_preview:
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Content-Security-Policy', "sandbox allow-scripts allow-forms allow-popups allow-downloads; worker-src 'none'")
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(body))); self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+        return True
+
+    def do_PUT(self):
+        self.do_backend_method()
+
+    def do_PATCH(self):
+        self.do_backend_method()
+
+    def do_DELETE(self):
+        self.do_backend_method()
+
+    def do_OPTIONS(self):
+        self.do_backend_method()
+
+    def do_backend_method(self):
+        try:
+            if not self.proxy_site_backend():
+                self.send_error(405, 'Method not allowed')
+        except (ValueError, RuntimeError) as exc:
+            self.send_json({'error': str(exc)}, 502)
 
     def _do_GET(self) -> None:
         parsed = urlparse(self.path)

@@ -181,6 +181,18 @@ DNS, nginx path routing or TLS for the independent site domains.
 
 回归：`.venv/bin/python scripts/site_https_tests.py`（临时真实 TLS + 本地发布与失败重试测试），以及安装 Playwright 的 Python 执行 `scripts/site_https_browser_tests.py`（发布后链接自动切换）。两者不调用真实 CA 或模型。
 
+## 本网站动态服务权限（2026-10-15）
+
+动态服务按网站单独开通，默认关闭。应用 `.env` 的 `HATCHERY_DYNAMIC_SITE_KEYS` 填账号 ID 的 SHA-256；root 所有的 `/etc/hatchery-sites/allowed-sites.json` 将同一标识绑定到实际网站目录的 `[st_dev, st_ino]`。目录改名保留 inode，因此授权可随发布路径迁移；不同网站即使提交相同标识，也不能选择其他目录。当前仅授权 `sleepsdsz` 的网站拥有者。
+
+`ops/site-runtime-broker.py` 安装为 root 所有的 `/usr/local/sbin/hatchery-site-runtime`，配合同名 `ops/hatchery-site-runtime.service` 与 `ops/hatchery-sites.slice`。应用和 AI 不获得 root、sudo、systemctl 或宿主 shell。应用通过受限 Unix socket 请求 broker，AI 使用任务内、可撤销、不可自选账号/目录的能力令牌。只读模式只能查看状态、日志和密钥名称。
+
+每站点有独立 Unix 身份、只读源码 `/app`、私有网络和受限 systemd 文件系统。仅本站私有 `/data` 可持久写入，位于独立 512 MiB ext4 卷；`/tmp` 为限额临时文件系统。源码通过原有文件工具修改。SQLite 默认 `/data/site.sqlite3`；密钥由 root 私有存储注入本站进程，平台 `.env`、数据库凭据、控制 socket、其他网站及宿主目录均不挂载。服务自身限制 192 MiB 内存、50% CPU、64 个任务；整组站点另有总资源上限。
+
+`site_service` 提供 `exec/install/deploy/stop/status/logs/set_secrets/secret_names`。后台入口必须在私有 `backend/` 目录；Python/Node 监听 `SOCKET_PATH` 指定的 Unix socket，平台将本站 `/_api/`、路径发布和预览中的对应地址代理到后台，移除此地址前缀。代理验证 socket 的实际进程 UID，控制台 Cookie 不转发，预览不接收后台 Cookie。服务进程和普通命令不能访问网络；pip/npm 安装单独允许公网仓库，禁止私网、云元数据和平台 IP。Python 只安装 wheel，npm 禁用安装脚本。更换依赖或密钥后重新部署服务。
+
+broker 需要原生 Linux/systemd、`nodejs/npm/python3-pip/acl/e2fsprogs`；不适用于直接在应用 Docker 容器内开启宿主权限。上线前须实际验证 RootDirectory、独立 UID、只读源码、平台网络隔离及包安装网络的 BPF 策略。回归入口为 `scripts/site_runtime_tests.py` 与 `node scripts/site_runtime_tool_tests.mjs`；无需调用真实 AI。
+
 原测试网站的修正由 `scripts/repair_recorded_test_site.py` 明确限定在 AIUI40 测试目录。补建标记标注来源，不把原来失败的压测改成通过。`scripts/deploy_ai_repairs.py` 默认只打包，显式 `--deploy` 才执行已审阅的原生部署与备份；它不会提交 Git、修改 DNS 或发起模型调用。线上只读与交互检查见 `scripts/verify_ai_repairs_live.py`。
 
 原始运行时日志的补充恢复见 `scripts/recover_ai_runtime_evidence.py` 与 `scripts/restore_runtime_fragments.py`：36 条回复可对应既有记录，其中 21 条更完整，两个缺失区块有原始编辑内容。恢复文本按来源归档，不将旧失败轮次改判为通过。
