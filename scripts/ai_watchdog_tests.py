@@ -54,6 +54,20 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(result['summary'], text)
         self.assertEqual(result['plan'], 'plan' * 3000)
 
+    def test_stale_session_log_is_purged_before_prompting(self):
+        """dsh 只在会话不存在时创建它：留下的磁盘会话会让下一次任务秒失败。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = dsh.dsh_session_id('user-1')
+            slug = '--' + str(root.resolve()).strip('/').replace('/', '-') + '--'
+            stale = root / '.deepseek-harness' / 'home' / 'sessions' / slug / session
+            stale.mkdir(parents=True)
+            (stale / 'session.v3.jsonl').write_text('{"type":"session/"}')
+            (stale / 'session.lock').write_text('')
+            self.assertTrue(dsh.reset_dsh_session(root / '.deepseek-harness' / 'home', root, session))
+            self.assertFalse(stale.exists())
+            self.assertFalse(dsh.reset_dsh_session(root / '.deepseek-harness' / 'home', root, session))
+
     def test_unrelated_notification_flood_cannot_disable_stall_deadline(self):
         with self.assertRaises(dsh.HarnessRuntimeError) as raised:
             self.run_protocol([], step=31)

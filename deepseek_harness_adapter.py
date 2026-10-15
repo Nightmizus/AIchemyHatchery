@@ -140,37 +140,35 @@ class NotificationTimeout(HarnessRuntimeError):
 
 
 def dsh_session_id(session_key: str) -> str:
-    """账号唯一且稳定的 dsh 会话 id。
+    """账号唯一的 dsh 会话 id。
 
-    同一个 key 永远得到同一个 id，所以"10 分钟内继续对话复用同一会话"只是
-    把同一个 id 再交给新起的进程——dsh 会从磁盘恢复上下文。
+    确定性派生：同一账号每次都得到同一个目录名，便于清理与排查。
+    会话内容不复用（见 reset_dsh_session），上下文由服务端任务历史提供。
     """
     if not session_key:
         return f"miaoda-{uuid.uuid4().hex}"
     return "miaoda-" + uuid.uuid5(uuid.NAMESPACE_URL, f"hatchery-dsh:{session_key}").hex
 
 
-def reap_idle_dsh_session(dsh_home: Path, project_root: Path, session_id: str, idle_seconds: float) -> bool:
-    """空闲超时后删掉磁盘上的 dsh 会话，使下一条消息从干净上下文重开。
+def reset_dsh_session(dsh_home: Path, project_root: Path, session_id: str) -> bool:
+    """删掉磁盘上的 dsh 会话目录，让本次任务从干净上下文重开。
 
-    目录名由 dsh 自己按 cwd 生成（`/a/b` → `--a-b--`），这里按同一规则推算；
-    找不到就返回 False，不影响正在执行的任务。
+    dsh 的 `session/prompt` 只在磁盘上没有该会话时才会创建它：只要上一轮留下的
+    `session.v3.jsonl` 还在，运行时立刻回 `session "..." already exists`，
+    任务在几秒内失败且没有任何输出（sdk-minimal 不提供 session/load 与
+    session/resume，磁盘会话无法续用）。所以每次任务开始前都必须清掉上一轮的
+    会话目录；对话连续性由服务端把任务历史写进 prompt 来保证。
+
+    目录名由 dsh 自己按 cwd 生成（`/a/b` → `--a-b--`），这里按同一规则推算。
     """
     if not session_id:
         return False
     slug = "--" + str(project_root.resolve()).strip("/").replace("/", "-") + "--"
     session_dir = dsh_home / "sessions" / slug / session_id
-    try:
-        if not session_dir.is_dir():
-            return False
-        marker = session_dir / "session.v3.jsonl"
-        last = marker.stat().st_mtime if marker.is_file() else session_dir.stat().st_mtime
-        if time.time() - last < idle_seconds:
-            return False
-        shutil.rmtree(session_dir, ignore_errors=True)
-        return True
-    except OSError:
+    if not session_dir.exists():
         return False
+    shutil.rmtree(session_dir, ignore_errors=True)
+    return True
 
 
 # 漏洞（密钥经子进程环境泄露）：原先把整份服务端环境（NEON_DATABASE_URL、SSO_SECRET、
@@ -771,10 +769,12 @@ def run_deepseek_harness(
     args = [str(binary), "--profile", "sdk-minimal", "--patch", str(patch)]
     events: list[dict] = []
     projector = _EventProjector(progress)
-    # 每个账号一个固定会话：dsh 把会话持久化在 $DSH_HOME/sessions/<项目>/<id>，
-    # 用同一个 id 再起进程即可接着上次的上下文，因此"10 分钟内复用、超时重开"
-    # 只需要在超时后删掉磁盘上的会话目录，不必常驻进程。
+    # 每个账号一个固定会话目录名，但内容每次重开：dsh 会拒绝在已有会话文件上
+    # 创建同名会话（already exists），任务只有几秒就失败的输出。
     session_id = dsh_session_id(session_key)
+    # 上一轮的会话目录若还在，运行时会对同一个 id 直接报 already exists；
+    # 每个任务都从干净会话起步，历史由服务端 prompt 负责。
+    reset_dsh_session(dsh_home, root, session_id)
 
     with _JsonRpcRuntime(args, root, env, timeout, secrets=(key, web_env["HATCHERY_DEEPSEEK_SEARCH_API_KEY"])) as runtime:
         initialize: dict = {"cwd": str(root.resolve()), "provider": provider["route"], "model": model, "maxTokens": max_tokens}

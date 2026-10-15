@@ -88,10 +88,27 @@ class JobsTests(unittest.TestCase):
         first, second = self.enqueue(), self.enqueue()
         self.store.claim(2)
         with self.pg.db() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE hatchery_ai_jobs SET lease_until=now()-interval '1 second' WHERE id=%s", (first['jobId'],))
+            # 超过宽限期（5 分钟）才算真的失去租约
+            cur.execute("UPDATE hatchery_ai_jobs SET lease_until=now()-interval '6 minutes' WHERE id=%s", (first['jobId'],))
         self.store.recover_expired()
         self.assertEqual(self.store.get('one', first['jobId'])['status'], 'interrupted')
         self.assertEqual(self.store.claim(2)['id'], second['jobId'])
+
+    def test_short_lease_lapse_does_not_interrupt_running_work(self):
+        """续租偶发失败时租约会短暂过期；这不该把仍在正常运行的任务判死。"""
+        job = self.enqueue()
+        self.store.claim(2)
+        with self.pg.db() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE hatchery_ai_jobs SET lease_until=now()-interval '10 seconds' WHERE id=%s", (job['jobId'],))
+        self.store.recover_expired()
+        self.assertEqual(self.store.get('one', job['jobId'])['status'], 'running')
+
+    def test_renew_reports_unsuccessful_ids(self):
+        """续租必须能报告哪些任务没续上，调用方才能立刻重试而不是静默放过。"""
+        job = self.enqueue()
+        self.store.claim(2)
+        self.assertEqual(self.store.renew([job['jobId']]), set())
+        self.assertEqual(self.store.renew(['missing-job']), {'missing-job'})
 
     def test_persistence_outage_spools_result_without_reexecuting(self):
         job = self.enqueue(); claimed = self.store.claim(2)

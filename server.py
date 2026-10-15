@@ -12,7 +12,10 @@ import os
 import re
 import secrets
 import shutil
+import signal
+import socket
 import smtplib
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -40,7 +43,7 @@ import ai_jobs
 import login_links
 import study_engine
 
-from deepseek_harness_adapter import HarnessRuntimeError, dsh_session_id, harness_status, reap_idle_dsh_session, resolve_llm_provider, run_deepseek_harness
+from deepseek_harness_adapter import HarnessRuntimeError, harness_status, resolve_llm_provider, run_deepseek_harness
 
 ROOT = Path(__file__).resolve().parent
 PUBLISHED = ROOT / "published"
@@ -596,17 +599,58 @@ def published_site_meta(slug: str) -> tuple[str, str]:
     return site_name, description
 
 
-def public_site_url(slug: str) -> str:
-    """Use same-origin paths until the operator enables verified DNS/TLS hosting."""
+_SITE_HTTPS_CACHE: dict[str, tuple[float, bool]] = {}
+_SITE_HTTPS_LOCK = threading.Lock()
+
+
+def site_subdomain_url(slug: str) -> str:
     if SITE_SUBDOMAINS_ENABLED and SITE_SLUG_PATTERN.fullmatch(slug) and slug not in RESERVED_SITE_SLUGS:
         return f"https://{slug}.{SITE_BASE_DOMAIN}/"
+    return ""
+
+
+def site_https_ready(slug: str) -> bool:
+    """Verify the certificate actually served by the TLS proxy, including its hostname.
+
+    A certificate file on disk or a running signing service does not prove that
+    nginx has loaded a valid certificate for this newly published hostname.
+    Failed probes expire quickly so a completed issuance becomes visible promptly.
+    """
+    url = site_subdomain_url(slug)
+    if not url:
+        return False
+    hostname = urlparse(url).hostname
+    now = time.monotonic()
+    with _SITE_HTTPS_LOCK:
+        cached = _SITE_HTTPS_CACHE.get(hostname)
+        if cached and now < cached[0]:
+            return cached[1]
+    ready = False
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((SITE_TLS_PROBE_HOST, SITE_TLS_PROBE_PORT), timeout=1.5) as connection:
+            with context.wrap_socket(connection, server_hostname=hostname):
+                ready = True
+    except (OSError, ValueError):
+        pass
+    with _SITE_HTTPS_LOCK:
+        if len(_SITE_HTTPS_CACHE) > 2000:
+            _SITE_HTTPS_CACHE.clear()
+        _SITE_HTTPS_CACHE[hostname] = (time.monotonic() + (30.0 if ready else 2.0), ready)
+    return ready
+
+
+def public_site_url(slug: str) -> str:
+    """Only hand out a subdomain after its served TLS certificate is valid."""
+    if site_https_ready(slug):
+        return site_subdomain_url(slug)
     return f"/pages/{quote(slug, safe='')}/"
 
 
 def request_cert_sync() -> None:
     """通知 root 的 hatchery-cert-sync 把新发布站点的子域名加进 TLS 证书。
     只写一个请求文件，真正的签发由 systemd path 单元在后台触发，发布流程不会变慢。
-    失败也不影响发布：证书同步还有每日定时任务兜底。"""
+    失败也不影响文件发布：未就绪的域名不会作为访问链接返回，后台定时重试。"""
     try:
         CERT_SYNC_TRIGGER.parent.mkdir(parents=True, exist_ok=True)
         CERT_SYNC_TRIGGER.touch()
@@ -1048,6 +1092,8 @@ SECURE_COOKIES = os.environ.get("ALCHEMY_HATCHERY_SECURE_COOKIES", "false").stri
 # SITE_HOST_DOMAINS 是接受“子域名即站点”路由的全部域名（旧域名保留其中，已发布链接不会断）。
 SITE_BASE_DOMAIN = os.environ.get("ALCHEMY_HATCHERY_SITE_BASE_DOMAIN", "hatchery.mizusumi.com").strip().lower() or "hatchery.mizusumi.com"
 SITE_SUBDOMAINS_ENABLED = os.environ.get('ALCHEMY_HATCHERY_SITE_SUBDOMAINS_ENABLED', '0').strip().lower() in ('1', 'true', 'yes')
+SITE_TLS_PROBE_HOST = os.environ.get('ALCHEMY_HATCHERY_TLS_PROBE_HOST', '127.0.0.1').strip() or '127.0.0.1'
+SITE_TLS_PROBE_PORT = int(os.environ.get('ALCHEMY_HATCHERY_TLS_PROBE_PORT', '443'))
 SITE_HOST_DOMAINS = tuple(dict.fromkeys(
     item.strip().lower()
     for item in os.environ.get(
@@ -2235,9 +2281,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if directory is None:
             directory, slug = user_site_directory(user_id)
         names = site_files.list_files(directory)
+        public_url = public_site_url(slug) if slug else ''
         return {"metadata": site_files.read_metadata(directory), "files": names,
                 "pages": sorted((n for n in names if n.endswith((".html", ".htm"))), key=lambda n: (n != "index.html", n)),
-                "previewUrl": f"/preview/{user_preview_id(str(user_id))}/", "slug": slug or "", "publicUrl": public_site_url(slug) if slug else '', "format": "files"}
+                "previewUrl": f"/preview/{user_preview_id(str(user_id))}/", "slug": slug or "", "publicUrl": public_url,
+                "httpsPending": bool(slug and site_subdomain_url(slug) and not public_url.startswith('https://')), "format": "files"}
 
     def handle_site_files(self) -> None:
         user = self.require_console_user()
@@ -2258,10 +2306,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json(self.site_files_info(user["id"], directory, slug))
 
     def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None, mode: str = "full", job_key: str = "") -> dict:
-        # 空闲超过窗口先清掉磁盘会话，本次任务就从干净上下文重开；
-        # 未超时就什么都不做，dsh 会用同一个 id 接着上次的上下文。
-        session_id = dsh_session_id(str(user["id"]))
-        reap_idle_dsh_session(ROOT / ".deepseek-harness" / "home", ROOT, session_id, ai_jobs.IDLE_SESSION_SECONDS)
+        # dsh 磁盘会话不能续用（见 reset_dsh_session），适配器每次任务前自行清理，
+        # 这里只负责持锁执行。
         # The lock covers the entire direct-file edit, including sync requests and publish/rename.
         with site_files.site_lock(user["id"]):
             return self.run_ai_files(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress, mode)
@@ -2533,10 +2579,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 record_site_audit(slug, username, "site.publish", f"/pages/{slug}/", "website files")
             if SITE_SUBDOMAINS_ENABLED:
                 request_cert_sync()
+            info = self.site_files_info(user_id, target, slug)
             self.send_json({"ok": True, "url": f"/pages/{slug}/", "slug": slug,
-                            "publicUrl": public_site_url(slug), "subdomainsEnabled": SITE_SUBDOMAINS_ENABLED, "accountEnabled": has_account,
+                            "publicUrl": info['publicUrl'], "httpsPending": info['httpsPending'], "subdomainsEnabled": SITE_SUBDOMAINS_ENABLED, "accountEnabled": has_account,
                             "siteAdmin": site_admin, "replacedSlug": old_slug if old_slug and old_slug != slug else None,
-                            "siteFiles": self.site_files_info(user_id, target, slug)})
+                            "siteFiles": info})
 
     def handle_site_owner_reset(self) -> None:
         user = self.require_console_user()
@@ -3606,10 +3653,25 @@ def run_server(host: str, port: int) -> int:
     http = ThreadingHTTPServer((host, port), AIchemyHatcheryHandler)
     dispatcher = ai_jobs.Dispatcher(AI_JOB_STORE, execute_durable_ai_job, AI_RUN_MAX_PARALLEL, ROOT / '.ai-job-results')
     dispatcher.start()
+    # systemd 停止时先发 SIGTERM。默认动作是立刻终止进程，finally 不会执行，
+    # 在途任务的结果就写不回库。改成置位停止事件，让 serve_forever 正常返回。
+    def request_shutdown(signum, _frame):
+        print(f"[shutdown] 收到信号 {signum}，正在停止受理并等待 AI 任务收尾", file=sys.stderr)
+        threading.Thread(target=http.shutdown, name="hatchery-shutdown", daemon=True).start()
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, request_shutdown)
+        except (ValueError, OSError):
+            pass  # 非主线程或平台不支持时忽略，退回默认行为
     try:
         http.serve_forever()
     finally:
-        dispatcher.stop.set()
+        # 先停止受理新请求，再等在途 AI 任务收尾：worker 是 daemon 线程，
+        # 直接退出会让正在跑的任务来不及写库，重启后就被判为中断。
+        remaining = dispatcher.shutdown(grace_seconds=20.0)
+        if remaining:
+            print(f"[shutdown] {remaining} 个 AI 任务未在宽限期内结束", file=sys.stderr)
         http.server_close()
     return 0
 

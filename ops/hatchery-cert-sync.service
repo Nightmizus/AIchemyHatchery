@@ -1,0 +1,11 @@
+[Unit]
+Description=Provision and verify Hatchery site HTTPS
+Wants=network-online.target
+After=network-online.target nginx.service
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/usr/local/lib/hatchery-certbot
+ExecStart=/usr/local/sbin/hatchery-cert-sync
+TimeoutStartSec=420
+UMask=0077

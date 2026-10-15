@@ -171,6 +171,16 @@ DNS, nginx path routing or TLS for the independent site domains.
 
 本地回归入口：`scripts/ai_jobs_tests.py`（临时 PostgreSQL）、`scripts/ai_watchdog_tests.py`、`scripts/ai_context_tests.py`、`scripts/site_files_tests.py`、`scripts/site_file_tools_tests.mjs` 和 `scripts/ai_browser_regressions.py`。浏览器测试的模型边界是固定执行器，不能作为真实 AI 质量或容量证据。`scripts/ai_regression_support.py` 按 jobId/requestId/sessionId 关联终态，超时即中止顺序流程。旧内存队列测试器已停用，历史压测原件保留。
 
+## 发布与 HTTPS 就绪（2026-10-15）
+
+启用子域名后，`public_site_url()` 对本机 TLS 代理执行带 SNI 的实际握手，验证信任链、有效期和主机名；未通过时，发布响应、账号地址与 Gallery 都使用 `/pages/<slug>/`。发布响应和文件接口通过 `httpsPending` 告知前端等待，发布弹窗自动查询并在验证通过后切换到独立域名。证书文件已生成、签发命令成功或服务处于 active 均不能代替此检查。
+
+原生部署将 `ops/hatchery-cert-sync.py` 安装为 root 所有的 `/usr/local/sbin/hatchery-cert-sync`，三个同名 systemd 单元安装到 `/etc/systemd/system/`。path 单元即时响应发布，timer 每两分钟补偿丢失触发与失败重试；普通失败从两分钟开始退避至十五分钟，CA 限流至少等待一小时。脚本会确认 nginx 实际提供的新证书；同一轮签发期间的新请求由下一次 path/timer 激活处理。脚本与单元随源码提交，避免仅在线上反复修补。
+
+默认 TLS 代理为 `127.0.0.1:443`。容器环境需用 `ALCHEMY_HATCHERY_TLS_PROBE_HOST` / `ALCHEMY_HATCHERY_TLS_PROBE_PORT` 指向可达的代理；探测失败会保留可用路径地址。
+
+回归：`.venv/bin/python scripts/site_https_tests.py`（临时真实 TLS + 本地发布与失败重试测试），以及安装 Playwright 的 Python 执行 `scripts/site_https_browser_tests.py`（发布后链接自动切换）。两者不调用真实 CA 或模型。
+
 原测试网站的修正由 `scripts/repair_recorded_test_site.py` 明确限定在 AIUI40 测试目录。补建标记标注来源，不把原来失败的压测改成通过。`scripts/deploy_ai_repairs.py` 默认只打包，显式 `--deploy` 才执行已审阅的原生部署与备份；它不会提交 Git、修改 DNS 或发起模型调用。线上只读与交互检查见 `scripts/verify_ai_repairs_live.py`。
 
 原始运行时日志的补充恢复见 `scripts/recover_ai_runtime_evidence.py` 与 `scripts/restore_runtime_fragments.py`：36 条回复可对应既有记录，其中 21 条更完整，两个缺失区块有原始编辑内容。恢复文本按来源归档，不将旧失败轮次改判为通过。

@@ -925,9 +925,10 @@ function renderAiEvents(events=[],root=document){
   trace.dataset.rendered=String(visible.length);
 }
 function aiWorkingText(mode=''){const value=mode||aiPermissionMode;return value==='chat'?'AI 正在思考回答':value==='plan'?'AI 正在制定实施计划':'AI 正在修改并验证网站'}
-function setAiWorkingStatus(active,root=document,mode=''){
+function setAiWorkingStatus(active,root=document,mode='',text=''){
   const card=root.querySelector('#aiRunCard');if(!card)return;const node=card.querySelector('.ai-working-status');
-  if(active&&!node)card.insertAdjacentHTML('afterbegin',`<div class="ai-working-status"><i></i><b>${aiWorkingText(mode)}</b></div>`);
+  if(active&&!node)card.insertAdjacentHTML('afterbegin',`<div class="ai-working-status"><i></i><b>${text||aiWorkingText(mode)}</b></div>`);
+  else if(active)node.querySelector('b').textContent=text||aiWorkingText(mode);
   if(!active)node?.remove();
   card.classList.toggle('is-running',active);
 }
@@ -940,7 +941,7 @@ function typeAiSummary(text,root=document,instant=false){
 function renderAiRunProgress(snapshot,run,root=document){
   const card=root.querySelector('#aiRunCard');if(card&&run&&card.dataset.contextRun!==run.id){delete card.dataset.contextUsage;card.dataset.contextRun=run.id}
   const usage=(snapshot.events||[]).find(item=>item.kind==='context')?.contextUsage;if(usage)setAiContextUsage(usage,root);
-  const events=snapshot.events||[];const failed=snapshot.status==='failed';const panel=root.querySelector('#aiRunCard');if(!panel)return;panel.hidden=false;const finalBox=root.querySelector('#aiRunFinal');if(finalBox)finalBox.hidden=true;const checksBox=root.querySelector('#aiRunChecks');if(checksBox)checksBox.innerHTML='';const process=root.querySelector('#aiRunProcess');if(process)process.open=!failed;const summary=root.querySelector('#aiRunProcessLabel');if(summary){summary.hidden=!failed;summary.textContent='查看过程'}setAiWorkingStatus(!failed&&snapshot.status==='running',root,run?.mode);renderAiEvents(events,root);if(root===document)scrollAiConversation();
+  const events=snapshot.events||[];const failed=snapshot.status==='failed';const panel=root.querySelector('#aiRunCard');if(!panel)return;panel.hidden=false;const finalBox=root.querySelector('#aiRunFinal');if(finalBox)finalBox.hidden=true;const checksBox=root.querySelector('#aiRunChecks');if(checksBox)checksBox.innerHTML='';const process=root.querySelector('#aiRunProcess');if(process)process.open=!failed;const summary=root.querySelector('#aiRunProcessLabel');if(summary){summary.hidden=!failed;summary.textContent='查看过程'}const queued=snapshot.status==='queued';setAiWorkingStatus(!failed&&(snapshot.status==='running'||queued),root,run?.mode,queued?'已排队：前面的任务结束后自动开始（可关闭页面）':'');renderAiEvents(events,root);if(root===document)scrollAiConversation();
 }
 function renderAiRunResult(run,payload,root=document){
   setAiContextUsage(payload.contextUsage,root);
@@ -1262,6 +1263,28 @@ function openPublishModal(){
   const sync=()=>{const value=input.value.trim().toLowerCase();if(input.value!==value)input.value=value;if(domain)domain.textContent=userPublishAddress(value||'xxx');if(warning)warning.hidden=!value||value===current};
   input.addEventListener('input',sync);sync();input.focus();
 }
+async function refreshPublishedHttps(slug,ownerId){
+  const modal=document.querySelector('#previewModal');
+  const status=modal.querySelector('[data-publish-https]');
+  const current=()=>currentConsoleUser?.id===ownerId&&!modal.hidden&&!modal.classList.contains('is-closing')&&modal.contains(status)&&currentConsoleUser.publishSlug===slug;
+  for(let attempt=0;attempt<120&&current();attempt++){
+    await new Promise(resolve=>setTimeout(resolve,3000));
+    if(!current())return;
+    try{
+      const info=await consoleRequest('/api/site/files');
+      if(!current()||info.slug!==slug)return;
+      if(info.httpsPending)continue;
+      if(!info.publicUrl?.startsWith('https://'))return;
+      const url=new URL(info.publicUrl,location.origin).href;
+      fileSite=info;currentConsoleUser.publishUrl=info.publicUrl;updateConsoleAccount();
+      modal.querySelector('[data-publish-address]').textContent=url;
+      const link=modal.querySelector('[data-publish-open]');link.href=url;link.textContent=`打开 ${url} ↗`;
+      status.textContent='独立域名已就绪，可以安全访问。';
+      return;
+    }catch{}
+  }
+  if(current())status.textContent='独立域名仍在准备，当前地址可继续访问，后台会自动重试。';
+}
 async function submitPublish(slug,listed=true){
   if(!fileSite)throw new Error('网站文件尚未加载');
   const payload=await consoleRequest('/api/publish',{method:'POST',body:{siteName:fileSite.metadata.siteName,description:fileSite.metadata.description,slug,listed}});
@@ -1270,7 +1293,9 @@ async function submitPublish(slug,listed=true){
   const publicUrl=payload.publicUrl?new URL(payload.publicUrl,location.origin).href:new URL(payload.url,location.origin).href;
   const replaced=payload.replacedSlug?`<p class="publish-warning">旧地址 ${esc(userPublishAddress(payload.replacedSlug))} 已停用，网站文件和成员数据已迁移到新地址。</p>`:'';
   const galleryNote=listed?'<p class="publish-gallery-note">已收录进 <a href="/gallery" target="_blank" rel="noopener">Hatchery Gallery ↗</a>，其他同学能在收录页看到它。</p>':'<p class="publish-gallery-note">本次未收录进 Gallery；下次发布时勾选「收录进 Hatchery Gallery」即可出现在收录页。</p>';
-  openModal('发布成功',`<p>网站已发布在 <b>${esc(publicUrl)}</b>。此后 AI 保存文件会直接更新网站。</p><a class="modal-action" href="${esc(publicUrl)}" target="_blank" rel="noopener">打开 ${esc(publicUrl)} ↗</a>${galleryNote}${replaced}${credential}`);
+  const httpsNote=payload.httpsPending?'<p data-publish-https role="status">独立域名正在准备，当前地址可立即访问；准备完成后这里会自动更新。</p>':'';
+  openModal('发布成功',`<p>网站已发布在 <b data-publish-address>${esc(publicUrl)}</b>。此后 AI 保存文件会直接更新网站。</p><a class="modal-action" data-publish-open href="${esc(publicUrl)}" target="_blank" rel="noopener">打开 ${esc(publicUrl)} ↗</a>${httpsNote}${galleryNote}${replaced}${credential}`);
+  if(payload.httpsPending)void refreshPublishedHttps(slug,currentConsoleUser.id);
 }
 document.querySelector('#publishBtn').addEventListener('click',openPublishModal);
 document.querySelector('#consoleAccountBtn').addEventListener('click',event=>{event.stopPropagation();const menu=document.querySelector('#consoleAccountMenu');const opening=menu.hidden||menu.classList.contains('is-closing');if(opening)uiShow(menu);else uiHide(menu);document.querySelector('#consoleAccountBtn').setAttribute('aria-expanded',String(opening))});
