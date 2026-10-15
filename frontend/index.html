@@ -6,10 +6,11 @@
   <meta name="description" content="炼丹社Hatchery——面向校园个人与社团的模块化 AI 建站控制台。">
   <title>炼丹社Hatchery｜页面编辑器</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/styles.css?v=20260920-1">
+  <link rel="stylesheet" href="/styles.css?v=20261015-2">
   <link rel="stylesheet" href="/mica.css?v=20261014-gpt9">
-  <link rel="stylesheet" href="/ai-chat.css?v=20261014-gpt9">
+  <link rel="stylesheet" href="/ai-chat.css?v=20261014-gpt10">
   <link rel="stylesheet" href="/motion.css?v=20260917-1">
+  <link rel="stylesheet" href="/study.css?v=20261015-6">
 </head>
 <body>
   <section class="auth-gate" id="authGate" data-state="checking" aria-label="炼丹社Hatchery账号登录">
@@ -17,6 +18,7 @@
       <header><span class="auth-mark">🐣</span><div><b>炼丹社Hatchery控制台</b><small>AIchemyHatchery</small></div></header>
       <p class="auth-checking">正在确认登录状态…</p>
       <div class="auth-copy"><span>ACCOUNT SYSTEM</span><h1 id="authTitle">欢迎回来</h1><p id="authDescription">登录后继续编辑、保存并发布你的网站。</p></div>
+      <p class="auth-notice">请使用 <b>sdsz.groovin.cn</b> 账号登录。如没有账号，请前往 <a href="https://sdsz.groovin.cn/register" target="_blank" rel="noopener">groovin 平台注册</a>。</p>
       <div class="auth-tabs" role="tablist"><button class="active" role="tab" aria-selected="true" data-auth-tab="login">登录</button><button role="tab" aria-selected="false" data-auth-tab="register">注册</button></div>
       <form class="auth-form" id="loginForm" data-auth-form="login" method="post" action="/api/auth/login" autocomplete="on" novalidate>
         <label class="auth-field"><span>用户名 / 邮箱 / 校园号</span><input id="loginUsername" name="username" autocomplete="username" required placeholder="用户名、邮箱或数字校园号"><small class="field-error" hidden></small></label>
@@ -26,6 +28,7 @@
       </form>
       <div class="auth-form" id="registerForm" data-auth-form="register" hidden>
         <p class="auth-sso-note">账号注册已迁移到 SDSZ 统一账号系统，两站共用同一套账号。注册完成后回到这里直接登录。</p>
+        <a class="auth-submit auth-register-link" href="https://sdsz.groovin.cn/register" target="_blank" rel="noopener"><b>前往注册账号</b><span>↗</span></a>
       </div>
       <p class="auth-error" id="authError" role="alert" hidden></p>
     </div>
@@ -122,6 +125,36 @@
             <div class="security-results" id="securityResults"></div>
           </div>
         </section>
+        <section class="tool-panel study-panel" id="studyPanel" hidden>
+          <div class="study-header">
+            <div><small>STUDY</small><b>HatcheryStudy</b></div>
+            <span class="study-progress-dot" id="studyProgressDot" hidden>进度已记录</span>
+            <button class="study-hbtn" id="studySessionBtn" title="切换会话">会话</button>
+            <button class="study-hbtn" id="studyConfigBtn" title="配置平台/模型">配置</button>
+            <button class="study-hbtn study-hbtn-new" id="studyNewSessionBtn" title="新建会话">＋</button>
+          </div>
+          <!-- 会话列表（浮层） -->
+          <div class="study-pop" id="studySessionPop" hidden></div>
+          <!-- 平台/模型配置（浮层） -->
+          <div class="study-pop" id="studyConfigPop" hidden></div>
+          <div class="study-outlines-bar" id="studyOutlinesBar">
+            <span class="study-empty">未上传大纲</span>
+          </div>
+          <div class="study-history" id="studyHistory">
+            <div class="study-history-inner" id="studyMessages"></div>
+          </div>
+          <div class="study-composer">
+            <div class="study-composer-pill">
+              <textarea id="studyPrompt" placeholder="今天想学什么？" rows="1" autocomplete="off"></textarea>
+              <div class="study-composer-toolbar">
+                <span class="study-cur" id="studyCurrentLabel"></span>
+                <button class="study-run" id="studySendBtn" aria-label="发送">
+                  <em><svg viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M7.5 1.5v12M1.5 7.5l6-6 6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></em>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
 
     </aside>
@@ -163,6 +196,7 @@
     <button data-context-action="edit">编辑</button>
   </div>
   <script src="/auth.js?v=20260916-2"></script>
-  <script src="/script.js?v=20261014-gpt9"></script>
+  <script src="/script.js?v=20261015-2"></script>
+  <script src="/study.js?v=20261015-6"></script>
 </body>
 </html>

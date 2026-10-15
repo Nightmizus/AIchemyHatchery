@@ -348,3 +348,15 @@ button,input,textarea { font:inherit; color:inherit; } button { cursor:pointer; 
   .poll-option{grid-template-columns:minmax(0,1fr) 38px}
   .poll-track{grid-column:1/-1;grid-row:2}
 }
+
+/* 注册页跳转 SDSZ 统一账号系统：<a> 复用 .auth-submit 外观，需补链接自身样式 */
+.auth-register-link{box-sizing:border-box;text-decoration:none;cursor:pointer}
+.auth-register-link:hover{background:#2b2d27}
+.auth-register-link span{transition:transform .18s ease}
+.auth-register-link:hover span{transform:translate(2px,-2px)}
+
+/* 登录页醒目提示：必须用 SDSZ 统一账号登录 */
+.auth-notice{margin:0 0 18px;padding:13px 15px;border:2px solid #171814;border-left-width:5px;border-radius:8px;background:#f4ffd6;color:#171814;font-size:12px;font-weight:700;line-height:1.75}
+.auth-notice b{padding:1px 5px;border-radius:4px;background:#171814;color:#d9ff43;font-family:Consolas,monospace;font-size:11px;letter-spacing:.02em}
+.auth-notice a{color:#171814;font-weight:900;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}
+.auth-notice a:hover{background:#d9ff43}
