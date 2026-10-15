@@ -1,0 +1,10 @@
+[Unit]
+Description=Retry pending Hatchery site HTTPS every two minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=2min
+Unit=hatchery-cert-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -73,7 +73,7 @@ def confined_path(root: Path, name: str, *, public=False) -> Path:
             raise ValueError("网站文件不能经过符号链接")
     if target.exists() and target.is_file() and target.stat().st_nlink != 1:
         raise ValueError("网站文件不能是硬链接")
-    if public and (any(p.startswith(".") and p not in (".hatchery", ".well-known") for p in parts)
+    if public and (parts[0] == 'backend' or any(p.startswith(".") and p not in (".hatchery", ".well-known") for p in parts)
                    or name in ("runtime.json", "site.json")):
         raise ValueError("该文件不对外提供")
     return target

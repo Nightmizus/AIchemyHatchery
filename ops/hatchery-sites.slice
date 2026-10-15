@@ -1,0 +1,9 @@
+[Unit]
+Description=Resource budget for isolated website code
+
+[Slice]
+CPUQuota=100%
+MemoryHigh=640M
+MemoryMax=768M
+MemorySwapMax=256M
+TasksMax=256

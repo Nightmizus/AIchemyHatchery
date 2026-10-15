@@ -21,10 +21,6 @@ from datetime import datetime, timezone
 from psycopg2.extras import RealDictCursor
 
 
-# 空闲超过这个时长，dsh 磁盘会话被回收；下一条消息重新开会话。
-IDLE_SESSION_SECONDS = 10 * 60
-
-
 def conversation_id(user_id) -> str:
     """该账号唯一的会话 id。
 
@@ -247,16 +243,36 @@ class JobStore:
             return dict(cur.fetchone())
 
     def renew(self, ids):
+        """续租。返回未能续上的 id，调用方据此判断租约是否真的丢了。
+
+        旧实现只看 UPDATE 的 WHERE 是否匹配，一旦数据库往返失败或连接池
+        取连接超时，异常被上层吞掉、租约静默停在旧值，下一轮 recover_expired
+        立刻把仍在正常运行的任务判为中断。
+        """
         if not ids:
-            return
-        with self.db() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE hatchery_ai_jobs SET lease_until=now()+interval '60 seconds' WHERE id=ANY(%s) AND status='running'", (list(ids),))
+            return set()
+        try:
+            with self.db() as conn, conn.cursor() as cur:
+                cur.execute("UPDATE hatchery_ai_jobs SET lease_until=now()+interval '60 seconds' "
+                            "WHERE id=ANY(%s) AND status='running' RETURNING id", (list(ids),))
+                renewed = {row[0] for row in cur.fetchall()}
+            return set(ids) - renewed
+        except Exception:
+            # 续租失败时保守返回全部 id：宁可多给一轮宽限，也不要误判中断。
+            return set(ids)
 
     def recover_expired(self):
+        """把确实失去租约的任务标记为中断。
+
+        宽限期必须显著大于续租周期（10 秒），否则单次续租失败 + 一轮调度
+        抖动就会把健康任务判死。这里要求过期超过 5 分钟才认定真的丢了。
+        """
         with self.db() as conn, conn.cursor() as cur:
             cur.execute("""UPDATE hatchery_ai_jobs SET status='interrupted',finished_at=now(),updated_at=now(),
                 error='服务中断，任务未完成；为避免重复执行，未自动重发。已保存的文件仍保留。'
-                WHERE status='running' AND lease_until < now()""")
+                WHERE status='running' AND lease_until < now() - interval '5 minutes'
+                RETURNING id""")
+            return [row[0] for row in cur.fetchall()]
 
     def progress(self, job_id, events):
         with self.db() as conn, conn.cursor() as cur:
@@ -338,6 +354,23 @@ class Dispatcher:
         self.thread = threading.Thread(target=self.loop, name='hatchery-ai-dispatch', daemon=True)
         self.thread.start()
 
+    def shutdown(self, grace_seconds: float = 20.0) -> int:
+        """停止调度并等待在途任务收尾。
+
+        worker 是 daemon 线程，进程退出时会被直接杀死，结果来不及写库；
+        新进程随后按过期租约把任务判为中断。重启前留出收尾时间可以避免
+        这类"部署即中断"。返回仍在运行、未能及时结束的任务数。
+        """
+        self.stop.set()
+        deadline = time.monotonic() + max(0.0, grace_seconds)
+        while time.monotonic() < deadline:
+            with self.lock:
+                if not self.running:
+                    return 0
+            time.sleep(0.25)
+        with self.lock:
+            return len(self.running)
+
     def loop(self):
         last_renew = 0
         while not self.stop.is_set():
@@ -345,10 +378,14 @@ class Dispatcher:
                 with self.lock:
                     running = set(self.running)
                 if time.monotonic()-last_renew >= 10:
-                    self.store.renew(running)
+                    lost = self.store.renew(running)
+                    if lost:
+                        # 续租没能确认时不推进 last_renew，下一轮立刻重试。
+                        print(f'[ai-dispatch] 租约续期未确认：{len(lost)} 个任务', file=sys.stderr)
+                    else:
+                        last_renew = time.monotonic()
                     self.flush_results()
                     self.store.recover_expired()
-                    last_renew = time.monotonic()
                 while len(running) < self.max_parallel:
                     job = self.store.claim(self.max_parallel)
                     if not job:

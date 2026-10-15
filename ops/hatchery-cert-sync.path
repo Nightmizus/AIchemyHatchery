@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Hatchery publication HTTPS requests
+
+[Path]
+PathExists=/opt/hatchery/var/cert-sync-request
+Unit=hatchery-cert-sync.service
+
+[Install]
+WantedBy=paths.target
