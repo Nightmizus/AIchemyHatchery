@@ -157,7 +157,9 @@ class NativeWebTests(unittest.TestCase):
                 probe_patch.write_text('- id: sdk-jsonrpc-server\n  disabled: true\n- insert:\n    - id: native-web-check\n      name: ' + json.dumps(str(work/'probe.mjs')) + '\n')
                 for mode in ('chat', 'plan', 'full'):
                     with self.subTest(mode=mode):
-                        env = {'PATH': os.environ.get('PATH', ''), 'DSH_HOME': str(work/'home'),
+                        # Windows Node/OpenSSL needs SystemRoot to initialize its CSPRNG.
+                        env = {**{name: os.environ[name] for name in ('SystemRoot', 'WINDIR', 'TEMP', 'TMP') if name in os.environ},
+                               'PATH': os.environ.get('PATH', ''), 'DSH_HOME': str(work/'home'),
                                'DSH_TELEMETRY_DISABLED': '1', 'MIAODA_AI_WORKSPACE': str(work/'site'),
                                'MIAODA_TOOLS_MODE': mode, 'MIAODA_PREVIEW_PORT': '1',
                                'MIAODA_PREVIEW_PATH': '/preview/fixture/',

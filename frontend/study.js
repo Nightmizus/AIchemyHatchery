@@ -25,7 +25,7 @@
   // 当前平台/模型的短标签，显示在输入框上方
   function currentLabel() {
     const p = providers.find(x => x.id === providerId);
-    const base = p ? (p.builtin ? '默认' : p.label) : providerId;
+    const base = p ? (p.builtin && p.label !== '我的 API' ? '默认' : p.label) : providerId;
     return modelName ? `${base} · ${modelName}` : base;
   }
 

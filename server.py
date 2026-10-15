@@ -39,8 +39,9 @@ import site_files
 import ai_jobs
 import login_links
 import study_engine
+import personal_api
 
-from deepseek_harness_adapter import HarnessRuntimeError, dsh_session_id, harness_status, reap_idle_dsh_session, resolve_llm_provider, run_deepseek_harness
+from deepseek_harness_adapter import HarnessRuntimeError, dsh_session_id, harness_status, reap_idle_dsh_session, resolve_llm_provider, run_deepseek_harness, runtime_session_key
 
 ROOT = Path(__file__).resolve().parent
 PUBLISHED = ROOT / "published"
@@ -197,6 +198,7 @@ SELECT (SELECT preview_id FROM hatchery_user_extras WHERE user_id = %s),
 
 
 AI_JOB_STORE = ai_jobs.JobStore(lambda: neon_db(), read_db=lambda: neon_db(autocommit=True))
+PERSONAL_API_STORE = personal_api.ConfigStore(lambda **kwargs: neon_db(**kwargs), ROOT)
 RUNTIME_LOCK = threading.Lock()
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 LOGIN_ATTEMPTS_LOCK = threading.Lock()
@@ -253,7 +255,7 @@ AI_UPSTREAM_DEGRADED: dict | None = None
 # 前端静态文件统一放在 frontend/；对外 URL 仍是根路径（/styles.css…），由 handler 翻译
 FRONTEND_DIR = "frontend"
 AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/motion.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
-PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js", "/study.css", "/study.js"))
+PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js", "/study.css", "/study.js", "/personal-api.js"))
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}
@@ -840,6 +842,7 @@ def initialize_database() -> None:
                 if statement.strip():
                     cur.execute(statement)
             cur.execute(login_links.SCHEMA)
+            cur.execute(personal_api.SCHEMA)
     AI_JOB_STORE.initialize()
 
 
@@ -1850,9 +1853,12 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if self.command == "GET":
             items = study_engine.load_providers()
             base, key, model = study_engine.gateway_config()
+            own = PERSONAL_API_STORE.load(user["id"])
+            if own:
+                base, key, model = own["base_url"], own["api_key"], own["model"]
             self.send_json({
                 "providers": [
-                    {"id": "default", "label": "默认（Hatchery 网关）",
+                    {"id": "default", "label": "我的 API" if own else "默认（Hatchery 网关）",
                      "base_url": base, "model": model, "hasKey": bool(key), "builtin": True}
                 ] + [
                     {"id": p["id"], "label": p["label"], "base_url": p["base_url"],
@@ -1894,6 +1900,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if action == "models":
             # 拉取某个 endpoint 的模型列表，方便挑模型名
             pid = str(data.get("id", "")).strip()
+            own = PERSONAL_API_STORE.load(user["id"]) if pid in ("", "default") else None
             if pid and pid != "default":
                 item = study_engine.find_provider(pid)
                 if not item:
@@ -1901,9 +1908,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 base_url, api_key = item["base_url"], item["api_key"]
             else:
                 base_url, api_key, _ = study_engine.gateway_config()
+                if own:
+                    base_url, api_key = own["base_url"], own["api_key"]
             if not api_key:
                 raise ValueError("该平台尚未配置 API Key")
-            self.send_json({"models": study_engine.fetch_models(base_url, api_key)})
+            self.send_json({"models": study_engine.fetch_models(base_url, api_key, personal=bool(own))})
             return
         raise ValueError("未知操作")
 
@@ -1919,6 +1928,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         session_id = str(data.get("sessionId", "")).strip()[:64] or "default"
         provider_id = str(data.get("provider", "")).strip()[:40]
         model_override = str(data.get("model", "")).strip()[:120]
+        api_config = PERSONAL_API_STORE.load(user["id"]) if provider_id in ("", "default") else None
         history_limit = 30
         history = []
         for item in (data.get("history") or [])[-history_limit:]:
@@ -1965,7 +1975,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             # 模型会自己编造 <|DSML|> 伪调用文本混进正文，给定义但不许调用最稳。
             for chunk in study_engine.stream_completion(
                 messages, tools=[study_engine.PROGRESS_TOOL], tool_choice="none",
-                provider_id=provider_id, model_override=model_override,
+                provider_id=provider_id, model_override=model_override, api_config=api_config,
             ):
                 if "content" in chunk:
                     content_parts.append(chunk["content"])
@@ -1993,7 +2003,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             tool_args: dict[int, dict] = {}
             for chunk in study_engine.stream_completion(
                 progress_messages, tools=[study_engine.PROGRESS_TOOL], timeout=180,
-                provider_id=provider_id, model_override=model_override,
+                provider_id=provider_id, model_override=model_override, api_config=api_config,
             ):
                 tool = chunk.get("tool")
                 if not tool:
@@ -2045,6 +2055,34 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             raise ValueError("大纲文件不存在")
         target.unlink()
         self.send_json({"ok": True})
+
+    def handle_personal_api(self) -> None:
+        user = self.require_console_user()
+        if not user:
+            return
+        if self.command == "GET":
+            self.send_json(personal_api.public_config(PERSONAL_API_STORE.load(user["id"])))
+            return
+        data = self.read_json()
+        action = data.get("action", "save")
+        if action == "clear":
+            PERSONAL_API_STORE.clear(user["id"])
+            self.send_json({"ok": True, **personal_api.public_config(None)})
+            return
+        if action == "test":
+            if rate_limit_hit("personal-api-test", str(user["id"]), 6, 60):
+                self.send_json({"error": "连接测试过于频繁，请稍后重试"}, 429)
+                return
+            config = PERSONAL_API_STORE.load(user["id"])
+            if not config:
+                raise ValueError("请先保存个人 API 配置")
+            personal_api.test_connection(config)
+            self.send_json({"ok": True, "message": "连接成功，模型已在列表中找到；尚未测试生成和工具调用"})
+            return
+        if action != "save":
+            raise ValueError("未知的个人 API 配置操作")
+        config = PERSONAL_API_STORE.save(user["id"], data)
+        self.send_json({"ok": True, **personal_api.public_config(config)})
 
     def handle_admin_ai_config_update(self) -> None:
         # 改 AI Key 影响全站 AI 服务，只有管理员可用；Key 本身永远不进日志与审计
@@ -2126,6 +2164,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_study_session_delete()
             elif path == "/api/study/providers":
                 self.handle_study_providers()
+            elif path == "/api/account/api-config":
+                self.handle_personal_api()
             elif path == "/api/admin/ai-config":
                 self.handle_admin_ai_config_update()
             elif path == "/api/auth/sessions/revoke-others":
@@ -2260,13 +2300,16 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     def run_ai_harness(self, user: dict, prompt: str, context: dict, include_site: bool, attachments: list[dict], chosen_presets: list[str], preset_snippets: list[dict] | None = None, history: list[dict] | None = None, progress=None, mode: str = "full", job_key: str = "") -> dict:
         # 空闲超过窗口先清掉磁盘会话，本次任务就从干净上下文重开；
         # 未超时就什么都不做，dsh 会用同一个 id 接着上次的上下文。
-        session_id = dsh_session_id(str(user["id"]))
+        if not hasattr(self, "_personal_api_config"):
+            self._personal_api_config = PERSONAL_API_STORE.load(user["id"])
+        session_id = dsh_session_id(runtime_session_key(str(user["id"]), self._personal_api_config))
         reap_idle_dsh_session(ROOT / ".deepseek-harness" / "home", ROOT, session_id, ai_jobs.IDLE_SESSION_SECONDS)
         # The lock covers the entire direct-file edit, including sync requests and publish/rename.
         with site_files.site_lock(user["id"]):
             return self.run_ai_files(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress, mode)
 
     def run_ai_files(self, user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress, mode):
+        api_config = self._personal_api_config if hasattr(self, "_personal_api_config") else PERSONAL_API_STORE.load(user["id"])
         run_id = f"run-{secrets.token_hex(10)}"
         mode = mode if mode in ("chat", "plan", "full") else "full"
         if not include_site:
@@ -2306,7 +2349,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 try:
                     result = run_deepseek_harness(root=ROOT, prompt=prompt, context=context, attachments=attachments,
                                                   workspace=workspace, preview_port=PORT, progress=progress, mode=mode,
-                                                  session_key=str(user["id"]))
+                                                  session_key=str(user["id"]), api_config=api_config)
                     break
                 except HarnessRuntimeError as error:
                     if attempt > 1 or not getattr(error, "stall_no_progress", False) or site_files.file_manifest(workspace) != retry_manifest:
@@ -2984,6 +3027,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
 
     def _do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/account/api-config":
+            self.handle_personal_api()
+            return
         if parsed.path == login_links.PAGE_PATH:
             login_links.serve_page(self)
             return
@@ -3251,9 +3297,11 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json({"content": (sp / "progress.md").read_text(encoding="utf-8")})
             return
         if parsed.path == "/api/ai/status":
-            status = harness_status(ROOT)
+            user = self.console_user()
+            api_config = PERSONAL_API_STORE.load(user["id"]) if user else None
+            status = harness_status(ROOT, api_config=api_config)
             status.update({"filePolicy": "site-workspace-only"})
-            if AI_UPSTREAM_DEGRADED:
+            if AI_UPSTREAM_DEGRADED and not api_config:
                 status["configured"] = True  # Key 和运行时仍在，只是上游额度出了问题
                 status["degraded"] = AI_UPSTREAM_DEGRADED
             self.send_json(status)
@@ -3581,14 +3629,18 @@ def execute_durable_ai_job(job, progress):
     history = AI_JOB_STORE.context(job['user_id'], job['session_id'], job['seq'])
     provider, model = current_ai_provider_model()
     try:
+        handler._personal_api_config = PERSONAL_API_STORE.load(user["id"])
+        if handler._personal_api_config:
+            provider, model = "personal-openai", handler._personal_api_config["model"]
         result = handler.run_ai_harness(user, payload['prompt'], payload['context'], payload['includeSite'],
             payload['attachments'], payload['chosenPresets'], payload['presetSnippets'], history,
             progress=progress, mode=payload['mode'], job_key=job['id'])
         record_ai_usage(user['id'], job['id'], payload['prompt'], payload['attachments'], provider, model, result.get('usage'), 'completed')
-        AI_UPSTREAM_DEGRADED = None
+        if not handler._personal_api_config:
+            AI_UPSTREAM_DEGRADED = None
         return result
     except Exception as exc:
-        if '上游配额已用尽' in str(exc):
+        if not getattr(handler, '_personal_api_config', None) and '上游配额已用尽' in str(exc):
             AI_UPSTREAM_DEGRADED = {'message': str(exc), 'since': iso_time()}
         record_ai_usage(user['id'], job['id'], payload['prompt'], payload['attachments'], provider, model, None, 'failed', str(exc))
         raise

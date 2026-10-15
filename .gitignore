@@ -57,3 +57,4 @@ tmp/
 # HatcheryStudy 自定义平台配置：含明文 API Key，绝不入库
 study_providers.json
 study_providers.json.tmp
+.private-api-config/
