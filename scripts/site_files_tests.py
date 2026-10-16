@@ -121,6 +121,14 @@ class FileFixture:
 
 
 class FilesTests(unittest.TestCase):
+    def test_ai_status_explicitly_reports_no_total_execution_limit(self):
+        with FileFixture() as fixture:
+            status, _, body = fixture.request('/api/ai/status')
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertIn('executionTimeoutSeconds', payload)
+            self.assertIsNone(payload['executionTimeoutSeconds'])
+
     def test_console_shell_and_script_versions_cannot_remain_stale(self):
         with FileFixture() as f:
             version = hashlib.sha256((PROJECT / 'frontend/script.js').read_bytes()).hexdigest()[:20]

@@ -10,7 +10,6 @@ from pathlib import Path
 import secrets
 import socket
 import threading
-import time
 
 SOCKET = '/run/hatchery-sites/control.sock'
 _capabilities = {}
@@ -66,13 +65,13 @@ def call(user_id, workspace, operation, args=None):
 
 @contextmanager
 def capability(user_id, workspace, mode):
-    """Bind a short-lived, opaque credential; the model cannot choose its site."""
+    """Bind a credential to this attempt's lifetime, never another website."""
     if not enabled(user_id):
         yield ''
         return
     token = secrets.token_urlsafe(40)
     with _lock:
-        _capabilities[token] = (str(user_id), Path(workspace), mode, time.monotonic() + 2000)
+        _capabilities[token] = (str(user_id), Path(workspace), mode)
         _effects[token] = {'pending': {}, 'completed': [], 'uncertain': []}
     try:
         yield token
@@ -93,9 +92,9 @@ def recovery_state(token):
 def authorized_call(token, operation, args):
     with _lock:
         capability = _capabilities.get(token)
-    if not capability or capability[3] < time.monotonic():
+    if not capability:
         raise ValueError('网站运行权限已失效')
-    user_id, workspace, mode, _ = capability
+    user_id, workspace, mode = capability
     if operation not in OPERATIONS:
         raise ValueError('未知的网站运行操作')
     if mode != 'full' and operation not in READ_ONLY:

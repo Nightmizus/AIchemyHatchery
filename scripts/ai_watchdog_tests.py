@@ -95,10 +95,16 @@ class WatchdogTests(unittest.TestCase):
                     'data': {'stream': [{'type': 'reasoning-delta', 'text': 'working'}]}}}}] * 6
         self.assertEqual(self.run_protocol(events + self.events(), step=31)['summary'], 'ok')
 
-    def test_total_deadline_even_with_useful_events(self):
-        events = [{'method': 'session.event', 'params': {'event': {'type': 'assistant/chunk', 'data': {'chunk': {'type': 'text-delta', 'text': 'x'}}}}}] * 10
-        with self.assertRaisesRegex(dsh.HarnessRuntimeError, '时间上限'):
-            self.run_protocol(events, step=31, timeout=60)
+    def test_useful_work_has_no_total_deadline_even_with_legacy_limit(self):
+        events = [{'method': 'session.event', 'params': {'event': {'type': 'assistant/chunk', 'data': {'chunk': {'type': 'text-delta', 'text': 'x'}}}}}] * 240
+        # Simulate over two hours of useful work, beyond the former 30-minute
+        # ceiling and even when the old environment value says sixty seconds.
+        self.assertEqual(self.run_protocol(events + self.events(), step=31, timeout=60)['summary'], 'ok')
+
+    def test_disabled_or_invalid_legacy_total_limits_are_ignored(self):
+        for value in (0, 'not-a-number'):
+            with self.subTest(legacy_limit=value):
+                self.assertEqual(self.run_protocol(self.events(), timeout=value)['summary'], 'ok')
 
     def test_protocol_error_is_not_swallowed_as_poll_timeout(self):
         with self.assertRaisesRegex(dsh.HarnessRuntimeError, 'protocol broke'):

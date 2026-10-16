@@ -53,6 +53,21 @@ class RecoveryTests(unittest.TestCase):
                 self.run_fixture(fixture, execute)
             self.assertEqual(len(calls), 2)
 
+    def test_long_running_task_can_still_recover_after_old_total_deadline(self):
+        with FileFixture() as fixture:
+            clock = [0.0]; calls = []
+            def execute(**kwargs):
+                calls.append(kwargs)
+                self.assertNotIn('time_budget', kwargs)
+                if len(calls) == 1:
+                    clock[0] = 24 * 60 * 60
+                    raise HarnessRuntimeError('runtime died after long useful work', recoverable=True, reason='runtime_exit')
+                return {'summary': 'continued after one day'}
+            with patch.object(server.time, 'monotonic', lambda: clock[0]):
+                result = self.run_fixture(fixture, execute)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(result['summary'], 'continued after one day')
+
     def test_quota_auth_and_normal_errors_are_not_retried(self):
         with FileFixture() as fixture:
             calls = []
@@ -62,6 +77,16 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(HarnessRuntimeError, 'quota'):
                 self.run_fixture(fixture, execute)
             self.assertEqual(len(calls), 1)
+
+    def test_http_wait_expiry_returns_original_job_without_terminating_work(self):
+        with FileFixture() as fixture:
+            job = {'jobId': 'job-original', 'status': 'running'}
+            with patch.object(fixture.handler, 'enqueue_ai_request', return_value=job), \
+                    patch.object(server.time, 'monotonic', side_effect=[0.0, 26.0]), \
+                    patch.object(server.AI_JOB_STORE, 'finish') as finish:
+                fixture.handler.handle_ai_run(USER)
+            self.assertEqual(fixture.responses[-1], (202, job))
+            finish.assert_not_called()
 
     def test_unconfirmed_backend_write_prevents_automatic_replay(self):
         with FileFixture() as fixture:

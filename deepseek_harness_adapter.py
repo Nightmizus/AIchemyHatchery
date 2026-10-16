@@ -744,7 +744,6 @@ def run_deepseek_harness(
     mode: str = "full",
     session_key: str = "",
     runtime_token: str = "",
-    time_budget: float | None = None,
 ) -> dict:
     provider_name, provider = resolve_llm_provider()
     key = os.environ.get(provider["key_env"], "").strip()
@@ -767,9 +766,9 @@ def run_deepseek_harness(
     dsh_home.mkdir(parents=True, exist_ok=True)
     model = os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
     reasoning = os.environ.get(provider["effort_env"], "").strip() or provider["default_effort"]
-    timeout = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "1200"))))
-    if time_budget is not None:
-        timeout = min(timeout, max(1.0, time_budget))
+    # Only RPC acknowledgements are bounded. Useful ongoing work has no total
+    # wall-clock deadline, including when a legacy timeout remains in .env.
+    rpc_timeout = 60.0
     max_tokens = max(1024, min(131072, int(os.environ.get("DEEPSEEK_MAX_TOKENS", "32768"))))
 
     env = _child_env(provider["key_env"])
@@ -803,20 +802,19 @@ def run_deepseek_harness(
     # 不删除其他尝试的日志；历史和检查点由服务端 prompt 负责恢复。
     reset_dsh_session(dsh_home, root, session_id)
 
-    with _JsonRpcRuntime(args, root, env, timeout, secrets=(key, web_env["HATCHERY_DEEPSEEK_SEARCH_API_KEY"], runtime_token)) as runtime:
+    with _JsonRpcRuntime(args, root, env, rpc_timeout, secrets=(key, web_env["HATCHERY_DEEPSEEK_SEARCH_API_KEY"], runtime_token)) as runtime:
         initialize: dict = {"cwd": str(root.resolve()), "provider": provider["route"], "model": model, "maxTokens": max_tokens}
         if reasoning:
             initialize["reasoningEffort"] = reasoning
-        runtime.request("initialize", initialize, min(60.0, timeout))
+        runtime.request("initialize", initialize, rpc_timeout)
         receipt = runtime.request(
             "session/prompt",
             {"sessionId": session_id, "contentBlocks": _content_blocks(prompt, context, attachments)},
-            min(60.0, timeout),
+            rpc_timeout,
         )
         message_id = str(receipt.get("messageId", "")) if isinstance(receipt, dict) else ""
         if not message_id:
             raise HarnessRuntimeError("DeepSeek Harness 未确认本次网站任务")
-        deadline = time.monotonic() + timeout
         stall_seconds = max(120.0, float(os.environ.get("HATCHERY_AI_STALL_SECONDS", "180")))
         # 只把"本会话的有效事件"算作活跃：运行时可能持续推其他会话/全局通知，
         # 那些不算进展，否则卡死的会话会被无关心跳掩盖成"活着"。
@@ -824,11 +822,9 @@ def run_deepseek_harness(
         received = False
         heartbeat_reported = False
         while True:
-            # Check on every iteration: unrelated continuous notifications must
-            # not defeat either the total deadline or the progress watchdog.
+            # Unrelated continuous notifications must not defeat the progress
+            # watchdog. Actual progress may continue for any total duration.
             now = time.monotonic()
-            if now >= deadline:
-                raise HarnessRuntimeError('AI 执行达到时间上限，任务已终止；已保存的文件仍保留')
             silent = now - last_useful
             if silent > stall_seconds:
                 error = HarnessRuntimeError('AI 会话长时间没有有效进展', recoverable=True, reason='stalled_session')
@@ -839,10 +835,10 @@ def run_deepseek_harness(
             if silent >= 30 and not heartbeat_reported:
                 projector._report('dsh-heartbeat', 'tool', '等待 AI 响应', '正在检测会话；持续无进展时将尝试安全恢复', 'running', '')
                 heartbeat_reported = True
-            # 15 秒一片轮询：整体超时不变；本会话长时间没有有效事件视为卡死，提前终止，
-            # 不再让用户干等满整个 timeout。切片锚定当前时刻——锚 last_useful 的话静默超过
+            # 15 秒一片轮询：总时长不限；本会话持续无有效事件才触发恢复。
+            # 切片锚定当前时刻——锚 last_useful 的话静默超过
             # 一片后 slice_end 恒在过去，next_notification 立即抛错不阻塞，循环会热转。
-            slice_end = min(deadline, time.monotonic() + 15.0)
+            slice_end = time.monotonic() + 15.0
             try:
                 notification = runtime.next_notification(slice_end)
             except NotificationTimeout:

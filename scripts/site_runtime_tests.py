@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import unittest
@@ -72,6 +73,17 @@ class CapabilityTests(unittest.TestCase):
         with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': site_runtime.site_key('one')}):
             with site_runtime.capability('two', '/other', 'full') as token:
                 self.assertEqual(token, '')
+
+    def test_long_task_retains_own_capability_and_revokes_it_on_exit(self):
+        with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': '*'}), \
+                patch.object(site_runtime, 'call', return_value={}) as call, \
+                patch.object(time, 'monotonic', return_value=0.0) as clock:
+            with site_runtime.capability('one', '/current', 'full') as token:
+                clock.return_value = 24 * 60 * 60
+                site_runtime.authorized_call(token, 'status', {'workspace': '/other'})
+                self.assertEqual(call.call_args.args[:3], ('one', Path('/current'), 'status'))
+            with self.assertRaises(ValueError):
+                site_runtime.authorized_call(token, 'status', {})
 
     def test_chat_and_plan_cannot_execute_or_change_services(self):
         with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': '*'}), \

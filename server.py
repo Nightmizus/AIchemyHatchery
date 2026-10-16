@@ -271,7 +271,6 @@ def ai_parallel_limit():
     except (OSError, ValueError):
         return _AI_CAPACITY_CACHE[1] if _AI_CAPACITY_CACHE else AI_RUN_MAX_PARALLEL
 # HTTP synchronous compatibility uses the same durable queue as async clients.
-_HARNESS_TIMEOUT_FOR_STALE = max(60.0, min(1800.0, float(os.environ.get("DEEPSEEK_HARNESS_TIMEOUT_SECONDS", "1200"))))
 AI_BACKUPS: dict[str, dict[str, str]] = {}
 # 上游 AI 当前是否处于"额度耗尽"等降级状态：用户一打开编辑器就该知道，
 # 而不是写完需求点发送、白等几秒才收到失败。任务成功即自动清除。
@@ -2409,7 +2408,6 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                    "activeFile": str(context.get("activeFile", "index.html"))[:500] if isinstance(context, dict) else "index.html"}
         attempt = 0
         recovery_limit = min(2, max(0, int(os.environ.get('HATCHERY_AI_AUTO_RECOVERIES', '1'))))
-        recovery_deadline = time.monotonic() + max(60.0, min(1800.0, float(os.environ.get('DEEPSEEK_HARNESS_TIMEOUT_SECONDS', '1800'))))
         current_prompt = prompt
         recoveries = []
         recovery_usage = []
@@ -2421,8 +2419,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                         try:
                             result = run_deepseek_harness(root=ROOT, prompt=current_prompt, context=context, attachments=attachments,
                                                           workspace=workspace, preview_port=PORT, progress=progress, mode=mode,
-                                                          session_key=str(user["id"]), runtime_token=runtime_token,
-                                                          time_budget=recovery_deadline-time.monotonic())
+                                                          session_key=str(user["id"]), runtime_token=runtime_token)
                         except HarnessRuntimeError as error:
                             error.service_recovery = site_runtime.recovery_state(runtime_token)
                             raise
@@ -2434,7 +2431,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     service = getattr(error, 'service_recovery', {})
                     if service.get('pending') or service.get('uncertain'):
                         raise HarnessRuntimeError('AI 会话已中断，但有后台操作结果尚未确认；为防重复写入，暂停自动恢复。已保存的文件保留，请核对本站服务状态后继续') from error
-                    if attempt > recovery_limit or recovery_deadline-time.monotonic() < 30:
+                    if attempt > recovery_limit:
                         raise HarnessRuntimeError(f'AI 会话自动恢复 {len(recoveries)} 次后仍未完成；已保存文件和恢复检查点保留，请稍后继续') from error
                     manifest = site_files.file_manifest(workspace)
                     changed_so_far = sorted(name for name in before.keys() | manifest.keys() if before.get(name) != manifest.get(name))
@@ -2545,7 +2542,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         except (ai_jobs.Conflict, ai_jobs.QueueFull) as exc:
             self.send_json({"error": str(exc)}, 409 if isinstance(exc, ai_jobs.Conflict) else 429)
             return
-        deadline = time.monotonic() + _HARNESS_TIMEOUT_FOR_STALE + 60
+        # Bound the HTTP connection, never the durable task itself. Long work
+        # returns 202 so clients can poll the original job without replaying it.
+        deadline = time.monotonic() + 25
         while job['status'] in ('queued', 'running') and time.monotonic() < deadline:
             time.sleep(0.5)
             job = AI_JOB_STORE.get(user['id'], job['jobId'])
@@ -3510,7 +3509,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/ai/status":
             status = harness_status(ROOT)
             status.update({"filePolicy": "site-workspace-only", "maxParallel": ai_parallel_limit(),
-                           "clientVersion": console_asset_version('/script.js')})
+                           "clientVersion": console_asset_version('/script.js'), "executionTimeoutSeconds": None})
             if AI_UPSTREAM_DEGRADED:
                 status["configured"] = True  # Key 和运行时仍在，只是上游额度出了问题
                 status["degraded"] = AI_UPSTREAM_DEGRADED
