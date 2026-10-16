@@ -12,6 +12,11 @@ import deepseek_harness_adapter as dsh
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_every_mode_requests_markdown_inside_the_existing_json_report(self):
+        for prompt in (dsh.SYSTEM_PROMPT, dsh.CHAT_SYSTEM_PROMPT, dsh.PLAN_SYSTEM_PROMPT):
+            self.assertIn('summary 和 plan 使用 Markdown 正文', prompt)
+            self.assertIn('外层仍必须是严格 JSON', prompt)
+
     def run_protocol(self, notifications, *, step=0, timeout=600, exited=False):
         clock = [0]
         stream = iter(notifications)

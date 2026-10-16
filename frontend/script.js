@@ -680,7 +680,7 @@ function setAiContextUsage(usage,root=document){
   if(root===document)updateAiContextRing();
 }
 document.querySelector('#aiPrompt').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();document.querySelector('#aiAdjustBtn').click()}});
-document.querySelector('#aiChatMessages').addEventListener('click',event=>{const execute=event.target.closest('[data-ai-plan-execute]');if(!execute)return;if(!aiServiceConfigured){showToast('AI 尚未配置：请管理员配置 DeepSeek API Key');return}const plan=execute.closest('.ai-plan-box')?.querySelector('p')?.textContent.trim();if(!plan)return;void startAiRun(`请严格按照以下已确认的计划修改网站（本次为完全访问模式，直接执行，不要再只出计划）：\n${plan}`,[],[],[],{mode:'full',displayText:'按此计划执行'});execute.disabled=true});
+document.querySelector('#aiChatMessages').addEventListener('click',event=>{const execute=event.target.closest('[data-ai-plan-execute]');if(!execute)return;if(!aiServiceConfigured){showToast('AI 尚未配置：请管理员配置 DeepSeek API Key');return}const planNode=execute.closest('.ai-plan-box')?.querySelector('.ai-markdown, p');const plan=window.AIchemyHatcheryMarkdown.source(planNode).trim();if(!plan)return;void startAiRun(`请严格按照以下已确认的计划修改网站（本次为完全访问模式，直接执行，不要再只出计划）：\n${plan}`,[],[],[],{mode:'full',displayText:'按此计划执行'});execute.disabled=true});
 document.querySelector('#undoBtn').addEventListener('click',undoState);document.querySelector('#redoBtn').addEventListener('click',redoState);
 document.querySelectorAll('[data-preview-device]').forEach(button=>button.addEventListener('click',()=>{previewDevice=button.dataset.previewDevice;sessionStorage.setItem('alchemyhatchery:preview-device',previewDevice);renderCanvas();showToast(`已切换到${button.textContent}预览`)}));
 document.addEventListener('keydown',event=>{const editingText=event.target.closest?.('input,textarea,[contenteditable]');if(editingText)return;if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();if(event.shiftKey)redoState();else undoState()}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redoState()}else if(event.key==='Escape'&&editingElementId)openElementEditor(editingElementId)});
@@ -754,6 +754,7 @@ function applyAiChatHtml(html){
     const expanded=new Set([...messages.querySelectorAll('[data-ai-job-id] details[open]')].map(el=>el.closest('[data-ai-job-id]').dataset.aiJobId));
     const submitting=[...messages.querySelectorAll('[data-ai-local-run]')].filter(el=>aiRuns.get(el.dataset.aiLocalRun)?.status==='submitting');
     messages.innerHTML=html;messages._serverHtml=html;
+    window.AIchemyHatcheryMarkdown.renderAll(messages);
     for(const node of submitting)messages.append(node);
     for(const el of messages.querySelectorAll('[data-ai-job-id] .ai-run-process'))if(expanded.has(el.closest('[data-ai-job-id]').dataset.aiJobId))el.open=true;
     if(atBottom)scrollAiConversation(true);
@@ -924,9 +925,10 @@ function setAiWorkingStatus(active,root=document,mode='',text=''){
 }
 function typeAiSummary(text,root=document,instant=false){
   const node=root.querySelector('#aiRunSummary');if(!node)return;clearInterval(node._typingTimer);node._fullText=String(text||'');
-  if(instant){node.textContent=node._fullText;node.classList.remove('is-typing');return}
+  const finish=()=>{clearInterval(node._typingTimer);node._typingTimer=null;node.classList.remove('is-typing');window.AIchemyHatcheryMarkdown.renderInto(node,node._fullText)};
+  if(instant){finish();return}
   const chars=[...node._fullText];let index=0;node.textContent='';node.classList.add('is-typing');
-  node._typingTimer=setInterval(()=>{index=Math.min(chars.length,index+2);node.textContent=chars.slice(0,index).join('');if(index>=chars.length){clearInterval(node._typingTimer);node.classList.remove('is-typing')}},18);
+  node._typingTimer=setInterval(()=>{index=Math.min(chars.length,index+2);node.textContent=chars.slice(0,index).join('');if(index>=chars.length)finish()},18);
 }
 function renderAiRunProgress(snapshot,run,root=document){
   const card=root.querySelector('#aiRunCard');if(card&&run&&card.dataset.contextRun!==run.id){delete card.dataset.contextUsage;card.dataset.contextRun=run.id}
@@ -936,7 +938,7 @@ function renderAiRunProgress(snapshot,run,root=document){
 function renderAiRunResult(run,payload,root=document){
   setAiContextUsage(payload.contextUsage,root);
   const resultNode=root.querySelector('#aiResult');if(resultNode)resultNode.hidden=true;const panel=root.querySelector('#aiRunCard');if(!panel)return;panel.hidden=false;setAiWorkingStatus(false,root,run.mode);typeAiSummary(payload.summary||'网站修改已完成。',root,root!==document);const finalBox=root.querySelector('#aiRunFinal');if(finalBox)finalBox.hidden=false;
-  const planBox=root.querySelector('#aiPlanBox');if(planBox){const showPlan=payload.mode==='plan'&&String(payload.plan||'').trim().length>0;planBox.hidden=!showPlan;if(showPlan)planBox.querySelector('p').textContent=payload.plan}
+  const planBox=root.querySelector('#aiPlanBox');if(planBox){const showPlan=payload.mode==='plan'&&String(payload.plan||'').trim().length>0;planBox.hidden=!showPlan;if(showPlan)window.AIchemyHatcheryMarkdown.renderInto(planBox.querySelector('.ai-markdown, p'),payload.plan)}
   const events=payload.events||payload.trace||[];renderAiEvents(events,root);const process=root.querySelector('#aiRunProcess');if(process)process.open=false;const summary=root.querySelector('#aiRunProcessLabel');if(summary){summary.hidden=false;summary.textContent='查看过程'}
   const changes=[...(payload.changedFiles||[]).map(name=>`已修改文件：${name}`),...(payload.siteOperations||[]).map(item=>describeAiOperation(item))];const checksBox=root.querySelector('#aiRunChecks');if(checksBox)checksBox.innerHTML=changes.length?changes.map(item=>`<div class="ai-change">${esc(item)}</div>`).join(''):'<div class="ai-change">未产生文件或站点改动</div>';
   if(root===document)scrollAiConversation(true);
@@ -953,7 +955,7 @@ function applyAiRunResult(payload){
 function finishAiSummaryTyping(root){
   // 打字动画中途要固化/切换视图时，直接补完，避免冻结到半截摘要
   const node=root.querySelector('#aiRunSummary');
-  if(node&&node._typingTimer){clearInterval(node._typingTimer);node._typingTimer=null;node.textContent=node._fullText||node.textContent;node.classList.remove('is-typing')}
+  if(node&&node._typingTimer){clearInterval(node._typingTimer);node._typingTimer=null;node.classList.remove('is-typing');window.AIchemyHatcheryMarkdown.renderInto(node,node._fullText||node.textContent)}
 }
 function archiveAiRunOutputInto(root){
   // 新一轮开始前，把上一轮的运行卡片/结果固化成历史记录，避免被复用清空
@@ -1105,7 +1107,7 @@ function aiChatHistoryForContext(limit=8){
   for(const node of document.querySelector('#aiChatMessages')?.children||[]){
     let role=null,text='';
     if(node.classList?.contains('ai-message')){role=node.classList.contains('user')?'user':'assistant';text=node.innerText.trim()}
-    else if(node.classList?.contains('ai-run-archive')||node.id==='aiRunCard'){const summary=node.querySelector('#aiRunSummary, .ai-run-final p');if(summary?.textContent.trim()){role='assistant';text=summary.textContent.trim()}}
+    else if(node.classList?.contains('ai-run-archive')||node.id==='aiRunCard'){const summary=node.querySelector('#aiRunSummary, .ai-run-summary, .ai-run-final p');const source=window.AIchemyHatcheryMarkdown.source(summary).trim();if(source){role='assistant';text=source}}
     if(role&&text)entries.push({role,text:text.slice(0,600)});
   }
   return entries.slice(-limit);

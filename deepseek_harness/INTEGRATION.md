@@ -163,6 +163,8 @@ index and existing previews/drafts before migration. This change does not config
 DNS, nginx path routing or TLS for the independent site domains.
 ## 持久任务与修复验证 2026 年 10 月
 
+最终回复与计划在浏览器中统一进行 Markdown 渲染，已有服务端历史在加载、轮询和刷新后同样生效；数据库仍保存原始报告，不修改用户消息或工具日志。段落、单换行、列表、标题、代码块、引用、表格和链接可正常显示，执行计划与后续上下文读取保留原始 Markdown。解析器为本地自托管的 markdown-it 15.0.3 UMD 构建（NPM `dist/browser/markdown-it.umd.min.js`；MIT 许可证保存在 `frontend/markdown-it.LICENSE.txt`），不依赖 CDN。禁用原生 HTML 与图片自动加载，沿用解析器的危险 URL 校验，外链使用 `noopener noreferrer`。系统提示要求在严格 JSON 的 summary/plan 字符串中使用 Markdown 和真实换行，不改变外层协议、网站权限或运行时限制。回归：`node scripts/ai_markdown_tests.mjs`、`scripts/ai_markdown_browser_tests.py`（真实控制台与历史渲染、受控提交接口、无模型调用）。
+
 异步与同步请求共用 PostgreSQL 的 `hatchery_ai_jobs`。客户端传入稳定的 `requestId`，相同请求重试返回同一任务；同账号按入队顺序执行，跨账号遵守 `HATCHERY_AI_MAX_PARALLEL`。浏览器只提交请求和读取历史，不能用 `messagesHtml` 覆盖已存会话。确认接收结果不会删除任务结果。
 
 2026-10-15 排队修复：跨账号并发默认 2，`.env` 中的 `HATCHERY_AI_MAX_PARALLEL` 支持运行中热更新（1–4），调小上限不会取消在途任务。`/api/ai/run/active` 返回不含其他账号标识/内容的排队原因、并发占用和前方等待数，区分“本账号前一条未结束”和“全局容量已满”。前端只有取得有效 jobId/requestId 确认才显示服务器排队；提交与轮询请求有超时，明确 404 会清除本地幽灵等待，但不会自动重放执行。损坏结果缓冲保留为 `.invalid` 私有文件，不得阻塞其他任务。控制台 HTML 强制不缓存，JS/CSS URL 由文件内容哈希生成，修复不会再依赖人工改资源版本号。回归新增 `scripts/ai_queue_browser_tests.py`，与真实临时 PostgreSQL 的任务测试配套执行，不调用真实模型。

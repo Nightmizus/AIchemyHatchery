@@ -278,7 +278,7 @@ AI_UPSTREAM_DEGRADED: dict | None = None
 # 前端静态文件统一放在 frontend/；对外 URL 仍是根路径（/styles.css…），由 handler 翻译
 FRONTEND_DIR = "frontend"
 AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/motion.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
-PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js", "/study.css", "/study.js"))
+PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js", "/study.css", "/study.js", "/markdown-it.min.js", "/ai-markdown.js"))
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}

@@ -138,6 +138,9 @@ class FilesTests(unittest.TestCase):
                 self.assertIn('no-store', headers['Cache-Control'])
                 self.assertIn('/script.js?v=' + version, body.decode())
                 self.assertEqual(f.request(path, 'HEAD')[2], b'')
+            for asset in ('markdown-it.min.js', 'ai-markdown.js'):
+                self.assertIn('/' + asset + '?v=', body.decode())
+                self.assertEqual(f.request('/' + asset)[0], 200)
             for path in ('/script.js', '/script.js?v=old-browser-version'):
                 self.assertIn('no-store', f.request(path)[1]['Cache-Control'])
             status, headers, body = f.request('/script.js?v=' + version)
