@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import personal_api
+
 ROOT = Path(__file__).resolve().parent
 COACH_PATH = ROOT / "study_coach.md"
 
@@ -143,14 +145,14 @@ def resolve_endpoint(provider_id: str = "") -> tuple[str, str, str, str]:
     return base, key, model, "默认（Hatchery）"
 
 
-def fetch_models(base_url: str, api_key: str, timeout: int = 30) -> list[str]:
+def fetch_models(base_url: str, api_key: str, timeout: int = 30, *, personal: bool = False) -> list[str]:
     """查询某个 endpoint 的模型列表。"""
     request = urllib.request.Request(
         base_url.rstrip("/") + "/models",
         headers={"Authorization": f"Bearer {api_key}"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with (personal_api.open_request(request, timeout=timeout) if personal else urllib.request.urlopen(request, timeout=timeout)) as response:
             data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         raise StudyGatewayError(f"模型列表请求失败（{error.code}）") from error
@@ -222,6 +224,7 @@ def stream_completion(
     timeout: int = 600,
     provider_id: str = "",
     model_override: str = "",
+    api_config: dict | None = None,
 ):
     """向网关发起流式请求，逐块 yield 解析后的增量对象。
 
@@ -230,7 +233,10 @@ def stream_completion(
     tool_choice="none" 时仍下发工具定义（否则模型会自己编造 <｜DSML｜> 之类的
     伪调用文本），但不允许真正调用，保证本轮只产出正文。
     """
-    base, key, model, _label = resolve_endpoint(provider_id)
+    if api_config:
+        base, key, model = api_config["base_url"], api_config["api_key"], api_config["model"]
+    else:
+        base, key, model, _label = resolve_endpoint(provider_id)
     if model_override.strip():
         model = model_override.strip()
     if not key:
@@ -257,7 +263,7 @@ def stream_completion(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with (personal_api.open_request(request, timeout=timeout) if api_config else urllib.request.urlopen(request, timeout=timeout)) as response:
             for raw in response:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line or not line.startswith("data:"):
@@ -285,6 +291,8 @@ def stream_completion(
                                             "index": call.get("index", 0),
                                             "arguments": arguments or ""}}
     except urllib.error.HTTPError as error:
+        if api_config:
+            raise StudyGatewayError(f"个人 API 返回错误（HTTP {error.code}），请检查 Key、模型和接口地址") from None
         detail = ""
         try:
             detail = error.read().decode("utf-8", "replace")[:400]
@@ -295,6 +303,10 @@ def stream_completion(
         raise StudyGatewayError(f"无法连接 AI 服务：{error.reason}") from error
     except TimeoutError as error:
         raise StudyGatewayError("AI 服务响应超时，请稍后重试") from error
+    except ValueError as error:
+        if api_config:
+            raise StudyGatewayError("个人 API 地址校验失败，请检查配置是否仍指向公网 HTTPS 接口") from None
+        raise
 
 
 def _max_tokens() -> int:

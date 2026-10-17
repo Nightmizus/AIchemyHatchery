@@ -16,6 +16,9 @@
 export const name = 'miaoda-llm-glm'
 export const inject = ['llm']
 
+// Shared wire conversion used by the generic personal API adapter.
+export { serializeMessages, translate }
+
 const PROVIDER = 'glm'
 const PUBLIC_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
 const DEFAULT_MODEL = 'glm-5.3'
