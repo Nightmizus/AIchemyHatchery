@@ -792,9 +792,8 @@ def run_deepseek_harness(
 
     env = _child_env("" if api_config else provider["key_env"])
     web_env = _web_search_env() if not api_config else {
-        "DEEPSEEK_SEARCH_BASE_URL": api_config["base_url"],
         "HATCHERY_DEEPSEEK_SEARCH_MODEL": model,
-        "HATCHERY_DEEPSEEK_SEARCH_API_KEY": key,
+        "HATCHERY_DEEPSEEK_SEARCH_API_KEY": "",  # Filled by the task-local checked transport below.
     }
     if api_config:
         env.update({"HATCHERY_PERSONAL_API_KEY": key, "HATCHERY_PERSONAL_API_MODEL": model,
@@ -829,7 +828,10 @@ def run_deepseek_harness(
     # 不删除其他尝试的日志；历史和检查点由服务端 prompt 负责恢复。
     reset_dsh_session(dsh_home, root, session_id)
 
-    with _JsonRpcRuntime(args, root, env, rpc_timeout, secrets=(key, web_env["HATCHERY_DEEPSEEK_SEARCH_API_KEY"], runtime_token)) as runtime:
+    with personal_api.search_transport(env, api_config) as runtime_env, _JsonRpcRuntime(
+        args, root, runtime_env, rpc_timeout,
+        secrets=(key, runtime_env["HATCHERY_DEEPSEEK_SEARCH_API_KEY"], runtime_token),
+    ) as runtime:
         initialize: dict = {"cwd": str(root.resolve()), "provider": provider["route"], "model": model, "maxTokens": max_tokens}
         if reasoning:
             initialize["reasoningEffort"] = reasoning

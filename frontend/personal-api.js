@@ -5,7 +5,7 @@
 
   function renderSettings(config) {
     openModal('我的 API', `<div class="account-security">
-      <section><h3>${config.configured ? '正在使用自己的 API' : '当前使用 Hatchery 默认服务'}</h3>
+      <section><h3>${config.needsReconfiguration ? '个人 API 配置需要恢复' : config.configured ? '正在使用自己的 API' : '当前使用 Hatchery 默认服务'}</h3>
       <p>为当前账号配置 OpenAI 兼容的 Chat Completions 接口。保存后，新建站请求及 HatcheryStudy 的默认平台使用此配置；正在运行的任务保持原配置。</p>
       <form class="account-settings-form" id="personalApiForm" autocomplete="off">
         <label>Base URL<input name="baseUrl" type="url" required maxlength="2048" placeholder="https://api.example.com/v1" value="${esc(config.baseUrl)}" aria-describedby="personalApiHelp"></label>
@@ -15,10 +15,14 @@
         <p id="personalApiMessage" role="status" aria-live="polite"></p>
         <button type="submit">保存配置</button>
         <button type="button" data-personal-api="test" ${config.configured ? '' : 'disabled'}>测试已保存的连接</button>
-        <button type="button" data-personal-api="clear" ${config.configured ? '' : 'disabled'}>清除并恢复默认服务</button>
+        <button type="button" data-personal-api="clear" ${config.configured || config.needsReconfiguration ? '' : 'disabled'}>清除并恢复默认服务</button>
       </form></section></div>`);
     const form = document.getElementById('personalApiForm');
     const message = document.getElementById('personalApiMessage');
+    if (config.needsReconfiguration) {
+      message.setAttribute('role', 'alert');
+      message.textContent = config.recoveryMessage;
+    }
     async function run(action) {
       const buttons = [...form.querySelectorAll('button')];
       const disabled = buttons.map(button => button.disabled);

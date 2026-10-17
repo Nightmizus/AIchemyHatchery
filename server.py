@@ -2160,7 +2160,13 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if not user:
             return
         if self.command == "GET":
-            self.send_json(personal_api.public_config(PERSONAL_API_STORE.load(user["id"])))
+            try:
+                config = PERSONAL_API_STORE.load(user["id"])
+            except personal_api.ConfigurationUnreadable as error:
+                self.send_json({**personal_api.public_config(None), "needsReconfiguration": True,
+                                "recoveryMessage": str(error)})
+                return
+            self.send_json(personal_api.public_config(config))
             return
         data = self.read_json()
         action = data.get("action", "save")

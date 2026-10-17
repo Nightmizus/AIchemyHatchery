@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import contextmanager
+import hmac
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import ssl
 import threading
@@ -20,6 +24,10 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS hatchery_personal_api (
     user_id TEXT PRIMARY KEY, encrypted_config TEXT NOT NULL
 )"""
 _KEY_LOCK = threading.Lock()
+
+
+class ConfigurationUnreadable(ValueError):
+    """Stored credentials must be replaced or deleted, never silently ignored."""
 
 
 def normalize_base_url(value: str) -> str:
@@ -87,7 +95,7 @@ class ConfigStore:
                 raise InvalidToken
             return value
         except (InvalidToken, ValueError, OSError):
-            raise ValueError("个人 API 配置无法解密，请重新保存配置或联系管理员恢复加密密钥") from None
+            raise ConfigurationUnreadable("个人 API 配置无法解密，请重新填写地址、模型和 API Key 后保存，或清除配置恢复默认服务") from None
 
     def save(self, user_id, data: dict) -> dict:
         base = normalize_base_url(data.get("baseUrl", ""))
@@ -147,6 +155,87 @@ def open_request(request, timeout=30):
     normalize_base_url(urlunsplit((url.scheme, url.netloc, "", "", "")))
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _PinnedHTTPSHandler(), _NoRedirect())
     return opener.open(request, timeout=timeout)
+
+
+@contextmanager
+def search_transport(env: dict, config: dict | None):
+    """Keep native search parsing; route personal Messages through checked HTTPS.
+
+    The native provider has no transport hook. Its loopback credential is random
+    and task-local; the real upstream key never arrives from the client request.
+    """
+    if config is None:
+        yield env
+        return
+    base = normalize_base_url(config["base_url"])
+    credential = secrets.token_urlsafe(32)
+    max_request, max_response = 1024 * 1024, 4 * 1024 * 1024
+
+    class Handler(BaseHTTPRequestHandler):
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(10)
+
+        def log_message(self, *_args):
+            pass  # Neither credentials nor search payloads belong in access logs.
+
+        def reply(self, status, body):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def error(self, status, message):
+            self.reply(status, json.dumps({"error": {"message": message}}, ensure_ascii=False).encode())
+
+        def do_POST(self):
+            if not hmac.compare_digest(self.headers.get("x-api-key", "").encode(), credential.encode()):
+                self.error(403, "Search bridge credential is invalid")
+                return
+            if self.path != "/v1/messages":
+                self.error(404, "Search bridge route does not exist")
+                return
+            length = self.headers.get("Content-Length", "")
+            if self.headers.get("Transfer-Encoding") or not length.isascii() or not length.isdigit() or not 0 < int(length) <= max_request:
+                self.error(413, "Search request size is invalid")
+                return
+            try:
+                body = self.rfile.read(int(length))
+                if len(body) != int(length):
+                    raise ValueError("Incomplete request")
+                headers = {"x-api-key": config["api_key"], "Authorization": "Bearer " + config["api_key"],
+                           "Content-Type": "application/json", "Accept": "application/json",
+                           "anthropic-version": self.headers.get("anthropic-version", "2023-06-01")}
+                if self.headers.get("anthropic-beta"):
+                    headers["anthropic-beta"] = self.headers["anthropic-beta"]
+                request = urllib.request.Request(base + "/messages", data=body, headers=headers, method="POST")
+                with open_request(request, timeout=60) as response:
+                    payload = response.read(max_response + 1)
+                    status = response.status
+                if len(payload) > max_response:
+                    raise ValueError("Search response is too large")
+                self.reply(status, payload)
+            except urllib.error.HTTPError as error:
+                # Redirects are errors too; never forward Location or upstream bodies.
+                error.close()
+                self.error(502, f"Personal search upstream returned HTTP {error.code}")
+            except (ValueError, OSError, urllib.error.URLError, http.client.HTTPException):
+                self.error(502, "Personal search connection failed public HTTPS validation or could not be reached")
+
+    bridge = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    bridge.daemon_threads = True
+    thread = threading.Thread(target=lambda: bridge.serve_forever(poll_interval=0.05), daemon=True)
+    thread.start()
+    try:
+        yield {**env, "DEEPSEEK_SEARCH_BASE_URL": f"http://127.0.0.1:{bridge.server_port}/v1",
+               "HATCHERY_DEEPSEEK_SEARCH_API_KEY": credential,
+               "HATCHERY_DEEPSEEK_SEARCH_MODEL": config["model"]}
+    finally:
+        bridge.shutdown()
+        bridge.server_close()
+        thread.join()
 
 
 def test_connection(config: dict) -> None:

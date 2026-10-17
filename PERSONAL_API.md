@@ -30,6 +30,10 @@ to the platform's credentials. Plain public web fetching remains available.
 - Only public HTTPS endpoints on port 443 are accepted. Both Python requests and
   the child adapter connect to checked IPs while verifying TLS for the original
   host; they do not follow redirects with credentials or use ambient proxies.
+  Personal native search uses a task-local, authenticated loopback bridge that
+  forwards only Messages requests through that same checked Python HTTPS layer.
+  DNS is revalidated at each outgoing connection, and the verified address is
+  pinned through TLS. Native search keeps its existing parsing and citations.
 - Blank key preserves the stored value for the same base URL; changing the URL
   requires a new key. Clearing deletes the configuration and restores defaults.
 - Connection testing reads `/models` and checks the selected model. It does not
@@ -39,6 +43,11 @@ to the platform's credentials. Plain public web fetching remains available.
 ## HTTP API
 
 `GET /api/account/api-config` returns `configured`, `baseUrl`, `model`, `hasKey`.
+If existing ciphertext cannot be decrypted, it instead returns empty fields plus
+`needsReconfiguration: true` and a recovery message. The UI requires a fresh key
+and offers both replacement and deletion. Execution still fails closed until
+the user recovers or clears the settings; unreadable credentials never silently
+fall back to the shared service.
 `POST` accepts `{action: "save", baseUrl, apiKey, model}`, `{action: "test"}` or
 `{action: "clear"}`. Existing session authentication and same-origin protection
 apply. The user ID always comes from the server session.
@@ -51,3 +60,5 @@ Tests: `python scripts/personal_api_tests.py` and
 an optional real Harness initialization check that does not issue a model call.
 For browser integration, install the Python Playwright development package and
 Microsoft Edge, then run `python scripts/personal_api_browser_tests.py`.
+Run `python scripts/personal_api_search_tests.py` for the local TLS, DNS rebinding,
+redirect, account-isolation and actual native-search regressions (no paid calls).

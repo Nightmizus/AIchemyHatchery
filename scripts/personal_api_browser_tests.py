@@ -87,8 +87,35 @@ def main():
         page.get_by_role('button', name='清除并恢复默认服务', exact=True).click()
         page.get_by_text('已恢复默认服务。', exact=True).wait_for()
         assert fixture.store.load('one') is None
+        # Reproduce actual key-file loss while ciphertext remains in the database.
+        def reopen():
+            page.locator('#closeModalBtn').click()
+            page.locator('#previewModal').wait_for(state='hidden')
+            page.locator('#consoleAccountBtn').click()
+            page.get_by_role('button', name='我的 API', exact=True).click()
+            page.locator('#personalApiForm').wait_for()
+
+        fixture.store.save('one', DATA)
+        (fixture.root / '.private-api-config' / 'key').unlink()
+        reopen()
+        page.get_by_role('alert').filter(has_text='无法解密').wait_for()
+        assert page.get_by_role('button', name='清除并恢复默认服务', exact=True).is_enabled()
+        assert page.get_by_label('API Key', exact=False).get_attribute('required') is not None
+        page.get_by_label('Base URL', exact=True).fill(DATA['baseUrl'])
+        page.get_by_label('API Key', exact=False).fill('recovered-key')
+        page.get_by_label('模型 ID', exact=True).fill(DATA['model'])
+        page.get_by_role('button', name='保存配置', exact=True).click()
+        page.get_by_text('已保存，将用于接下来的请求。', exact=True).wait_for()
+        assert fixture.store.load('one')['api_key'] == 'recovered-key'
+        assert page.get_by_label('API Key', exact=False).input_value() == ''
+        (fixture.root / '.private-api-config' / 'key').unlink()
+        reopen()
+        page.get_by_role('alert').filter(has_text='无法解密').wait_for()
+        page.get_by_role('button', name='清除并恢复默认服务', exact=True).click()
+        page.get_by_text('已恢复默认服务。', exact=True).wait_for()
+        assert fixture.store.load('one') is None
         assert not errors, errors
-        print('Browser PASS: open, validation, save, masked key, connection test, reload, blank-key update, mobile overflow, clear; no JavaScript errors')
+        print('Browser PASS: settings, validation, key secrecy, reload, mobile, lost-key reconfiguration and clear; no JavaScript errors')
 
 
 if __name__ == '__main__': main()

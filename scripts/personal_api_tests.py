@@ -166,6 +166,20 @@ class PersonalApiTests(unittest.TestCase):
             self.assertEqual(call(path='/api/ai/status')[1]['provider'], '我的 API')
         self.assertFalse(call('POST', {'action': 'clear'})[1]['configured'])
         self.assertEqual(call('POST', {'action': 'test'})[0], 400)
+        # Loss/rotation of encryption key must expose recovery, not a dead-end 400.
+        call('POST', DATA)
+        (self.fixture.root / '.private-api-config' / 'key').unlink()
+        status, payload = call()
+        self.assertEqual(status, 200)
+        self.assertTrue(payload['needsReconfiguration'])
+        self.assertFalse(payload['hasKey'])
+        self.assertNotIn(DATA['apiKey'], json.dumps(payload))
+        self.assertEqual(call('POST', {**DATA, 'apiKey': 'replacement-key'})[0], 200)
+        self.assertEqual(self.store.load('one')['api_key'], 'replacement-key')
+        (self.fixture.root / '.private-api-config' / 'key').unlink()
+        self.assertTrue(call()[1]['needsReconfiguration'])
+        self.assertEqual(call('POST', {'action': 'clear'})[0], 200)
+        self.assertIsNone(self.store.load('one'))
 
     def test_encryption_key_never_in_child_env(self):
         with patch.dict(os.environ, {'HATCHERY_API_ENCRYPTION_KEY': 'secret', 'DEEPSEEK_API_KEY': 'platform-secret'}):
@@ -190,7 +204,8 @@ class PersonalApiTests(unittest.TestCase):
                                                 preview_port=4173, session_key=uid, api_config=own)
                 env = runtime.call_args.args[2]
                 self.assertEqual(env['HATCHERY_PERSONAL_API_KEY'], key)
-                self.assertEqual(env['HATCHERY_DEEPSEEK_SEARCH_API_KEY'], key)
+                self.assertNotEqual(env['HATCHERY_DEEPSEEK_SEARCH_API_KEY'], key)
+                self.assertTrue(env['DEEPSEEK_SEARCH_BASE_URL'].startswith('http://127.0.0.1:'))
                 self.assertNotIn('DEEPSEEK_API_KEY', env)
                 initialize = runtime.return_value.__enter__.return_value.request.call_args.args
                 self.assertEqual(initialize[1]['provider'], 'personal-openai')
