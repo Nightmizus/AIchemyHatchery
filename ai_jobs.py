@@ -299,6 +299,24 @@ class JobStore:
             cur.execute("SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND (status IN ('queued','running') OR NOT acknowledged) ORDER BY seq", (str(user_id),))
             return [public_job(r) for r in cur.fetchall()]
 
+    def queue_status(self, user_id, max_parallel):
+        """Explain waiting without exposing another account's IDs or messages."""
+        with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('''WITH first_waiting AS (
+                SELECT min(seq) AS seq FROM hatchery_ai_jobs WHERE user_id=%s AND status='queued'
+            ) SELECT count(*) FILTER (WHERE status='running') AS running,
+                count(*) FILTER (WHERE status='queued') AS queued,
+                count(*) FILTER (WHERE status='running' AND user_id=%s) AS own_running,
+                count(*) FILTER (WHERE status='queued' AND user_id=%s) AS own_queued,
+                count(*) FILTER (WHERE status='queued' AND seq < (SELECT seq FROM first_waiting)) AS ahead
+                FROM hatchery_ai_jobs''', (str(user_id), str(user_id), str(user_id)))
+            row = cur.fetchone()
+        limit = max(1, int(max_parallel))
+        reason = ('same_account' if row['own_running'] else
+                  'capacity' if row['running'] >= limit else 'dispatching') if row['own_queued'] else ''
+        return {'running': row['running'], 'queued': row['queued'], 'maxParallel': limit,
+                'ownQueued': row['own_queued'], 'ahead': row['ahead'], 'reason': reason}
+
     def ack(self, user_id, job_id):
         with self.db() as conn, conn.cursor() as cur:
             cur.execute("UPDATE hatchery_ai_jobs SET acknowledged=true WHERE user_id=%s AND id=%s AND status NOT IN ('queued','running')", (str(user_id), job_id))
@@ -350,6 +368,9 @@ class Dispatcher:
         self.lock = threading.Lock()
         self.stop = threading.Event()
 
+    def parallel_limit(self):
+        return max(1, int(self.max_parallel() if callable(self.max_parallel) else self.max_parallel))
+
     def start(self):
         self.thread = threading.Thread(target=self.loop, name='hatchery-ai-dispatch', daemon=True)
         self.thread.start()
@@ -386,8 +407,9 @@ class Dispatcher:
                         last_renew = time.monotonic()
                     self.flush_results()
                     self.store.recover_expired()
-                while len(running) < self.max_parallel:
-                    job = self.store.claim(self.max_parallel)
+                limit = self.parallel_limit()
+                while len(running) < limit:
+                    job = self.store.claim(limit)
                     if not job:
                         break
                     with self.lock:
@@ -411,11 +433,20 @@ class Dispatcher:
         for path in self.spool.glob('job-*.json'):
             try:
                 data = json.loads(path.read_text(encoding='utf-8'))
+                if not isinstance(data, dict) or not isinstance(data.get('events'), list) or not {'result', 'error'} <= data.keys():
+                    raise ValueError('Invalid result record')
                 self.store.progress(path.stem, data['events'])
                 self.store.finish(path.stem, data['result'], data['error'])
                 path.unlink(missing_ok=True)
             except FileNotFoundError:
                 pass  # Another dispatcher may have completed this atomic record.
+            except (ValueError, KeyError, TypeError):
+                # Preserve the corrupt record for inspection, but never let one
+                # unreadable spool file stop every account from being scheduled.
+                path.replace(path.with_name(path.name + '.' + uuid.uuid4().hex + '.invalid'))
+                print('[ai-dispatch] 已隔离损坏的结果记录', file=sys.stderr)
+            except Exception as exc:
+                print(f'[ai-dispatch] 结果待补写：{type(exc).__name__}', file=sys.stderr)
 
     def save_result(self, job_id, data):
         if not self.spool:

@@ -10,10 +10,10 @@ from pathlib import Path
 import secrets
 import socket
 import threading
-import time
 
 SOCKET = '/run/hatchery-sites/control.sock'
 _capabilities = {}
+_effects = {}
 _lock = threading.Lock()
 READ_ONLY = frozenset({'status', 'logs', 'secret_names'})
 OPERATIONS = READ_ONLY | {'exec', 'install', 'deploy', 'stop', 'set_secrets', 'delete_secrets'}
@@ -24,8 +24,10 @@ def site_key(user_id):
 
 
 def enabled(user_id):
-    allowed = os.environ.get('HATCHERY_DYNAMIC_SITE_KEYS', '').split(',')
-    return site_key(user_id) in {value.strip() for value in allowed}
+    if user_id is None or not str(user_id):
+        return False
+    allowed = {value.strip() for value in os.environ.get('HATCHERY_DYNAMIC_SITE_KEYS', '').split(',')}
+    return '*' in allowed or site_key(user_id) in allowed
 
 
 class UnixConnection(http.client.HTTPConnection):
@@ -46,7 +48,8 @@ def call(user_id, workspace, operation, args=None):
         raise ValueError('未知的网站运行操作')
     connection = UnixConnection()
     try:
-        body = json.dumps({'siteKey': site_key(user_id), 'workspace': str(Path(workspace).absolute()),
+        body = json.dumps({'siteKey': site_key(user_id), 'ownerId': str(user_id),
+                           'workspace': str(Path(workspace).absolute()),
                            'operation': operation, 'args': args or {}}).encode()
         connection.request('POST', '/', body, {'Content-Type': 'application/json'})
         response = connection.getresponse()
@@ -62,28 +65,66 @@ def call(user_id, workspace, operation, args=None):
 
 @contextmanager
 def capability(user_id, workspace, mode):
-    """Bind a short-lived, opaque credential; the model cannot choose its site."""
+    """Bind a credential to this attempt's lifetime, never another website."""
     if not enabled(user_id):
         yield ''
         return
     token = secrets.token_urlsafe(40)
     with _lock:
-        _capabilities[token] = (str(user_id), Path(workspace), mode, time.monotonic() + 2000)
+        _capabilities[token] = (str(user_id), Path(workspace), mode)
+        _effects[token] = {'pending': {}, 'completed': [], 'uncertain': []}
     try:
         yield token
     finally:
         with _lock:
             _capabilities.pop(token, None)
+            _effects.pop(token, None)
+
+
+def recovery_state(token):
+    """No commands or secret values: only whether a backend write was confirmed."""
+    with _lock:
+        state = _effects.get(token, {})
+        return {'pending': list(state.get('pending', {}).values()),
+                'completed': list(state.get('completed', [])), 'uncertain': list(state.get('uncertain', []))}
 
 
 def authorized_call(token, operation, args):
     with _lock:
         capability = _capabilities.get(token)
-    if not capability or capability[3] < time.monotonic():
+    if not capability:
         raise ValueError('网站运行权限已失效')
-    user_id, workspace, mode, _ = capability
+    user_id, workspace, mode = capability
     if operation not in OPERATIONS:
         raise ValueError('未知的网站运行操作')
     if mode != 'full' and operation not in READ_ONLY:
         raise ValueError('当前模式只允许查看本网站服务状态')
-    return call(user_id, workspace, operation, args)
+    invocation = secrets.token_hex(12)
+    changing = operation not in READ_ONLY
+    if changing:
+        with _lock:
+            if token not in _effects:
+                raise ValueError('网站运行权限已失效')
+            _effects[token]['pending'][invocation] = operation
+    try:
+        result = call(user_id, workspace, operation, args)
+    except Exception:
+        if changing:
+            with _lock:
+                state = _effects.get(token)
+                if state is not None:
+                    state['uncertain'].append(operation)
+        raise
+    else:
+        if changing:
+            with _lock:
+                state = _effects.get(token)
+                if state is not None:
+                    state['completed'].append(operation)
+        return result
+    finally:
+        if changing:
+            with _lock:
+                state = _effects.get(token)
+                if state is not None:
+                    state['pending'].pop(invocation, None)

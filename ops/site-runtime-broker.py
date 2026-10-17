@@ -24,12 +24,14 @@ APP = Path('/opt/hatchery')
 STATE = Path('/var/lib/hatchery-sites')
 CONTROL = Path('/run/hatchery-sites/control.sock')
 KEYS = Path('/etc/hatchery-sites/allowed-sites.json')
+POLICY = Path('/etc/hatchery-sites/policy.json')
 KEY = re.compile(r'[0-9a-f]{64}')
 LABEL = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*')
 PRIVATE_IPS = '0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 ::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8 39.106.77.105/32'
 HOP_HEADERS = {'connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'content-length'}
 _locks = {}
 _guard = threading.Lock()
+_authorization_lock = threading.Lock()
 _executions = threading.BoundedSemaphore(2)
 
 
@@ -51,9 +53,60 @@ def load_json(path, default=None):
         return {} if default is None else default
 
 
-def validate_workspace(key, value):
-    allowed = load_json(KEYS)
-    if not isinstance(key, str) or not KEY.fullmatch(key) or key not in allowed:
+def owner_workspace(owner_id):
+    """Resolve account existence and ownership as the unprivileged platform user.
+
+    The owner ID is an argv value, never source or a shell command. Only trusted
+    platform code is imported; neither website metadata nor model input is used
+    as evidence that a directory belongs to an account.
+    """
+    code = '''import json,sys,server
+owner=sys.argv[1]
+with server.neon_db(autocommit=True) as conn,conn.cursor() as cur:
+    cur.execute('SELECT id FROM "User" WHERE id=%s',(owner,))
+    if not cur.fetchone():
+        raise ValueError('Account does not exist')
+directory,_=server.user_site_directory(owner)
+print(json.dumps(str(directory)))
+'''
+    try:
+        result = run(['runuser', '-u', 'hatchery', '--', str(APP / '.venv/bin/python'),
+                      '-c', code, owner_id], cwd=APP)
+        value = json.loads(result.stdout)
+        if not isinstance(value, str):
+            raise ValueError('Invalid ownership lookup result')
+        return Path(value)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise ValueError('Website account ownership could not be verified') from None
+
+
+def authorize_workspace(key, path, owner_id):
+    if load_json(POLICY).get('allowAllAccounts') is not True:
+        raise ValueError('This website is not authorized for a runtime')
+    if not isinstance(owner_id, str) or not 1 <= len(owner_id) <= 256 or hashlib.sha256(owner_id.encode()).hexdigest() != key:
+        raise ValueError('Invalid website owner identity')
+    # Different accounts may first use their runtimes concurrently. Serialize
+    # lookups as well as bindings: lookup subprocesses share the broker's memory
+    # budget and must not multiply during a burst of first-time requests.
+    with _authorization_lock:
+        allowed = load_json(KEYS)
+        identity = path.stat()
+        binding = [identity.st_dev, identity.st_ino]
+        if key in allowed:
+            if allowed[key] != binding:
+                raise ValueError('Workspace does not belong to this authorized website')
+        else:
+            if owner_workspace(owner_id) != path:
+                raise ValueError('Workspace does not belong to this account')
+            if binding in allowed.values():
+                raise ValueError('Workspace is already bound to another website')
+            allowed[key] = binding
+            save_json(KEYS, allowed)
+    return binding
+
+
+def validate_workspace(key, value, owner_id=None):
+    if not isinstance(key, str) or not KEY.fullmatch(key):
         raise ValueError('This website is not authorized for a runtime')
     path = Path(value)
     if not path.is_absolute() or any(part in ('.', '..') for part in PurePosixPath(value).parts):
@@ -68,17 +121,19 @@ def validate_workspace(key, value):
         current /= part
         if current.is_symlink():
             raise ValueError('Workspace links are forbidden')
-    if not path.is_dir() or not (path / 'site.json').is_file():
+    if published.is_symlink() or not path.is_dir() or (path / 'site.json').is_symlink() or not (path / 'site.json').is_file():
         raise ValueError('Website workspace is not initialized')
+    allowed = load_json(KEYS)
+    binding = allowed[key] if key in allowed else authorize_workspace(key, path, owner_id)
     identity = path.stat()
-    if [identity.st_dev, identity.st_ino] != allowed[key]:
+    if [identity.st_dev, identity.st_ino] != binding:
         raise ValueError('Workspace does not belong to this authorized website')
     return path
 
 
 class Site:
-    def __init__(self, key, workspace):
-        self.key, self.workspace = key, validate_workspace(key, workspace)
+    def __init__(self, key, workspace, owner_id=None):
+        self.key, self.workspace = key, validate_workspace(key, workspace, owner_id)
         self.root = STATE / key
         self.username = 'hsite-' + key[:16]
         self.unit = 'hatchery-site-' + key[:24] + '.service'
@@ -383,9 +438,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('Invalid runtime request size')
             request = json.loads(self.rfile.read(length))
             key = request.get('siteKey', '')
+            if not isinstance(key, str) or not KEY.fullmatch(key):
+                raise ValueError('Invalid website identity')
             with _guard:
                 lock = _locks.setdefault(key, threading.RLock())
-            site = Site(key, request.get('workspace', ''))
+            site = Site(key, request.get('workspace', ''), request.get('ownerId'))
             operation = request.get('operation')
             # Public requests must not be held behind a package installation.
             if operation == 'proxy':

@@ -163,7 +163,13 @@ index and existing previews/drafts before migration. This change does not config
 DNS, nginx path routing or TLS for the independent site domains.
 ## 持久任务与修复验证 2026 年 10 月
 
+最终回复与计划在浏览器中统一进行 Markdown 渲染，已有服务端历史在加载、轮询和刷新后同样生效；数据库仍保存原始报告，不修改用户消息或工具日志。段落、单换行、列表、标题、代码块、引用、表格和链接可正常显示，执行计划与后续上下文读取保留原始 Markdown。解析器为本地自托管的 markdown-it 15.0.3 UMD 构建（NPM `dist/browser/markdown-it.umd.min.js`；MIT 许可证保存在 `frontend/markdown-it.LICENSE.txt`），不依赖 CDN。禁用原生 HTML 与图片自动加载，沿用解析器的危险 URL 校验，外链使用 `noopener noreferrer`。系统提示要求在严格 JSON 的 summary/plan 字符串中使用 Markdown 和真实换行，不改变外层协议、网站权限或运行时限制。回归：`node scripts/ai_markdown_tests.mjs`、`scripts/ai_markdown_browser_tests.py`（真实控制台与历史渲染、受控提交接口、无模型调用）。
+
 异步与同步请求共用 PostgreSQL 的 `hatchery_ai_jobs`。客户端传入稳定的 `requestId`，相同请求重试返回同一任务；同账号按入队顺序执行，跨账号遵守 `HATCHERY_AI_MAX_PARALLEL`。浏览器只提交请求和读取历史，不能用 `messagesHtml` 覆盖已存会话。确认接收结果不会删除任务结果。
+
+2026-10-15 排队修复：跨账号并发默认 2，`.env` 中的 `HATCHERY_AI_MAX_PARALLEL` 支持运行中热更新（1–4），调小上限不会取消在途任务。`/api/ai/run/active` 返回不含其他账号标识/内容的排队原因、并发占用和前方等待数，区分“本账号前一条未结束”和“全局容量已满”。前端只有取得有效 jobId/requestId 确认才显示服务器排队；提交与轮询请求有超时，明确 404 会清除本地幽灵等待，但不会自动重放执行。损坏结果缓冲保留为 `.invalid` 私有文件，不得阻塞其他任务。控制台 HTML 强制不缓存，JS/CSS URL 由文件内容哈希生成，修复不会再依赖人工改资源版本号。回归新增 `scripts/ai_queue_browser_tests.py`，与真实临时 PostgreSQL 的任务测试配套执行，不调用真实模型。
+
+会话自恢复：`HATCHERY_AI_STALL_SECONDS=180`，原生进程退出、通信管道断开、初始化/投递超时、原生会话冲突、无完整结果或持续无有效进展时，可在同一个持久任务和网站锁内续作。`HATCHERY_AI_AUTO_RECOVERIES=1` 默认最多自动恢复一次（0 关闭，硬上限 2）。按用户要求，任务及恢复流程均不设总执行时长上限；旧 `DEEPSEEK_HARNESS_TIMEOUT_SECONDS` 不再生效。只保留初始化/投递确认的 60 秒通信超时和无有效进展检测；持续有效进展不会因运行时间过长被终止。同步 HTTP 等待 25 秒后返回 202，原持久任务继续执行，不代表任务超时或失败。每次使用新的原生进程与随机尝试 ID，用户账号对话 ID 不变；保留失败尝试日志与 `.ai-job-results/recoveries/<runId>/` 私有检查点，刷新当前文件清单后继续，不能从旧页面快照覆盖已保存成果。真实 `assistant/attempt` 流式进展计入看门狗，其他会话通知不能延长等待。配额/认证错误不自动重试；若有未确认完成的后台写操作，停止恢复以防重复写入。已确认操作仅以名称记录，命令和密钥不进恢复记录；新能力令牌重新按同一账号/目录/模式绑定，旧令牌在尝试结束时撤销，不再因固定时长到期而打断长任务。无法取得所有尝试的 usage 时总用量标未知，不把最后一次调用当全部用量。回归为 `scripts/ai_recovery_tests.py` 与 `scripts/ai_watchdog_tests.py`，均不调用真实模型。
 
 执行中任务有租约。服务中断后，过期任务显示为中断，排队任务保留，系统不会自动重放已经开始的文件操作。`.ai-job-results/` 是数据库暂不可用时的私有结果缓冲，`.ai-backups/site-runs/` 保存修改前的文件；备份和缓冲需要持久磁盘与服务账号写入权限，不能放进公共站点或发布包。`site_files.py` 的锁同时覆盖线程和 Linux 进程。
 
@@ -183,7 +189,7 @@ DNS, nginx path routing or TLS for the independent site domains.
 
 ## 本网站动态服务权限（2026-10-15）
 
-动态服务按网站单独开通，默认关闭。应用 `.env` 的 `HATCHERY_DYNAMIC_SITE_KEYS` 填账号 ID 的 SHA-256；root 所有的 `/etc/hatchery-sites/allowed-sites.json` 将同一标识绑定到实际网站目录的 `[st_dev, st_ino]`。目录改名保留 inode，因此授权可随发布路径迁移；不同网站即使提交相同标识，也不能选择其他目录。当前仅授权 `sleepsdsz` 的网站拥有者。
+动态服务在未配置的环境默认关闭。应用 `.env` 的 `HATCHERY_DYNAMIC_SITE_KEYS` 可以填账号 ID 的 SHA-256（逗号分隔）逐站授权，也可以填 `*` 对全部现有及以后新增的账号开放。全账号模式同时要求 root 私有的 `/etc/hatchery-sites/policy.json` 设置 `{"allowAllAccounts":true}`；broker 首次收到已初始化网站的请求时，以非特权 `hatchery` 身份独立查询真实账号及数据库中的网站归属，验证服务端绑定的账号 ID、SHA-256 和目录完全一致，再原子写入 root 所有的 `/etc/hatchery-sites/allowed-sites.json`，绑定实际目录的 `[st_dev, st_ino]`。不能用网站元数据或模型传入的路径证明归属；并发授权串行合并，已有绑定不能被其他账号接管。目录改名保留 inode，因此授权可随发布路径迁移。生产现按用户要求面向全部账号开放，无需逐个维护白名单；尚未建站的账号在初始化网站后首次使用时自动绑定，不预创建网站或启动后台进程。
 
 `ops/site-runtime-broker.py` 安装为 root 所有的 `/usr/local/sbin/hatchery-site-runtime`，配合同名 `ops/hatchery-site-runtime.service` 与 `ops/hatchery-sites.slice`。应用和 AI 不获得 root、sudo、systemctl 或宿主 shell。应用通过受限 Unix socket 请求 broker，AI 使用任务内、可撤销、不可自选账号/目录的能力令牌。只读模式只能查看状态、日志和密钥名称。
 

@@ -1,5 +1,6 @@
 """Capability, filesystem, process and HTTP boundaries; no AI/provider calls."""
 from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor
 import base64
 import importlib.util
 import json
@@ -7,8 +8,9 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,38 @@ spec.loader.exec_module(broker)
 
 
 class CapabilityTests(unittest.TestCase):
+    def test_all_accounts_including_future_accounts_are_enabled_but_anonymous_is_not(self):
+        with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': ' * '}):
+            for user_id in ('one', 'two', 'not-created-yet', 10001001):
+                self.assertTrue(site_runtime.enabled(user_id))
+            for user_id in (None, ''):
+                self.assertFalse(site_runtime.enabled(user_id))
+        with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': ''}):
+            self.assertFalse(site_runtime.enabled('one'))
+
+    def test_global_permission_keeps_each_token_bound_to_its_own_account(self):
+        with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': '*'}), \
+                patch.object(site_runtime, 'call', return_value={}) as call:
+            with site_runtime.capability('one', '/one', 'full') as first, \
+                    site_runtime.capability('two', '/two', 'full') as second:
+                self.assertNotEqual(first, second)
+                site_runtime.authorized_call(first, 'status', {'ownerId': 'two', 'workspace': '/two'})
+                self.assertEqual(call.call_args.args[:3], ('one', Path('/one'), 'status'))
+                site_runtime.authorized_call(second, 'status', {'siteKey': site_runtime.site_key('one')})
+                self.assertEqual(call.call_args.args[:3], ('two', Path('/two'), 'status'))
+                with self.assertRaises(ValueError):
+                    site_runtime.authorized_call(first, 'register', {})
+
+    def test_broker_payload_uses_bound_owner_not_caller_arguments(self):
+        connection = Mock()
+        response = connection.getresponse.return_value
+        response.status = 200; response.read.return_value = b'{}'
+        with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': '*'}), \
+                patch.object(site_runtime, 'UnixConnection', return_value=connection):
+            site_runtime.call('one', '/one', 'status', {'ownerId': 'two', 'siteKey': 'forged', 'workspace': '/two'})
+        body = json.loads(connection.request.call_args.args[2])
+        self.assertEqual((body['ownerId'], body['siteKey'], body['workspace']), ('one', site_runtime.site_key('one'), '/one'))
+
     def test_site_is_bound_by_the_server_and_client_cannot_override_it(self):
         key = site_runtime.site_key('one')
         with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': key}), \
@@ -40,8 +74,19 @@ class CapabilityTests(unittest.TestCase):
             with site_runtime.capability('two', '/other', 'full') as token:
                 self.assertEqual(token, '')
 
+    def test_long_task_retains_own_capability_and_revokes_it_on_exit(self):
+        with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': '*'}), \
+                patch.object(site_runtime, 'call', return_value={}) as call, \
+                patch.object(time, 'monotonic', return_value=0.0) as clock:
+            with site_runtime.capability('one', '/current', 'full') as token:
+                clock.return_value = 24 * 60 * 60
+                site_runtime.authorized_call(token, 'status', {'workspace': '/other'})
+                self.assertEqual(call.call_args.args[:3], ('one', Path('/current'), 'status'))
+            with self.assertRaises(ValueError):
+                site_runtime.authorized_call(token, 'status', {})
+
     def test_chat_and_plan_cannot_execute_or_change_services(self):
-        with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': site_runtime.site_key('one')}), \
+        with patch.dict(os.environ, {'HATCHERY_DYNAMIC_SITE_KEYS': '*'}), \
                 patch.object(site_runtime, 'call', return_value={}) as call:
             for mode in ('chat', 'plan'):
                 with site_runtime.capability('one', '/current', mode) as token:
@@ -61,13 +106,84 @@ class BrokerTests(unittest.TestCase):
         self.workspace.mkdir(parents=True); (self.workspace / 'site.json').write_text('{}')
         self.key = site_runtime.site_key('one')
         keys = root / 'allowed-sites.json'
+        policy = root / 'policy.json'
         stat = self.workspace.stat()
         keys.write_text(json.dumps({self.key: [stat.st_dev, stat.st_ino]}))
-        for name, value in (('APP', self.app), ('STATE', root / 'state'), ('KEYS', keys)):
+        for name, value in (('APP', self.app), ('STATE', root / 'state'), ('KEYS', keys), ('POLICY', policy)):
             self.stack.enter_context(patch.object(broker, name, value))
         self.site = broker.Site(self.key, str(self.workspace))
         self.site.root.mkdir(parents=True)
         self.site.identity = SimpleNamespace(pw_uid=31001, pw_gid=31001)
+
+    def new_site(self, owner, draft=False):
+        key = site_runtime.site_key(owner)
+        directory = self.app / 'published' / ('.drafts/' + key if draft else owner)
+        directory.mkdir(parents=True); (directory / 'site.json').write_text('{}')
+        return key, directory
+
+    def test_all_accounts_enroll_only_after_database_ownership_verification(self):
+        broker.POLICY.write_text('{"allowAllAccounts":true}')
+        key, directory = self.new_site('two')
+        with patch.object(broker, 'owner_workspace', return_value=directory) as lookup:
+            self.assertEqual(broker.Site(key, str(directory), 'two').workspace, directory)
+            lookup.assert_called_once_with('two')
+        allowed = json.loads(broker.KEYS.read_text())
+        self.assertIn(self.key, allowed)
+        self.assertEqual(allowed[key], [directory.stat().st_dev, directory.stat().st_ino])
+        self.assertEqual(broker.KEYS.stat().st_mode & 0o777, 0o600)
+        broker.POLICY.unlink()
+        renamed = directory.with_name('renamed'); directory.rename(renamed)
+        self.assertEqual(broker.Site(key, str(renamed)).workspace, renamed)
+        with self.assertRaises(ValueError): broker.Site(key, str(self.workspace), 'two')
+
+    def test_new_accounts_can_enroll_their_initialized_drafts(self):
+        broker.POLICY.write_text('{"allowAllAccounts":true}')
+        key, directory = self.new_site('future-account', draft=True)
+        with patch.object(broker, 'owner_workspace', return_value=directory):
+            self.assertEqual(broker.Site(key, str(directory), 'future-account').workspace, directory)
+
+    def test_enrollment_fails_closed_without_policy_and_verified_matching_owner(self):
+        key, directory = self.new_site('two')
+        before = broker.KEYS.read_bytes()
+        with patch.object(broker, 'owner_workspace', return_value=directory) as lookup:
+            with self.assertRaises(ValueError): broker.Site(key, str(directory), 'two')
+            lookup.assert_not_called()
+        broker.POLICY.write_text('{"allowAllAccounts":true}')
+        with patch.object(broker, 'owner_workspace', return_value=directory) as lookup:
+            for owner in (None, '', 'one', 'x' * 257):
+                with self.assertRaises(ValueError): broker.Site(key, str(directory), owner)
+            lookup.assert_not_called()
+        with patch.object(broker, 'owner_workspace', return_value=self.workspace):
+            with self.assertRaises(ValueError): broker.Site(key, str(directory), 'two')
+        with patch.object(broker, 'owner_workspace', side_effect=ValueError('account missing')):
+            with self.assertRaises(ValueError): broker.Site(key, str(directory), 'two')
+        self.assertEqual(broker.KEYS.read_bytes(), before)
+
+    def test_another_owner_cannot_claim_an_already_bound_inode(self):
+        broker.POLICY.write_text('{"allowAllAccounts":true}')
+        with patch.object(broker, 'owner_workspace', return_value=self.workspace):
+            with self.assertRaises(ValueError): broker.Site(site_runtime.site_key('two'), str(self.workspace), 'two')
+
+    def test_concurrent_enrollment_preserves_all_accounts(self):
+        broker.POLICY.write_text('{"allowAllAccounts":true}')
+        sites = {owner: self.new_site(owner) for owner in ('two', 'three', 'four')}
+        def enroll(owner):
+            key, directory = sites[owner]
+            return broker.Site(key, str(directory), owner)
+        with patch.object(broker, 'owner_workspace', side_effect=lambda owner: sites[owner][1]), \
+                ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(enroll, sites))
+        self.assertEqual(set(json.loads(broker.KEYS.read_text())), {self.key, *(key for key, _ in sites.values())})
+
+    def test_ownership_lookup_runs_fixed_code_without_root_or_shell(self):
+        with patch.object(broker, 'run', return_value=SimpleNamespace(stdout=json.dumps(str(self.workspace)))) as run:
+            self.assertEqual(broker.owner_workspace('account;not-a-command'), self.workspace)
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ['runuser', '-u', 'hatchery', '--'])
+        self.assertEqual(command[-1], 'account;not-a-command')
+        self.assertNotIn('account;not-a-command', command[-2])
+        self.assertIn('SELECT id FROM "User"', command[-2])
+        self.assertEqual(run.call_args.kwargs, {'cwd': self.app})
 
     def test_same_key_cannot_choose_another_website_directory(self):
         other = self.app / 'published/two'; other.mkdir(); (other / 'site.json').write_text('{}')
