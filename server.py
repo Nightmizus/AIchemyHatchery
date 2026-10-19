@@ -285,6 +285,7 @@ AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "f
 PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/site-preview.js", "/viewer.js", "/study.css", "/study.js", "/personal-api.js", "/markdown-it.min.js", "/ai-markdown.js", "/security.js", "/gallery.css", "/gallery.js"))
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
+PUBLIC_STATIC_PATHS |= frozenset(gallery.PREVIEW_ASSETS.values())
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}
 _CONSOLE_ASSET_CACHE = {}
 

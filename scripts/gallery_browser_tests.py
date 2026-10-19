@@ -25,6 +25,7 @@ def main():
             page.goto(base + '/gallery')
             expect(page.locator('#partner-clubs [data-gallery-card]')).to_have_count(4)
             expect(page.locator('#other-sites [data-gallery-card]')).to_have_count(2)
+            page.wait_for_function('[...document.querySelectorAll(".site-preview img")].every(img=>img.complete&&img.naturalWidth>0)')
             page.screenshot(path=str(output / 'gallery-desktop.png'), full_page=True)
             search = page.get_by_role('searchbox')
             search.fill('哲学')

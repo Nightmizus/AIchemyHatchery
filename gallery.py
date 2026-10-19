@@ -70,9 +70,11 @@ def move_category(cur, old_slug, new_slug):
 
 
 ARROW = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+# Public homepage snapshots captured 2026-10-19; these are static images, not live iframes.
+PREVIEW_ASSETS = {slug: f'/gallery-previews/{slug}.jpg' for slug in INITIAL_PARTNERS}
 
 
-def card(site):
+def card(site, asset_version):
     esc = lambda value: html.escape(str(value), quote=True)
     slug = str(site["slug"])
     name = site["siteName"] or slug
@@ -82,11 +84,21 @@ def card(site):
     kind = "partner" if partner else "other"
     search = esc(" ".join((name, description, slug, site.get("owner") or "")))
     summary = f'<p class="site-description">{esc(description)}</p>' if description else ""
+    initial = esc(name[:2].upper() if name[:1].isascii() else name[:1])
+    preview = PREVIEW_ASSETS.get(slug)
+    if partner and preview:
+        visual = (f'<div class="site-preview"><img src="{preview}?v={asset_version(preview)}" '
+                  f'width="864" height="486" loading="lazy" decoding="async" alt=""></div>')
+    elif partner:
+        visual = f'<div class="site-preview preview-placeholder" aria-hidden="true"><span>{initial}</span></div>'
+    else:
+        visual = f'<span class="site-monogram" aria-hidden="true">{initial}</span>'
     return (
         f'<a class="site-card {kind}-card" data-gallery-card data-search="{search}" '
         f'href="{esc(url)}" target="_blank" rel="noopener noreferrer">'
+        f'{visual}<div class="site-card-body">'
         f'<div class="site-card-title"><h3>{esc(name)}</h3><span class="visit-icon">{ARROW}</span></div>'
-        f'{summary}</a>'
+        f'{summary}</div></a>'
     )
 
 
@@ -97,7 +109,8 @@ def render(sites, frontend: Path, asset_version):
     return Template((frontend / "gallery.html").read_text(encoding="utf-8")).substitute(
         css_version=asset_version("/gallery.css"),
         js_version=asset_version("/gallery.js"),
-        partner_cards="".join(map(card, partners)), other_cards="".join(map(card, others)),
+        partner_cards="".join(card(site, asset_version) for site in partners),
+        other_cards="".join(card(site, asset_version) for site in others),
         partner_empty="" if not partners else " hidden",
         other_empty="" if not others else " hidden",
     )
