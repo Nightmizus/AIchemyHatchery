@@ -1,6 +1,5 @@
 """Public gallery presentation and administrator-owned site categories."""
 from datetime import datetime, timezone
-import hashlib
 import html
 from pathlib import Path
 from string import Template
@@ -70,12 +69,6 @@ def move_category(cur, old_slug, new_slug):
         cur.execute("UPDATE hatchery_gallery_categories SET slug = %s WHERE slug = %s", (new_slug, old_slug))
 
 
-CLUB_WORDMARKS = {
-    "cogito": ("Cogito", "violet"),
-    "racingbusiness": ("Racing", "blue"),
-    "sdszrootca": ("Root CA", "green"),
-    "sdszemergingmarketssociety": ("经济评论", "ochre"),
-}
 ARROW = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
 
 
@@ -83,23 +76,17 @@ def card(site):
     esc = lambda value: html.escape(str(value), quote=True)
     slug = str(site["slug"])
     name = site["siteName"] or slug
-    description = site["description"] or "介绍还在准备中，先去网站逛逛。"
+    description = site["description"] or ""
     url = str(site["publicUrl"])
-    host = url.removeprefix("https://").removeprefix("http://").rstrip("/")
     partner = bool(site.get("isPartner"))
-    tone = ("violet", "blue", "green", "ochre")[hashlib.sha256(slug.encode()).digest()[0] % 4]
-    wordmark, tone = CLUB_WORDMARKS.get(slug, (name[:2], tone))
     kind = "partner" if partner else "other"
     search = esc(" ".join((name, description, slug, site.get("owner") or "")))
-    cover = f'<div class="club-cover tone-{tone}" aria-hidden="true"><span class="club-wordmark">{esc(wordmark)}</span><span class="club-cover-ring"></span></div>' if partner else ""
+    summary = f'<p class="site-description">{esc(description)}</p>' if description else ""
     return (
         f'<a class="site-card {kind}-card" data-gallery-card data-search="{search}" '
-        f'href="{esc(url)}" target="_blank" rel="noopener noreferrer">{cover}'
-        f'<div class="site-card-body"><div class="site-card-title"><h3>{esc(name)}</h3><span class="visit-icon">{ARROW}</span></div>'
-        f'<p class="site-description">{esc(description)}</p>'
-        f'<div class="site-card-meta"><span>{esc(site.get("owner") or "校园创作者")}</span>'
-        f'<span>更新于 <time>{esc(str(site["updatedAt"])[:10])}</time></span></div>'
-        f'<span class="site-address">{esc(host)}</span></div></a>'
+        f'href="{esc(url)}" target="_blank" rel="noopener noreferrer">'
+        f'<div class="site-card-title"><h3>{esc(name)}</h3><span class="visit-icon">{ARROW}</span></div>'
+        f'{summary}</a>'
     )
 
 
@@ -110,7 +97,6 @@ def render(sites, frontend: Path, asset_version):
     return Template((frontend / "gallery.html").read_text(encoding="utf-8")).substitute(
         css_version=asset_version("/gallery.css"),
         js_version=asset_version("/gallery.js"),
-        partner_count=len(partners), other_count=len(others), total=len(public),
         partner_cards="".join(map(card, partners)), other_cards="".join(map(card, others)),
         partner_empty="" if not partners else " hidden",
         other_empty="" if not others else " hidden",

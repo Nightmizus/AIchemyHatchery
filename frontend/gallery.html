@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
-  <meta name="theme-color" content="#f4f6fa">
-  <title>Hatchery Gallery｜发现校园社团与作品</title>
+  <meta name="theme-color" content="#212121">
+  <title>Hatchery Gallery</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/gallery.css?v=$css_version">
   <script src="/gallery.js?v=$js_version" defer></script>
@@ -14,37 +14,29 @@
   <a class="skip-link" href="#partner-clubs">跳到网站列表</a>
   <div class="gallery-shell">
     <header class="gallery-header">
-      <a class="brand" href="/gallery" aria-label="Hatchery Gallery 首页"><span class="brand-mark" aria-hidden="true">h.</span><span>Hatchery <b>Gallery</b></span></a>
-      <a class="console-link" href="/hatchery">回到控制台 <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m9 6 6 6-6 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+      <a class="console-link" href="/hatchery" aria-label="返回 Hatchery 控制台"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m14 6-6 6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Hatchery</a>
+      <span class="header-divider" aria-hidden="true"></span>
+      <h1>Gallery</h1>
+      <form class="gallery-search" role="search" hidden>
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.5"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <label class="sr-only" for="gallery-search">搜索网站</label><input id="gallery-search" type="search" placeholder="搜索网站" autocomplete="off"><button type="button" class="search-clear" aria-label="清空搜索" hidden>×</button>
+      </form>
     </header>
     <main>
-      <section class="gallery-intro" aria-labelledby="gallery-title">
-        <div><h1 id="gallery-title">校园里的热爱，<br>在这里相遇。</h1><p>认识一个社团，发现一个想法。<br class="mobile-break">逛逛同学们用 Hatchery 搭建的网站。</p></div>
-        <div class="intro-art" aria-hidden="true"><span class="art-note art-note-back">一起做点<br>有趣的事</span><span class="art-note art-note-front"><span class="art-spark">✳</span><span>想法正在<br>发生。</span><span class="art-dot"></span></span></div>
-      </section>
-      <div class="gallery-toolbar">
-        <nav class="section-links" aria-label="网站分类"><a href="#partner-clubs">合作社团 <span>$partner_count</span></a><a href="#other-sites">其他网站 <span>$other_count</span></a></nav>
-        <form class="gallery-search" role="search" hidden>
-          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.6"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-          <label class="sr-only" for="gallery-search">搜索网站、社团或作者</label><input id="gallery-search" type="search" placeholder="搜索网站、社团或作者" autocomplete="off"><button type="button" class="search-clear" aria-label="清空搜索" hidden>×</button>
-        </form>
-      </div>
       <p class="sr-only" id="search-status" role="status" aria-live="polite"></p>
       <section id="partner-clubs" class="gallery-section" aria-labelledby="partners-heading" data-gallery-section>
-        <div class="section-heading"><div><h2 id="partners-heading">合作社团 <span class="section-count" data-section-count>$partner_count</span></h2><p>找到志同道合的人，把共同的热爱变成日常。</p></div><span class="section-symbol" aria-hidden="true">✳</span></div>
-        <div class="partner-grid">$partner_cards</div>
-        <div class="section-empty" data-empty-default$partner_empty>新的合作社团正在路上，先逛逛下面的网站吧。</div>
-        <div class="section-empty" data-empty-search hidden>没有找到匹配的合作社团，试试其他关键词。</div>
+        <h2 id="partners-heading">合作社团</h2>
+        <div class="site-grid">$partner_cards</div>
+        <p class="section-empty" data-empty-default$partner_empty>暂无合作社团</p>
+        <p class="section-empty" data-empty-search hidden>没有匹配的社团</p>
       </section>
-      <section id="other-sites" class="gallery-section other-section" aria-labelledby="others-heading" data-gallery-section>
-        <div class="section-heading"><div><h2 id="others-heading">其他网站 <span class="section-count" data-section-count>$other_count</span></h2><p>个人作品、校园工具，还有刚刚萌芽的新点子。</p></div><span class="section-symbol small-symbol" aria-hidden="true">＋</span></div>
-        <div class="other-grid">$other_cards</div>
-        <div class="section-empty" data-empty-default$other_empty>这里还没有网站。<a href="/hatchery">创建并发布你的第一个作品</a>。</div>
-        <div class="section-empty" data-empty-search hidden>没有找到匹配的网站，试试其他关键词。</div>
+      <section id="other-sites" class="gallery-section" aria-labelledby="others-heading" data-gallery-section>
+        <h2 id="others-heading">其他网站</h2>
+        <div class="site-grid">$other_cards</div>
+        <p class="section-empty" data-empty-default$other_empty>暂无其他网站</p>
+        <p class="section-empty" data-empty-search hidden>没有匹配的网站</p>
       </section>
-      <aside class="create-invitation"><div><h2>下一个想法，也可以来自你。</h2><p>把你的热爱做成网站，让更多同学看见。</p></div><a href="/hatchery">开始创建 <span aria-hidden="true">＋</span></a></aside>
     </main>
-    <footer class="gallery-footer"><span>炼丹社 Hatchery</span><span>共收录 $total 个网站 · 由校园里的创作者们共同构建</span></footer>
   </div>
 </body>
 </html>

@@ -16,7 +16,6 @@
         card.hidden = !card.dataset.search.toLocaleLowerCase().includes(query);
         if (!card.hidden) count += 1;
       }
-      section.querySelector('[data-section-count]').textContent = count;
       section.querySelector('[data-empty-default]').hidden = Boolean(query) || cards.length > 0;
       section.querySelector('[data-empty-search]').hidden = !query || count > 0;
       total += count;
