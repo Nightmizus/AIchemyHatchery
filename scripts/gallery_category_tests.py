@@ -7,6 +7,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 import functools
 import json
+import shutil
 import sys
 import tempfile
 import threading
@@ -199,6 +200,37 @@ class GalleryTests(unittest.TestCase):
             cur.executemany('INSERT INTO hatchery_published_sites VALUES(%s,%s,%s,%s,TRUE)',
                             [(f'bulk-{n}', f'bulk-{n}', '2026-01-01', '2026-01-01') for n in range(501)])
         self.assertEqual(len(self.f.index()), 507)
+
+    def test_featured_pick_is_unique_and_does_not_change_admin_categories(self):
+        self.f.add_site('poki', 'Poki 大赛')
+        self.f.add_site('new-site', '新网站')
+        text = self.f.request()[2].decode()
+        featured, remainder = text.split('<section id="featured-sites"', 1)[1].split('<section id="partner-clubs"', 1)
+        self.assertEqual(featured.count('data-gallery-card'), 1)
+        self.assertIn('Poki 大赛', featured)
+        self.assertNotIn('Poki 大赛', remainder)
+        self.assertFalse(self.f.index()['poki']['isPartner'])
+        self.assertIn('新网站', remainder.split('<section id="other-sites"', 1)[1])
+        # Being featured must not prevent an administrator from adding any site
+        # to the partner section as well.
+        self.assertEqual(self.f.set_category('poki', True)[0], 200)
+        partners = self.f.request()[2].decode().split('<section id="partner-clubs"', 1)[1].split('<section id="other-sites"', 1)[0]
+        self.assertIn('Poki 大赛', partners)
+        for path in gallery.PREVIEW_ASSETS.values():
+            code, headers, body = self.f.request(path + '?v=' + server.console_asset_version(path))
+            headers = {key.lower(): value for key, value in headers.items()}
+            self.assertEqual(code, 200)
+            self.assertEqual(headers['content-type'], 'image/jpeg')
+            self.assertIn('immutable', headers['cache-control'])
+            self.assertTrue(body.startswith(b'\xff\xd8'))
+
+    def test_unlisted_or_missing_featured_site_is_not_exposed(self):
+        self.f.add_site('poki', 'Private Poki', listed=False)
+        self.assertNotIn('Private Poki', self.f.request()[2].decode())
+        with self.f.pg.db() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE hatchery_published_sites SET listed_in_gallery=TRUE WHERE slug='poki'")
+        shutil.rmtree(self.f.published / 'poki')
+        self.assertNotIn('Private Poki', self.f.request()[2].decode())
 
 
 class PublishCategoryTests(unittest.TestCase):

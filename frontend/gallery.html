@@ -11,19 +11,34 @@
   <script src="/gallery.js?v=$js_version" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#partner-clubs">跳到网站列表</a>
+  <a class="skip-link" href="#featured-sites">跳到网站列表</a>
   <div class="gallery-shell">
     <header class="gallery-header">
-      <a class="console-link" href="/hatchery" aria-label="返回 Hatchery 控制台"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m14 6-6 6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Hatchery</a>
-      <span class="header-divider" aria-hidden="true"></span>
-      <h1>Gallery</h1>
-      <form class="gallery-search" role="search" hidden>
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.5"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-        <label class="sr-only" for="gallery-search">搜索网站</label><input id="gallery-search" type="search" placeholder="搜索网站" autocomplete="off"><button type="button" class="search-clear" aria-label="清空搜索" hidden>×</button>
-      </form>
+      <a class="console-link" href="/hatchery" aria-label="返回 Hatchery 控制台"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m14 6-6 6 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>炼丹社Hatchery</a>
+      <nav class="gallery-nav" aria-label="网站分类">
+        <a href="#featured-sites">精选</a>
+        <a href="#partner-clubs">合作社团</a>
+        <a href="#other-sites">其他网站</a>
+      </nav>
     </header>
     <main>
+      <div class="gallery-intro">
+        <div class="gallery-title">
+          <h1>Hatchery Gallery</h1>
+          <p>校园社团与创作者的网站</p>
+        </div>
+        <form class="gallery-search" role="search" hidden>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.5"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <label class="sr-only" for="gallery-search">搜索网站</label><input id="gallery-search" type="search" placeholder="搜索网站" autocomplete="off"><button type="button" class="search-clear" aria-label="清空搜索" hidden>×</button>
+        </form>
+      </div>
       <p class="sr-only" id="search-status" role="status" aria-live="polite"></p>
+      <section id="featured-sites" class="gallery-section featured-section" aria-labelledby="featured-heading" data-gallery-section>
+        <h2 id="featured-heading">炼丹社精选</h2>
+        <div class="site-grid featured-grid">$featured_cards</div>
+        <p class="section-empty" data-empty-default$featured_empty>暂无精选网站</p>
+        <p class="section-empty" data-empty-search hidden>没有匹配的精选网站</p>
+      </section>
       <section id="partner-clubs" class="gallery-section" aria-labelledby="partners-heading" data-gallery-section>
         <h2 id="partners-heading">合作社团</h2>
         <div class="site-grid partner-grid">$partner_cards</div>

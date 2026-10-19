@@ -8,20 +8,19 @@
   form.addEventListener('submit', event => event.preventDefault());
   function filter() {
     const query = input.value.trim().toLocaleLowerCase();
-    let total = 0;
+    const matches = new Set();
     for (const section of sections) {
       const cards = [...section.querySelectorAll('[data-gallery-card]')];
       let count = 0;
       for (const card of cards) {
         card.hidden = !card.dataset.search.toLocaleLowerCase().includes(query);
-        if (!card.hidden) count += 1;
+        if (!card.hidden) { count += 1; matches.add(card.href); }
       }
       section.querySelector('[data-empty-default]').hidden = Boolean(query) || cards.length > 0;
       section.querySelector('[data-empty-search]').hidden = !query || count > 0;
-      total += count;
     }
     clear.hidden = !input.value;
-    status.textContent = query ? `找到 ${total} 个匹配的网站` : `共收录 ${total} 个网站`;
+    status.textContent = query ? `找到 ${matches.size} 个匹配的网站` : `共收录 ${matches.size} 个网站`;
   }
   input.addEventListener('input', filter);
   clear.addEventListener('click', () => { input.value = ''; filter(); input.focus(); });
