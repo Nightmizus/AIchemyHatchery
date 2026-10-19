@@ -1,5 +1,39 @@
 # DeepSeek Harness integration
 
+## Website security audit
+
+The 漏洞测试 panel audits the signed-in user's created website. `POST
+/api/security/run` accepts only an idempotency `requestId`; ownership, directory,
+publish/preview route and read-only mode are selected by the server. Jobs share
+the durable AI queue, per-account serialization, model settings, personal API
+configuration, usage tracking and stalled-session recovery. `GET
+/api/security/latest` returns only that account's latest report, even after a
+different tab acknowledges completion. The report is also retained in chat history.
+
+`site_security.py` performs bounded anonymous GETs to fixed paths below the own
+site's `/pages/<slug>/` or `/preview/<id>/` prefix on the local application. It
+never probes the console root, follows redirects, sends cookies, executes page
+JavaScript or persists response bodies. Errors and catch-all 200 responses are
+not passes or confirmed leaks. A confirmed file leak requires matching the
+response to the own file. Public proxy headers, authenticated workflows and
+backend writes are explicitly outside these HTTP checks. Existing served-TLS
+verification is reused for configured site subdomains.
+
+The model receives the measured results and reads the own source, including
+`backend/`, for evidence-based analysis. Security mode registers only
+`list_files/read_file/search_files`; `security-audit.patch.yml` disables native
+web tools, and no backend capability is issued. Markdown reports distinguish
+confirmed issues, static-analysis candidates, proposed fixes and untested areas;
+the audit cannot apply fixes. Model failure leaves completed HTTP evidence visible.
+
+Regressions: `scripts/site_security_tests.py` (local HTTP, disposable PostgreSQL,
+real native tool registry) and `scripts/site_security_browser_tests.py` (Chromium).
+Neither calls a model. `scripts/site_security_smoke.py --live` explicitly opts
+into one configured-model audit of disposable synthetic vulnerable source;
+it consumes API usage but never scans a production website.
+
+## Runtime
+
 The editor server launches an official DeepSeek Harness SDK runtime through
 newline-delimited JSON-RPC. The runtime is local-only and intentionally not
 committed because the Windows executable is a generated platform artifact.

@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from email.mime.text import MIMEText
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +44,7 @@ import login_links
 import study_engine
 import personal_api
 import site_runtime
+import site_security
 
 from deepseek_harness_adapter import HarnessRuntimeError, harness_status, resolve_llm_provider, run_deepseek_harness
 
@@ -280,7 +281,7 @@ AI_UPSTREAM_DEGRADED: dict | None = None
 # 前端静态文件统一放在 frontend/；对外 URL 仍是根路径（/styles.css…），由 handler 翻译
 FRONTEND_DIR = "frontend"
 AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/motion.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
-PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js", "/study.css", "/study.js", "/personal-api.js", "/markdown-it.min.js", "/ai-markdown.js"))
+PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js", "/study.css", "/study.js", "/personal-api.js", "/markdown-it.min.js", "/ai-markdown.js", "/security.js"))
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}
@@ -2297,6 +2298,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                         self.handle_ai_run_start(user)
                     else:
                         self.handle_ai_run(user)
+            elif path == "/api/security/run":
+                self.handle_security_run()
             elif path == "/api/ai/run/ack":
                 user = self.require_console_user()
                 if user:
@@ -2425,7 +2428,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
     def run_ai_files(self, user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress, mode):
         api_config = self._personal_api_config if hasattr(self, "_personal_api_config") else PERSONAL_API_STORE.load(user["id"])
         run_id = f"run-{secrets.token_hex(10)}"
-        mode = mode if mode in ("chat", "plan", "full") else "full"
+        mode = mode if mode in ("chat", "plan", "full", "security") else "full"
         if not include_site:
             mode = "chat"
         if mode == 'full':
@@ -2442,19 +2445,31 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             backup.chmod(0o700)
         metadata = site_files.read_metadata(workspace)
         preview_url = f"/preview/{user_preview_id(str(user['id']))}/"
+        security = None
+        if mode == 'security':
+            target = self.security_target(user['id'], workspace, slug)
+            security = site_security.inspect(workspace, target, PORT, progress=progress,
+                tls_ready=site_https_ready(slug) if slug and site_subdomain_url(slug) else None)
+            if progress:
+                progress({'id': 'security-baseline', 'kind': 'tool', 'label': '本站基础检查完成',
+                          'detail': '正在使用现有模型审查本站源码', 'status': 'done', 'security': security})
+            prompt, history, chosen_presets, preset_snippets = site_security.PROMPT, [], [], []
         if history:
             prompt = "对话历史：\n" + "\n".join(f"{item['role']}：{item['text']}" for item in history) + "\n\n当前请求：" + prompt
         if chosen_presets:
             prompt += "\n用户选用的模块：" + "、".join(chosen_presets)
         if preset_snippets and mode != "chat":
             prompt += "\n以下模块可改写后直接嵌入 HTML 文件：\n" + "\n\n".join(f"【{item['name']}】\n{item['html']}" for item in preset_snippets)
-        prompt += f"\n当前网站文件的实时预览地址：{preview_url}。预览与发布读取同一目录的真实文件；用浏览器工具验证。"
+        if mode != 'security':
+            prompt += f"\n当前网站文件的实时预览地址：{preview_url}。预览与发布读取同一目录的真实文件；用浏览器工具验证。"
         if mode == "full":
             prompt += build_attachment_prompt(save_ai_attachments(str(user["id"]), attachments, workspace))
             prompt += "\n附件路径相对于网站根目录，子页面引用时请调整相对路径。"
         # The on-disk files are authoritative; old/stale browser JSON is never written back.
         context = {"site": metadata, "files": list(before), "previewUrl": preview_url,
                    "activeFile": str(context.get("activeFile", "index.html"))[:500] if isinstance(context, dict) else "index.html"}
+        if security is not None:
+            context['security'] = security
         attempt = 0
         recovery_limit = min(2, max(0, int(os.environ.get('HATCHERY_AI_AUTO_RECOVERIES', '1'))))
         current_prompt = prompt
@@ -2464,7 +2479,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             while True:
                 attempt += 1
                 try:
-                    with site_runtime.capability(user['id'], workspace, mode) as runtime_token:
+                    with (nullcontext('') if mode == 'security' else site_runtime.capability(user['id'], workspace, mode)) as runtime_token:
                         try:
                             result = run_deepseek_harness(root=ROOT, prompt=current_prompt, context=context, attachments=attachments,
                                                           workspace=workspace, preview_port=PORT, progress=progress, mode=mode,
@@ -2519,7 +2534,39 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 "askPresets": [], "question": "", "checks": result.get("checks", []), "trace": result.get("trace", []),
                 "changedFiles": changed, "restartRequired": False, "undoAvailable": False, "engine": "deepseek-harness",
                 "finishReason": result.get("finishReason"), "usage": result.get("usage"), "contextUsage": result.get("contextUsage"),
-                "recoveries": recoveries}
+                "recoveries": recoveries,
+                **({'security': {**security, 'provider': result.get('provider'), 'model': result.get('model')}} if security is not None else {})}
+
+    def security_target(self, user_id, workspace=None, slug=None):
+        if workspace is None:
+            workspace, slug = user_site_directory(user_id)
+        return site_security.target(workspace, slug, user_preview_id(str(user_id)), public_site_url(slug) if slug else '')
+
+    def handle_security_run(self):
+        user = self.require_console_user()
+        if not user:
+            return
+        data = self.read_json()
+        if set(data) - {'requestId'}:
+            raise ValueError('测试目标和权限由服务器绑定，不能指定其他网址、账号或执行模式')
+        request_id = str(data.get('requestId') or '').lower()
+        if not re.fullmatch(r'[0-9a-f-]{32,36}', request_id):
+            raise ValueError('请求编号格式无效')
+        self.security_target(user['id'])
+        payload = {'kind': 'security', 'mode': 'security', 'prompt': site_security.PROMPT,
+                   'context': {}, 'includeSite': True, 'attachments': [], 'chosenPresets': [],
+                   'presetSnippets': [], 'username': str(user.get('username') or '')}
+        try:
+            job = AI_JOB_STORE.enqueue(user, payload, request_id)
+        except (ai_jobs.Conflict, ai_jobs.QueueFull) as exc:
+            self.send_json({'error': str(exc)}, 409 if isinstance(exc, ai_jobs.Conflict) else 429)
+            return
+        self.send_json(job, 202)
+
+    def handle_security_latest(self):
+        user = self.require_console_user()
+        if user:
+            self.send_json({'target': self.security_target(user['id']), 'job': AI_JOB_STORE.latest_security(user['id'])})
 
     def prepare_ai_run(self) -> tuple[str, dict, bool, list[dict], list[str], list[dict], list[dict], str, str]:
         payload = self.read_json()
@@ -3526,6 +3573,9 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             user = self.require_console_user()
             if user:
                 self.handle_ai_run_status(user, parsed)
+            return
+        if parsed.path == "/api/security/latest":
+            self.handle_security_latest()
             return
         if parsed.path == "/api/ai/run/active":
             user = self.require_console_user()

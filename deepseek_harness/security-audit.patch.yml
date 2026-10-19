@@ -1,0 +1,4 @@
+# A security audit may read its own source only. No arbitrary network/browser,
+# backend capability, shell or write tools are available, even after injection.
+- id: tool-web
+  disabled: true

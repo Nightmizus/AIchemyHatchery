@@ -512,6 +512,19 @@ body {
 .security-check div { min-width:0 }
 .security-check b { display:block;font-size:12px;color:#d8dee4;font-weight:600 }
 .security-check small { display:block;margin-top:3px;color:#9aa7b1;font-size:11px;line-height:1.55;word-break:break-all }
+.security-target { margin:0 0 14px;padding:12px;border-left:3px solid #8a8a8a;background:#282828;color:#d4d4d4;font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere }
+.security-head button:focus-visible,.security-process summary:focus-visible,.security-baseline summary:focus-visible { outline:2px solid #d4d4d4;outline-offset:3px }
+.security-check { animation:none }
+.security-check.skip>i { background:#303030;color:#aaa }
+.security-summary { line-height:1.7 }
+.security-process,.security-baseline { margin:12px 0;color:#aaa;font-size:12px }
+.security-process summary,.security-baseline summary { cursor:pointer;padding:8px 0 }
+.security-process p { line-height:1.6;overflow-wrap:anywhere }
+.security-report { margin-top:22px;padding-top:18px;border-top:1px solid #3b3b3b;min-width:0 }
+.security-report h3 { margin:0 0 10px;font-size:15px;color:#e6edf3 }
+#securityReportMeta { color:#9aa7b1;font-size:11px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere }
+.security-report .ai-markdown { font-size:13px;line-height:1.8;overflow-wrap:anywhere }
+@media(max-width:600px){.security-wrap{padding-bottom:calc(100px + env(safe-area-inset-bottom,0px))}}
 /* Preview collapse/expand controls. */
 .page-actions>#previewCollapseBtn { height:34px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:#b1bac4;font-size:13px;cursor:pointer }
 .page-actions>#previewCollapseBtn:hover { background:rgba(240,246,252,.08);color:#e6edf3 }

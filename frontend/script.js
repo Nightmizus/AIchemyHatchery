@@ -1041,6 +1041,7 @@ async function consoleRequest(path,options={}){
   }finally{clearTimeout(timer)}
 }
 function showAuthGate(message=''){
+  window.AIchemyHatcherySecurity?.reset();
   currentConsoleUser=null;aiChatSessionId=null;aiSessionHtml='';aiRuns.clear();aiQueueStatus=null;updateAiBusy();if(window.AIchemyHatcheryAuth){window.AIchemyHatcheryAuth.showGate(message);return}uiShow(document.querySelector('#authGate'));const error=document.querySelector('#authError');error.textContent=message;error.hidden=!message;setSaveState('等待登录',false);
 }
 function updateConsoleAccount(){
@@ -1049,6 +1050,7 @@ function updateConsoleAccount(){
 }
 async function enterConsole(user){
   currentConsoleUser=user;fileSite=null;fileSiteLoading=true;activeSiteFile='index.html';
+  window.AIchemyHatcherySecurity?.reset();
   document.querySelector('#canvasContent').textContent='正在加载网站文件…';
   const username=user.username;aiRuns.clear();aiQueueStatus=null;aiSessionHtml='';updateAiBusy();DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;AI_MODE_KEY=`alchemyhatchery:${username}:ai-mode:v1`;
   // 网站文件与 AI 会话互不依赖，同时发起；逐个串行会让每次网络抖动直接叠加。
@@ -1071,6 +1073,7 @@ async function enterConsole(user){
   void loadAiStatus();
   updateConsoleAccount();loadAiPermissionMode();uiHide(document.querySelector('#authGate'));restoreAiReloadUi();
   await Promise.all([loadSiteFiles,loadAiSessions]);
+  if(!document.querySelector('.security-panel').hidden)void window.AIchemyHatcherySecurity?.refresh();
 }
 
 function sessionLabel(userAgent=''){
@@ -1231,31 +1234,11 @@ function switchActivity(name){
   document.querySelector('#aiNewChatBtn')?.classList.toggle('active',name==='ai');
   document.querySelector('.ai-chat-panel').hidden=name!=='ai';
   document.querySelector('.security-panel').hidden=name!=='security';
+  if(name==='security')void window.AIchemyHatcherySecurity?.refresh();
 }
 document.querySelectorAll('.activity-item[data-activity]').forEach(item=>item.addEventListener('click',()=>switchActivity(item.dataset.activity)));
 document.querySelector('[data-template-open]').addEventListener('click',()=>{if(document.querySelector('#templatePicker')){closeTemplatePicker();return}switchActivity('ai');openTemplatePicker()});
-const SECURITY_SENSITIVE_PATHS=['/.env','/.env.example','/.git/config','/.gitignore','/server.py','/requirements.txt','/alchemy_hatchery.db','/miaoda.db'];
-async function runSecurityChecks(){
-  const button=document.querySelector('#securityRunBtn'),summary=document.querySelector('#securitySummary'),list=document.querySelector('#securityResults');
-  if(button.disabled)return;button.disabled=true;button.textContent='正在测试…';list.innerHTML='';summary.hidden=true;
-  const results=[];const started=Date.now();
-  const render=()=>{const counts={pass:0,warn:0,fail:0};results.forEach(item=>counts[item.status]+=1);summary.hidden=false;summary.innerHTML=`<b>${counts.pass}</b> 项通过 · <b>${counts.warn}</b> 项警告 · <b>${counts.fail}</b> 项风险 · 共 ${results.length} 项`;list.innerHTML=results.map(item=>`<article class="security-check ${item.status}"><i>${item.status==='pass'?'✓':item.status==='warn'?'!':'✕'}</i><div><b>${esc(item.name)}</b><small>${esc(item.detail)}</small></div></article>`).join('')};
-  const add=(name,status,detail)=>{results.push({name,status,detail});render()};
-  try{
-    const response=await fetch('/',{cache:'no-store'});const headers=response.headers;
-    const required=[['x-content-type-options','X-Content-Type-Options'],['referrer-policy','Referrer-Policy'],['x-frame-options','X-Frame-Options'],['content-security-policy','Content-Security-Policy'],['strict-transport-security','Strict-Transport-Security']];
-    const missing=required.filter(([key])=>!headers.get(key));
-    add('安全响应头',missing.length?(missing.length>2?'fail':'warn'):'pass',missing.length?`缺少：${missing.map(([,label])=>label).join('、')}`:'常见安全响应头齐全');
-    const serverHeader=headers.get('server');if(serverHeader)add('服务指纹','warn',`Server 响应头暴露了服务标识：${serverHeader}`);
-  }catch(error){add('安全响应头','fail',`无法请求首页：${error.message}`)}
-  for(const path of SECURITY_SENSITIVE_PATHS){
-    try{const response=await fetch(path,{cache:'no-store'});add(`敏感文件 ${path}`,response.status===200?'fail':'pass',response.status===200?`可被直接访问下载（HTTP ${response.status}）`:`不可访问（HTTP ${response.status}）`)}
-    catch{add(`敏感文件 ${path}`,'pass','请求失败，不可访问')}
-  }
-  add('传输加密',location.protocol==='https:'?'pass':'warn',location.protocol==='https:'?'当前通过 HTTPS 访问':'当前是明文 HTTP；本地开发属正常，对外部署必须启用 HTTPS');
-  button.disabled=false;button.textContent='重新测试';summary.innerHTML+=` · 耗时 ${((Date.now()-started)/1000).toFixed(1)}s`;
-}
-document.querySelector('#securityRunBtn').addEventListener('click',()=>void runSecurityChecks());
+window.AIchemyHatcherySecurity.init({request:consoleRequest,getUser:()=>currentConsoleUser,createRequestId:newAiSessionId});
 let buildingPreviewHtml=false;
 function buildLegacyExportPayload(preview=false){
   ensureForumAccounts();ensureAllPagesCode();

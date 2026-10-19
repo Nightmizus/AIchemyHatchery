@@ -78,6 +78,7 @@ def public_job(row):
     return {"jobId": row["id"], "requestId": row["request_id"],
             "sessionId": row["session_id"], "prompt": payload["prompt"],
             "mode": payload.get("mode", "full"), "status": row["status"],
+            "kind": payload.get("kind", "chat"),
             "events": json.loads(row["events_json"]),
             "result": json.loads(row["result_json"]) if row["result_json"] else None,
             "error": row["error"], "createdAt": iso(row["created_at"]),
@@ -298,6 +299,12 @@ class JobStore:
         with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND (status IN ('queued','running') OR NOT acknowledged) ORDER BY seq", (str(user_id),))
             return [public_job(r) for r in cur.fetchall()]
+
+    def latest_security(self, user_id):
+        with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND payload_json::jsonb->>'kind'='security' ORDER BY seq DESC LIMIT 1", (str(user_id),))
+            row = cur.fetchone()
+            return public_job(row) if row else None
 
     def queue_status(self, user_id, max_parallel):
         """Explain waiting without exposing another account's IDs or messages."""

@@ -117,13 +117,20 @@
         <section class="tool-panel security-panel" data-activity-content="security" hidden>
           <div class="security-wrap">
             <header class="security-head">
-              <small>SECURITY</small>
               <b>漏洞测试</b>
-              <p>对当前控制台服务做一轮基础安全检查：安全响应头、敏感文件暴露、传输加密。结果仅供自查参考。</p>
-              <button id="securityRunBtn" type="button">开始测试</button>
+              <p>检查你创建的网站。AI 结合本站响应和真实源码，分析风险并给出修复建议，全程只读。</p>
+              <div class="security-target" id="securityTarget">正在确认你的网站…</div>
+              <button id="securityRunBtn" type="button" disabled>开始测试本站</button>
+              <p id="securityStatus" role="status" aria-live="polite">读取本站信息后即可测试</p>
             </header>
             <div class="security-summary" id="securitySummary" hidden></div>
-            <div class="security-results" id="securityResults"></div>
+            <details class="security-baseline" id="securityChecks" hidden><summary>查看 HTTP 基础检查</summary><div class="security-results" id="securityResults"></div></details>
+            <details class="security-process" id="securityProcess" hidden><summary>查看测试过程</summary><div id="securityEvents"></div></details>
+            <section class="security-report" id="securityReport" hidden aria-label="AI 安全分析报告">
+              <h3>AI 安全分析</h3>
+              <p id="securityReportMeta"></p>
+              <div id="securityReportBody" class="ai-markdown"></div>
+            </section>
           </div>
         </section>
         <section class="tool-panel study-panel" id="studyPanel" hidden>
@@ -198,6 +205,7 @@
   </div>
   <script src="/markdown-it.min.js"></script>
   <script src="/ai-markdown.js"></script>
+  <script src="/security.js"></script>
   <script src="/auth.js?v=20260916-2"></script>
   <script src="/script.js?v=20261015-personal-api-2"></script>
   <script src="/personal-api.js?v=20261015-1"></script>
