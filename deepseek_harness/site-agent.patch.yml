@@ -74,3 +74,6 @@
 
     - id: miaoda-llm-glm
       name: './llm-glm.mjs'
+
+    - id: hatchery-llm-openai
+      name: './llm-openai.mjs'

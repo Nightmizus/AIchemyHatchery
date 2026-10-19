@@ -680,7 +680,7 @@ function setAiContextUsage(usage,root=document){
   if(root===document)updateAiContextRing();
 }
 document.querySelector('#aiPrompt').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();document.querySelector('#aiAdjustBtn').click()}});
-document.querySelector('#aiChatMessages').addEventListener('click',event=>{const execute=event.target.closest('[data-ai-plan-execute]');if(!execute)return;if(!aiServiceConfigured){showToast('AI 尚未配置：请管理员配置 DeepSeek API Key');return}const planNode=execute.closest('.ai-plan-box')?.querySelector('.ai-markdown, p');const plan=window.AIchemyHatcheryMarkdown.source(planNode).trim();if(!plan)return;void startAiRun(`请严格按照以下已确认的计划修改网站（本次为完全访问模式，直接执行，不要再只出计划）：\n${plan}`,[],[],[],{mode:'full',displayText:'按此计划执行'});execute.disabled=true});
+document.querySelector('#aiChatMessages').addEventListener('click',event=>{const execute=event.target.closest('[data-ai-plan-execute]');if(!execute)return;if(!aiServiceConfigured){showToast('AI 尚未配置：请在头像菜单「我的 API」中配置，或联系管理员');return}const planNode=execute.closest('.ai-plan-box')?.querySelector('.ai-markdown, p');const plan=window.AIchemyHatcheryMarkdown.source(planNode).trim();if(!plan)return;void startAiRun(`请严格按照以下已确认的计划修改网站（本次为完全访问模式，直接执行，不要再只出计划）：\n${plan}`,[],[],[],{mode:'full',displayText:'按此计划执行'});execute.disabled=true});
 document.querySelector('#undoBtn').addEventListener('click',undoState);document.querySelector('#redoBtn').addEventListener('click',redoState);
 document.querySelectorAll('[data-preview-device]').forEach(button=>button.addEventListener('click',()=>{previewDevice=button.dataset.previewDevice;sessionStorage.setItem('alchemyhatchery:preview-device',previewDevice);renderCanvas();showToast(`已切换到${button.textContent}预览`)}));
 document.addEventListener('keydown',event=>{const editingText=event.target.closest?.('input,textarea,[contenteditable]');if(editingText)return;if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'){event.preventDefault();if(event.shiftKey)redoState();else undoState()}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='y'){event.preventDefault();redoState()}else if(event.key==='Escape'&&editingElementId)openElementEditor(editingElementId)});
@@ -1067,7 +1067,8 @@ async function enterConsole(user){
     finally{fileSiteLoading=false}
   })();
   const loadAiSessions=initAiChatSessions().then(()=>void resumeAiRuns());
-  // loadAiStatus 已在脚本加载时发起过（/api/ai/status 不依赖登录），这里不再重复一次。
+  // Status now depends on the signed-in account's personal API configuration.
+  void loadAiStatus();
   updateConsoleAccount();loadAiPermissionMode();uiHide(document.querySelector('#authGate'));restoreAiReloadUi();
   await Promise.all([loadSiteFiles,loadAiSessions]);
 }
@@ -1096,7 +1097,7 @@ async function logoutConsole(){
   try{await persistDraftSnapshot(JSON.stringify(state))}catch{}uiHide(document.querySelector('#consoleAccountMenu'));if(window.AIchemyHatcheryAuth)await window.AIchemyHatcheryAuth.logout();else showAuthGate();showToast('已退出控制台账号');
 }
 document.querySelector('#aiAdjustBtn').addEventListener('click',async()=>{
-  if(!aiServiceConfigured){showToast('AI 尚未配置：请管理员配置 DeepSeek API Key');return}
+  if(!aiServiceConfigured){showToast('AI 尚未配置：请在头像菜单「我的 API」中配置，或联系管理员');return}
   const promptInput=document.querySelector('#aiPrompt');const typedPrompt=promptInput.value.trim();if(!typedPrompt&&!aiAttachments.length){showToast('输入修改要求，或先添加附件');promptInput.focus();return}
   const prompt=typedPrompt||'请根据附件内容调整网站。';const requestAttachments=aiAttachments.map(item=>({...item}));promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();
   await startAiRun(prompt,requestAttachments);

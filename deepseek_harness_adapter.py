@@ -17,6 +17,8 @@ from collections import deque
 from pathlib import Path
 from typing import Callable
 
+import personal_api
+
 
 ProgressCallback = Callable[[dict], None]
 
@@ -164,6 +166,12 @@ def dsh_session_id(session_key: str) -> str:
     return "miaoda-" + uuid.uuid5(uuid.NAMESPACE_URL, f"hatchery-dsh:{session_key}").hex
 
 
+def runtime_session_key(session_key: str, api_config: dict | None = None) -> str:
+    if not api_config:
+        return session_key
+    return session_key + ":api:" + uuid.uuid5(uuid.NAMESPACE_URL, api_config["base_url"] + ":" + api_config["model"]).hex
+
+
 def reset_dsh_session(dsh_home: Path, project_root: Path, session_id: str) -> bool:
     """删掉磁盘上的 dsh 会话目录，让本次任务从干净上下文重开。
 
@@ -187,7 +195,7 @@ def reset_dsh_session(dsh_home: Path, project_root: Path, session_id: str) -> bo
 
 # 漏洞（密钥经子进程环境泄露）：原先把整份服务端环境（NEON_DATABASE_URL、SSO_SECRET、
 # EMAIL_PASS、另一家厂商的 API Key）复制给第三方运行时；这里只保留本次任务需要的那一个 Key。
-_SENSITIVE_ENV = re.compile(r"SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|DATABASE_URL|_PASS$|_TOKEN$|API_KEY$")
+_SENSITIVE_ENV = re.compile(r"SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|DATABASE_URL|_PASS$|_TOKEN$|API_KEY$|_ENCRYPTION_KEY$")
 
 
 def _child_env(keep_env_name: str) -> dict[str, str]:
@@ -275,8 +283,12 @@ def resolve_harness_binary(root: Path) -> Path | None:
     return None
 
 
-def harness_status(root: Path) -> dict:
+def harness_status(root: Path, api_config: dict | None = None) -> dict:
     binary = resolve_harness_binary(root)
+    if api_config:
+        return {"configured": bool(binary), "keyConfigured": True, "runtimeReady": bool(binary),
+                "provider": "我的 API", "model": api_config["model"], "reasoningEffort": None,
+                "mode": "auto", "contextWindow": 128000, "tools": list(TOOL_LABELS), "personal": True}
     _, provider = resolve_llm_provider()
     key = os.environ.get(provider["key_env"], "").strip()
     return {
@@ -744,10 +756,16 @@ def run_deepseek_harness(
     progress: ProgressCallback | None = None,
     mode: str = "full",
     session_key: str = "",
+    api_config: dict | None = None,
     runtime_token: str = "",
 ) -> dict:
-    provider_name, provider = resolve_llm_provider()
-    key = os.environ.get(provider["key_env"], "").strip()
+    if api_config:
+        provider_name = "personal-openai"
+        provider = {"route": provider_name, "key_env": "HATCHERY_PERSONAL_API_KEY", "model_env": "HATCHERY_PERSONAL_API_MODEL",
+                    "effort_env": "", "default_model": api_config["model"], "default_effort": "", "label": "我的 API"}
+    else:
+        provider_name, provider = resolve_llm_provider()
+    key = api_config["api_key"] if api_config else os.environ.get(provider["key_env"], "").strip()
     if not key:
         raise HarnessRuntimeError(f"尚未配置 {provider['key_env']}；配置后即可启用 {provider['label']}")
     binary = resolve_harness_binary(root)
@@ -765,15 +783,22 @@ def run_deepseek_harness(
         system_prompt += DYNAMIC_SITE_RULES
     dsh_home = (root / ".deepseek-harness" / "home").resolve()
     dsh_home.mkdir(parents=True, exist_ok=True)
-    model = os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
+    model = api_config["model"] if api_config else os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
     reasoning = os.environ.get(provider["effort_env"], "").strip() or provider["default_effort"]
     # Only RPC acknowledgements are bounded. Useful ongoing work has no total
     # wall-clock deadline, including when a legacy timeout remains in .env.
     rpc_timeout = 60.0
     max_tokens = max(1024, min(131072, int(os.environ.get("DEEPSEEK_MAX_TOKENS", "32768"))))
 
-    env = _child_env(provider["key_env"])
-    web_env = _web_search_env()
+    env = _child_env("" if api_config else provider["key_env"])
+    web_env = _web_search_env() if not api_config else {
+        "HATCHERY_DEEPSEEK_SEARCH_MODEL": model,
+        "HATCHERY_DEEPSEEK_SEARCH_API_KEY": "",  # Filled by the task-local checked transport below.
+    }
+    if api_config:
+        env.update({"HATCHERY_PERSONAL_API_KEY": key, "HATCHERY_PERSONAL_API_MODEL": model,
+                    "HATCHERY_PERSONAL_API_BASE": api_config["base_url"],
+                    "HATCHERY_PERSONAL_API_IPS": json.dumps(personal_api.public_addresses(api_config["base_url"]))})
     env.update(web_env)
     if runtime_token:
         env['MIAODA_SITE_RUNTIME_TOKEN'] = runtime_token
@@ -799,11 +824,14 @@ def run_deepseek_harness(
     events: list[dict] = []
     projector = _EventProjector(progress)
     # 用户对话 ID 不变；每次原生尝试使用独立 ID，不与旧磁盘会话/锁冲突。
-    session_id = dsh_session_id(session_key) + '-' + uuid.uuid4().hex[:12]
+    session_id = dsh_session_id(runtime_session_key(session_key, api_config)) + '-' + uuid.uuid4().hex[:12]
     # 不删除其他尝试的日志；历史和检查点由服务端 prompt 负责恢复。
     reset_dsh_session(dsh_home, root, session_id)
 
-    with _JsonRpcRuntime(args, root, env, rpc_timeout, secrets=(key, web_env["HATCHERY_DEEPSEEK_SEARCH_API_KEY"], runtime_token)) as runtime:
+    with personal_api.search_transport(env, api_config) as runtime_env, _JsonRpcRuntime(
+        args, root, runtime_env, rpc_timeout,
+        secrets=(key, runtime_env["HATCHERY_DEEPSEEK_SEARCH_API_KEY"], runtime_token),
+    ) as runtime:
         initialize: dict = {"cwd": str(root.resolve()), "provider": provider["route"], "model": model, "maxTokens": max_tokens}
         if reasoning:
             initialize["reasoningEffort"] = reasoning

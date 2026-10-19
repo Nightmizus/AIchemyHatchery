@@ -14,6 +14,7 @@ import threading
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import personal_api
 import server
 import site_files
 
@@ -49,6 +50,7 @@ class FileFixture:
         CREATE TABLE hatchery_site_previews(user_id TEXT PRIMARY KEY, data_json TEXT);
         CREATE TABLE "User"(id TEXT PRIMARY KEY);
         ''')
+        self.db.executescript(personal_api.SCHEMA)
         for table in ('users', 'sessions', 'settings', 'invitations', 'audit_log', 'deployments'):
             self.db.execute(f'CREATE TABLE hatchery_site_{table}(site_username TEXT, value TEXT)')
         self.db.execute('INSERT INTO hatchery_user_extras VALUES (?,?)', (USER['id'], PREVIEW))
