@@ -14,6 +14,14 @@ const INITIAL_STATE = {
 const state = JSON.parse(JSON.stringify(INITIAL_STATE));
 let currentConsoleUser=null;
 let fileSite=null,fileSiteLoading=false,activeSiteFile='index.html';
+let siteFilesRequest=null,consoleLoadId=0;
+window.HatcheryPreview.configure(()=>{
+  if(!currentConsoleUser)return;
+  if(!fileSite){void enterConsole(currentConsoleUser);return}
+  const user=currentConsoleUser,navigationId=window.HatcheryPreview.navigationId;
+  window.HatcheryPreview.loading();
+  void reloadSiteFiles().then(()=>{if(currentConsoleUser===user&&window.HatcheryPreview.navigationId===navigationId)window.HatcheryPreview.reload()}).catch(error=>{if(currentConsoleUser===user)window.HatcheryPreview.fail(error.message)});
+});
 function applySiteFiles(info){
   if(info?.format!=='files')return;
   fileSite=info;
@@ -31,15 +39,21 @@ function renderFileCanvas(){
   const canvas=document.querySelector('#siteCanvas');canvas.className='site-canvas file-site-canvas';canvas.dataset.previewDevice=previewDevice;
   canvas.style.setProperty('--canvas-width',previewDevice==='desktop'?'100%':'390px');
   document.querySelector('.history-actions').hidden=true;document.querySelector('#clearPageBtn').hidden=true;
-  document.querySelector('#canvasContent').innerHTML='<iframe id="siteFilePreview" title="网站预览" sandbox="allow-scripts allow-forms allow-popups allow-downloads" referrerpolicy="no-referrer"></iframe>';
-  document.querySelector('#siteFilePreview').src=siteFilePreviewUrl()+'?v='+Date.now();
+  window.HatcheryPreview.show(siteFilePreviewUrl(),fileSite.previewRevision||JSON.stringify([fileSite.files,fileSite.metadata.updatedAt]),{empty:!fileSite.pages.length});
   document.querySelector('#selectionState').textContent=fileSite.slug?'修改保存后会立即更新已发布网站':'AI 直接编辑网站文件';
   document.querySelectorAll('[data-preview-device]').forEach(button=>button.classList.toggle('active',button.dataset.previewDevice===previewDevice));
   updatePreviewVisibility();
 }
 async function reloadSiteFiles(){
-  if(!currentConsoleUser)return;
-  const info=await consoleRequest('/api/site/files');if(info.format==='files')applySiteFiles(info);
+  if(!currentConsoleUser||fileSiteLoading)return;
+  const user=currentConsoleUser,loadId=consoleLoadId;
+  if(siteFilesRequest?.user===user&&siteFilesRequest.loadId===loadId)return siteFilesRequest.promise;
+  const request={user,loadId,promise:null};
+  request.promise=(async()=>{
+    try{const info=await consoleRequest('/api/site/files');if(currentConsoleUser===user&&consoleLoadId===loadId&&info.format==='files')applySiteFiles(info)}
+    finally{if(siteFilesRequest===request)siteFilesRequest=null}
+  })();
+  siteFilesRequest=request;return request.promise;
 }
 
 let DRAFT_KEY='alchemyhatchery:guest:draft:v3';
@@ -1016,7 +1030,7 @@ window.addEventListener('online',()=>void resumeAiRuns());
 
 function notifyPublishedReload(reason){try{const channel=new BroadcastChannel('alchemyhatchery-live-preview');channel.postMessage({type:'reload',reason,at:Date.now()});channel.close()}catch{}try{localStorage.setItem('alchemyhatchery:published-reload',JSON.stringify({reason,at:Date.now()}))}catch{}}
 function refreshAiChangedFiles(files=[]){
-  if(fileSite&&files.length){renderCanvas();notifyPublishedReload('网站文件已更新')}
+  if(fileSite&&files.length){window.HatcheryPreview.reload();notifyPublishedReload('网站文件已更新')}
   return {editorReloadNeeded:false,viewerReloaded:files.length>0};
 }
 async function restartLocalServer(){
@@ -1042,6 +1056,7 @@ async function consoleRequest(path,options={}){
 }
 function showAuthGate(message=''){
   window.AIchemyHatcherySecurity?.reset();
+  window.HatcheryPreview.reset();
   currentConsoleUser=null;aiChatSessionId=null;aiSessionHtml='';aiRuns.clear();aiQueueStatus=null;updateAiBusy();if(window.AIchemyHatcheryAuth){window.AIchemyHatcheryAuth.showGate(message);return}uiShow(document.querySelector('#authGate'));const error=document.querySelector('#authError');error.textContent=message;error.hidden=!message;setSaveState('等待登录',false);
 }
 function updateConsoleAccount(){
@@ -1049,24 +1064,28 @@ function updateConsoleAccount(){
   document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#menuUsername').textContent=username;const railName=document.querySelector('#activityAccountName');if(railName)railName.textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPreviewPath').textContent=currentConsoleUser.previewId?`/preview/${currentConsoleUser.previewId}`:'首次预览后生成';document.querySelector('#accountPublishPath').textContent=currentConsoleUser.publishSlug?new URL(currentConsoleUser.publishUrl||`/pages/${currentConsoleUser.publishSlug}/`,location.origin).href:'未发布';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
 }
 async function enterConsole(user){
+  const loadId=++consoleLoadId;
+  const isCurrentLoad=()=>currentConsoleUser===user&&consoleLoadId===loadId;
   currentConsoleUser=user;fileSite=null;fileSiteLoading=true;activeSiteFile='index.html';
   window.AIchemyHatcherySecurity?.reset();
-  document.querySelector('#canvasContent').textContent='正在加载网站文件…';
+  window.HatcheryPreview.reset();document.querySelector('#canvasContent').replaceChildren();window.HatcheryPreview.loading();
   const username=user.username;aiRuns.clear();aiQueueStatus=null;aiSessionHtml='';updateAiBusy();DRAFT_KEY=`alchemyhatchery:${username}:draft:v3`;AI_RELOAD_NOTICE_KEY=`alchemyhatchery:${username}:ai-reload-notice:v2`;AI_MODE_KEY=`alchemyhatchery:${username}:ai-mode:v1`;
   // 网站文件与 AI 会话互不依赖，同时发起；逐个串行会让每次网络抖动直接叠加。
   const loadSiteFiles=(async()=>{
     try{
       let info=await consoleRequest('/api/site/files');
+      if(!isCurrentLoad())return;
       if(info.format!=='files'){
         let draft=(await consoleRequest('/api/console/draft')).draft;
+        if(!isCurrentLoad())return;
         if(!draft){try{draft=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null')}catch{}}
         restoreState(draft?.pages?.length?{...INITIAL_STATE,...draft}:INITIAL_STATE);
         // One-time export of existing visual-editor drafts. Normal authoring never sends page JSON.
         info=await consoleRequest('/api/site/files',{method:'POST',body:{legacy:draft?.pages?.length?buildLegacyExportPayload(true):null}});
       }
-      applySiteFiles(info);
-    }catch(error){showToast(`读取网站文件失败：${error.message}`);if(error.status===401){showAuthGate('登录已过期，请重新登录');return}}
-    finally{fileSiteLoading=false}
+      if(isCurrentLoad())applySiteFiles(info);
+    }catch(error){if(!isCurrentLoad())return;window.HatcheryPreview.fail(`读取网站文件失败：${error.message}`);showToast(`读取网站文件失败：${error.message}`);if(error.status===401){showAuthGate('登录已过期，请重新登录');return}}
+    finally{if(isCurrentLoad())fileSiteLoading=false}
   })();
   const loadAiSessions=initAiChatSessions().then(()=>void resumeAiRuns());
   // Status now depends on the signed-in account's personal API configuration.
@@ -1089,9 +1108,34 @@ function renderAiServiceSettings(config){
   const configured=Boolean(config[`${provider}KeySet`]);
   return `<section class="ai-key-manager"><header><div><small>AI SERVICE</small><h3>AI 服务配置</h3></div><b>${esc(config.providerLabel)}</b></header><div class="ai-key-status"><span>当前模型：${esc(config.model)}</span><span>${name} Key：${configured?`已配置 ${esc(config[`${provider}KeyMask`]||'')}`:'未配置'}</span></div><form class="ai-key-form" data-console-form="ai-service-key" data-key-field="${provider}ApiKey"><input name="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新的 ${name} API Key"><button>保存 Key</button><button type="button" data-ai-key-clear="${provider}"${configured?'':' disabled'}>清除</button></form><p>密钥保存后立即生效，界面仅显示末 4 位。所有会话统一使用当前模型。</p></section>`;
 }
+function renderAdminSiteRow(item){
+  const name=item.siteName||item.slug;
+  const isPartner=item.isPartner===true;
+  const state=item.onDisk===false?'missing':item.listed?'active':'disabled';
+  const stateLabel=item.onDisk===false?'文件缺失':item.listed?'已收录':'未收录';
+  return `<div class="admin-site-row" data-admin-site="${esc(item.slug)}"><span class="console-avatar">${esc(name.slice(0,1).toUpperCase())}</span><div class="admin-site-detail"><b>${esc(name)}</b><small>${esc(item.owner||'未知')}${item.ownerCampusId?' · '+esc(item.ownerCampusId):''} · 更新于 ${esc(String(item.updatedAt||'').slice(0,10))}</small><small class="admin-site-url">${esc(String(item.publicUrl||'').replace(/^https?:\/\//,''))}</small><div class="admin-site-badges"><em data-site-category class="${isPartner?'partner':'other'}">${isPartner?'合作社团':'其他网站'}</em><em class="${state}">${stateLabel}</em></div></div><div class="admin-site-actions"><button type="button" data-site-category-toggle="${esc(item.slug)}" data-is-partner="${isPartner}" aria-label="${esc(name)}：${isPartner?'移至其他网站':'设为合作社团'}">${isPartner?'移至其他网站':'设为合作社团'}</button><a href="${esc(item.publicUrl)}" target="_blank" rel="noopener noreferrer">打开网站 ↗</a></div></div>`;
+}
+document.querySelector('#previewModal').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-site-category-toggle]');
+  if(!button||button.disabled)return;
+  const row=button.closest('[data-admin-site]'),isPartner=button.dataset.isPartner!=='true';
+  const originalLabel=button.textContent;
+  button.disabled=true;button.textContent='正在保存…';
+  try{
+    const payload=await consoleRequest('/api/admin/sites/category',{method:'POST',body:{slug:button.dataset.siteCategoryToggle,isPartner}});
+    if(payload.isPartner!==isPartner)throw new Error('分类更新未确认，请刷新后重试');
+    button.dataset.isPartner=String(isPartner);
+    button.textContent=isPartner?'移至其他网站':'设为合作社团';
+    button.setAttribute('aria-label',`${row.querySelector('.admin-site-detail>b').textContent}：${button.textContent}`);
+    const badge=row.querySelector('[data-site-category]');
+    badge.textContent=isPartner?'合作社团':'其他网站';badge.className=isPartner?'partner':'other';
+    showToast(isPartner?'已归入合作社团':'已移至其他网站');
+  }catch(error){button.textContent=originalLabel;showToast(error.message)}
+  finally{button.disabled=false}
+});
 async function openInviteManager(){
-  openModal('账号与注册管理','<div class="invite-empty">正在加载管理后台…</div>');
-  try{const [userPayload,usagePayload,aiConfig,sitesPayload]=await Promise.all([consoleRequest('/api/admin/users'),consoleRequest('/api/admin/ai-usage'),consoleRequest('/api/admin/ai-config'),consoleRequest('/api/admin/sites')]);const users=(userPayload.users||[]).map(item=>{const own=item.username.toLowerCase()===currentConsoleUser?.username?.toLowerCase();const status=item.status==='active'?'正常':'已停用';return `<div class="admin-user-row"><span class="console-avatar">${esc(item.username.slice(0,1).toUpperCase())}</span><div><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${item.role==='admin'?'管理员':'用户'} · ${item.published?'已发布':'未发布'} · ${item.sessionCount} 个会话</small></div><em class="${item.status}">${status}</em>${own?'<i>当前账号</i>':`<button data-user-status="${item.status==='active'?'disabled':'active'}" data-user-name="${esc(item.username)}">${item.status==='active'?'停用':'启用'}</button>${item.status==='active'?`<button data-impersonate data-user-name="${esc(item.username)}">登录</button>`:''}`}</div>`}).join('')||'<div class="invite-empty">暂无用户</div>';const usageRows=(usagePayload.usage||[]).map(item=>`<div class="admin-usage-row"><span><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${esc(item.campusId||'')} · ${item.runs} 次任务</small></span><em>${fmtTokenCount(item.dayTokens)}</em><em>${fmtTokenCount(item.weekTokens)}</em><em>${fmtTokenCount(item.totalTokens)}</em><button data-ai-chats="${esc(String(item.userId))}" data-user-name="${esc(item.username)}">记录</button></div>`).join('')||'<div class="invite-empty">还没有 AI 使用记录</div>';const siteRows=(sitesPayload.sites||[]).map(item=>`<div class="admin-site-row"><span class="console-avatar">${esc((item.siteName||item.slug).slice(0,1).toUpperCase())}</span><div><b>${esc(item.siteName||item.slug)}</b><small>${esc(item.owner||'未知')}${item.ownerCampusId?' · '+esc(item.ownerCampusId):''} · 更新于 ${esc(String(item.updatedAt||'').slice(0,10))}</small><small class="admin-site-url">${esc(String(item.publicUrl||'').replace(/^https?:\/\//,''))}</small></div><em class="${item.onDisk===false?'missing':item.listed?'active':'disabled'}">${item.onDisk===false?'文件缺失':item.listed?'已收录':'未收录'}</em><a href="${esc(item.publicUrl)}" target="_blank" rel="noopener">打开 ↗</a></div>`).join('')||'<div class="invite-empty">还没有发布的网站</div>';const totals=usagePayload.totals||{};const aiKeySection=renderAiServiceSettings(aiConfig);openModal('账号与注册管理',`<div class="admin-console"><section><header><div><small>USERS</small><h3>控制台用户</h3></div><b>${userPayload.total||0}</b></header><div class="admin-user-list">${users}</div></section><section class="ai-usage-manager"><header><div><small>AI TOKENS</small><h3>AI 用量统计</h3></div><button data-ai-chats="" data-user-name="全部用户">全部记录</button></header><p>今日 ${fmtTokenCount(totals.dayTokens)} · 近 7 天 ${fmtTokenCount(totals.weekTokens)} · 累计 ${fmtTokenCount(totals.totalTokens)} tokens（已知用量；${totals.unknownRuns||0} 次任务用量未知）</p><div class="admin-usage-head"><span>用户</span><span>今日</span><span>近 7 天</span><span>累计</span><span></span></div><div class="admin-usage-list">${usageRows}</div></section><section class="admin-sites-manager"><header><div><small>PUBLISHED SITES</small><h3>已发布网站</h3></div><a href="/gallery" target="_blank" rel="noopener">Gallery ↗</a></header><div class="admin-site-list">${siteRows}</div></section>${aiKeySection}</div>`)}catch(error){openModal('账号与注册管理',`<div class="invite-empty">${esc(error.message)}</div>`)}
+  openModal('管理后台','<div class="invite-empty">正在加载管理后台…</div>');
+  try{const [userPayload,usagePayload,aiConfig,sitesPayload]=await Promise.all([consoleRequest('/api/admin/users'),consoleRequest('/api/admin/ai-usage'),consoleRequest('/api/admin/ai-config'),consoleRequest('/api/admin/sites')]);const users=(userPayload.users||[]).map(item=>{const own=item.username.toLowerCase()===currentConsoleUser?.username?.toLowerCase();const status=item.status==='active'?'正常':'已停用';return `<div class="admin-user-row"><span class="console-avatar">${esc(item.username.slice(0,1).toUpperCase())}</span><div><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${item.role==='admin'?'管理员':'用户'} · ${item.published?'已发布':'未发布'} · ${item.sessionCount} 个会话</small></div><em class="${item.status}">${status}</em>${own?'<i>当前账号</i>':`<button data-user-status="${item.status==='active'?'disabled':'active'}" data-user-name="${esc(item.username)}">${item.status==='active'?'停用':'启用'}</button>${item.status==='active'?`<button data-impersonate data-user-name="${esc(item.username)}">登录</button>`:''}`}</div>`}).join('')||'<div class="invite-empty">暂无用户</div>';const usageRows=(usagePayload.usage||[]).map(item=>`<div class="admin-usage-row"><span><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${esc(item.campusId||'')} · ${item.runs} 次任务</small></span><em>${fmtTokenCount(item.dayTokens)}</em><em>${fmtTokenCount(item.weekTokens)}</em><em>${fmtTokenCount(item.totalTokens)}</em><button data-ai-chats="${esc(String(item.userId))}" data-user-name="${esc(item.username)}">记录</button></div>`).join('')||'<div class="invite-empty">还没有 AI 使用记录</div>';const siteRows=(sitesPayload.sites||[]).map(renderAdminSiteRow).join('')||'<div class="invite-empty">还没有发布的网站</div>';const totals=usagePayload.totals||{};const aiKeySection=renderAiServiceSettings(aiConfig);openModal('管理后台',`<div class="admin-console"><section><header><div><small>USERS</small><h3>控制台用户</h3></div><b>${userPayload.total||0}</b></header><div class="admin-user-list">${users}</div></section><section class="ai-usage-manager"><header><div><small>AI TOKENS</small><h3>AI 用量统计</h3></div><button data-ai-chats="" data-user-name="全部用户">全部记录</button></header><p>今日 ${fmtTokenCount(totals.dayTokens)} · 近 7 天 ${fmtTokenCount(totals.weekTokens)} · 累计 ${fmtTokenCount(totals.totalTokens)} tokens（已知用量；${totals.unknownRuns||0} 次任务用量未知）</p><div class="admin-usage-head"><span>用户</span><span>今日</span><span>近 7 天</span><span>累计</span><span></span></div><div class="admin-usage-list">${usageRows}</div></section><section class="admin-sites-manager"><header><div><small>PUBLISHED SITES</small><h3>已发布网站</h3></div><a href="/gallery" target="_blank" rel="noopener">Gallery ↗</a></header><p class="admin-sites-help">新发布的网站默认归入其他网站；点击按钮即可调整分类。未收录的网站仍不会公开展示。</p><div class="admin-site-list">${siteRows}</div></section>${aiKeySection}</div>`)}catch(error){openModal('管理后台',`<div class="invite-empty">${esc(error.message)}</div>`)}
 }
 async function openAiChats(userId,username){
   try{const payload=await consoleRequest(`/api/admin/ai-chats${userId?`?userId=${encodeURIComponent(userId)}`:''}`);const rows=(payload.chats||[]).map(item=>{const time=esc(String(item.createdAt||'').replace('T',' ').slice(0,19));const atts=(item.attachments||[]).map(att=>`<i>${att.kind==='image'?'图片':'附件'} · ${esc(att.name||'')}</i>`).join('');return `<article class="ai-chat-item"><header><b>${esc(item.username)}</b><span>${time} · ${esc(item.model||item.provider||'AI')} · ${fmtTokenCount(item.totalTokens)} tokens（入 ${fmtTokenCount(item.inputTokens)} / 出 ${fmtTokenCount(item.outputTokens)}）· ${item.status==='completed'?'完成':'失败'}</span></header><p>${esc(item.prompt)}</p>${atts?`<div class="ai-chat-atts">${atts}</div>`:''}</article>`}).join('')||'<div class="invite-empty">暂无聊天记录</div>';openModal(`AI 记录 · ${username||'全部用户'}`,`<div class="ai-chat-manager"><button class="ai-chat-back" data-ai-chats-back>← 返回管理后台</button><div class="ai-chat-list">${rows}</div></div>`)}catch(error){showToast(error.message)}
@@ -1315,5 +1359,5 @@ document.addEventListener('click',()=>{const menu=document.querySelector('#conso
 
 bindCanvasObjectChrome();renderPages();renderCanvas();
 window.addEventListener('alchemyhatchery:authenticated',event=>void enterConsole(event.detail.user));
-window.addEventListener('alchemyhatchery:logged-out',()=>{fileSite=null;currentConsoleUser=null;setSaveState('等待登录',false)});
+window.addEventListener('alchemyhatchery:logged-out',()=>{window.HatcheryPreview.reset();fileSite=null;currentConsoleUser=null;setSaveState('等待登录',false)});
 window.addEventListener('alchemyhatchery:toast',event=>showToast(event.detail.message));

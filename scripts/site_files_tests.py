@@ -3,6 +3,7 @@ from contextlib import contextmanager, ExitStack
 import functools
 import http.client
 import json
+import os
 import hashlib
 import re
 from pathlib import Path
@@ -15,6 +16,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import personal_api
+import gallery
 import server
 import site_files
 
@@ -51,6 +53,7 @@ class FileFixture:
         CREATE TABLE "User"(id TEXT PRIMARY KEY);
         ''')
         self.db.executescript(personal_api.SCHEMA)
+        self.db.executescript(gallery.SCHEMA)
         for table in ('users', 'sessions', 'settings', 'invitations', 'audit_log', 'deployments'):
             self.db.execute(f'CREATE TABLE hatchery_site_{table}(site_username TEXT, value TEXT)')
         self.db.execute('INSERT INTO hatchery_user_extras VALUES (?,?)', (USER['id'], PREVIEW))
@@ -218,7 +221,7 @@ class FilesTests(unittest.TestCase):
             for path in ('../secret.txt', '%2e%2e/secret.txt', 'escape/secret.txt', 'site.json', 'runtime.json', '.env', 'missing.html'):
                 self.assertEqual(f.request('/pages/alpha/' + path)[0], 404, path)
 
-    def test_published_assets_revalidate_but_previews_stay_uncached(self):
+    def test_published_assets_cache_and_previews_always_revalidate(self):
         with FileFixture() as f:
             (f.directory / 'script.js').write_text('window.siteScript=true')
             (f.directory / 'about').mkdir(); (f.directory / 'about/index.html').write_text('<h1>About</h1>')
@@ -233,9 +236,58 @@ class FilesTests(unittest.TestCase):
             # nginx 压缩后会把 ETag 变弱，浏览器回传的是 W/"..."
             status, headers, body = f.request('/script.js', host=slug_host, headers={'If-None-Match': 'W/' + headers['ETag']})
             self.assertEqual((status, body), (304, b''))
-            # 页面本身和 AI 预览不能缓存，发布/编辑后必须立刻可见
+            # HTML stays no-store; preview assets revalidate, including sub-second edits.
             self.assertEqual(f.request('/pages/alpha/about/')[1]['Cache-Control'], 'no-store')
-            self.assertEqual(f.request(f'/preview/{PREVIEW}/script.js')[1]['Cache-Control'], 'no-store')
+            path = f'/preview/{PREVIEW}/script.js'
+            status, headers, body = f.request(path)
+            self.assertEqual(headers['Cache-Control'], 'private, no-cache, must-revalidate')
+            etag = headers['ETag']
+            status, headers, body = f.request(path, headers={'If-None-Match':etag})
+            self.assertEqual((status, body), (304, b''))
+            self.assertEqual(headers['Access-Control-Allow-Origin'], '*')
+            self.assertIn('sandbox', headers['Content-Security-Policy'])
+            script = f.published / 'alpha/script.js'; before = script.stat()
+            script.write_text('window.siteScript=null')
+            os.utime(script, ns=(before.st_atime_ns, before.st_mtime_ns + 1))
+            status, headers, body = f.request(path, headers={'If-None-Match':etag})
+            self.assertEqual((status, body), (200, b'window.siteScript=null'))
+            self.assertNotEqual(headers['ETag'], etag)
+
+    def test_preview_assets_use_one_authorized_lookup_and_skip_unchanged_file_reads(self):
+        with FileFixture() as f:
+            (f.directory / 'styles.css').write_text('body{color:navy}')
+            database = server.neon_db; calls = []
+            @contextmanager
+            def counted(*args, **kwargs):
+                calls.append(1)
+                with database(*args, **kwargs) as conn: yield conn
+            with patch.object(server, 'neon_db', counted):
+                status, headers, _ = f.request(f'/preview/{PREVIEW}/styles.css')
+            self.assertEqual(status, 200)
+            self.assertEqual(len(calls), 1)
+            original_read = Path.read_bytes
+            def forbid_asset_read(path):
+                if path.name == 'styles.css': raise AssertionError('unchanged resource was read')
+                return original_read(path)
+            with patch.object(Path, 'read_bytes', forbid_asset_read):
+                self.assertEqual(f.request(f'/preview/{PREVIEW}/styles.css', headers={'If-None-Match':headers['ETag']})[0], 304)
+
+    def test_preview_revision_detects_same_size_changes_and_ready_bridge_stays_sandboxed(self):
+        with FileFixture() as f:
+            page = f.directory / 'index.html'; page.write_text('<h1>One</h1>')
+            old = f.handler.site_files_info(USER['id'])['previewRevision']
+            self.assertEqual(old, f.handler.site_files_info(USER['id'])['previewRevision'])
+            stat = page.stat(); page.write_text('<h1>Two</h1>')
+            os.utime(page, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+            self.assertNotEqual(old, f.handler.site_files_info(USER['id'])['previewRevision'])
+            status, headers, body = f.request(f'/preview/{PREVIEW}/?__hatchery_preview=abcdef12-3456-7890')
+            self.assertEqual(status, 200)
+            self.assertIn(b'hatchery-preview-ready', body)
+            self.assertIn(b'abcdef12-3456-7890', body)
+            self.assertNotIn('allow-same-origin', headers['Content-Security-Policy'])
+            self.assertEqual(headers['Cache-Control'], 'no-store')
+            self.assertEqual(page.read_text(), '<h1>Two</h1>')
+            self.assertNotIn(b'hatchery-preview-ready', f.request(f'/preview/{PREVIEW}/')[2])
 
     def test_legacy_migration_is_once_content_lives_in_html(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -32,6 +32,24 @@ Neither calls a model. `scripts/site_security_smoke.py --live` explicitly opts
 into one configured-model audit of disposable synthetic vulnerable source;
 it consumes API usage but never scans a production website.
 
+## 控制台嵌入预览（2026-10-19）
+
+`frontend/site-preview.js` 管理右侧 iframe。文件列表接口提供基于路径、纳秒修改时间、大小和 inode 的 `previewRevision`；同一页面版本保持 iframe，设备尺寸切换、窗口重新获得焦点及未变化的文件同步不重新加载。并发文件同步合并，过期初始化响应忽略。页面内容变化、选择其他页面或手动重试才导航。
+
+加载时显示深色提示；8 秒显示慢加载提示，30 秒显示失败及重试入口，迟到的成功响应仍可恢复。预览 HTML 注入只在嵌入请求中使用的随机令牌回执，在 `DOMContentLoaded` 时通知控制台，无需等待所有图片加载；父页面同时验证 iframe 来源与本次令牌。保留原有不含 `allow-same-origin` 的 sandbox，不让网站访问控制台。
+
+预览资源每次仍查询真实归属和封禁状态，合并为一次数据库查询。HTML 保持 `no-store`；CSS、脚本和图片使用 `private, no-cache, must-revalidate`，浏览器每次重新验证，未变化返回 304 并避免读取文件。ETag 使用纳秒修改时间、大小和 inode，防止同一秒内等长修改命中旧缓存。
+
+回归：`python scripts/site_files_tests.py` 与安装 Playwright 的 Python 执行 `scripts/preview_browser_tests.py`。覆盖真实临时文件 HTTP、条件缓存、沙箱、慢资源、错误重试、超时恢复、过期响应和预览状态保留，不访问生产或调用模型。原生部署需同步 `server.py`、`site_files.py`、`frontend/index.html`、`frontend/script.js`、`frontend/site-preview.js`、`frontend/ai-chat.css`；新增脚本沿用控制台内容哈希版本。
+
+## Gallery 分类与管理（2026-10-19）
+
+`/gallery` 按“合作社团”“其他网站”依次展示公开收录且文件存在的网站。页面支持搜索、移动端和无 JavaScript 浏览。`gallery.py` 负责渲染与分类持久化，模板、样式和搜索分别位于 `frontend/gallery.html`、`gallery.css`、`gallery.js`；CSS/JS 使用内容哈希版本号。
+
+分类保存于平台私有表 `hatchery_gallery_categories`，不读取网站自己声明的分类。初始化迁移只执行一次，将当时已存在的 `cogito`、`racingbusiness`、`sdszrootca`、`sdszemergingmarketssociety` 归入合作社团；以后的新发布网站一律默认其他网站。管理员在“管理后台 → 已发布网站”一键调整，接口 `POST /api/admin/sites/category` 要求管理员身份、同源请求和布尔值 `isPartner`，并记录审计。它支持仅磁盘存在的历史网站，保持原有收录开关。重新发布及改名保留分类；新账号使用旧路径不会继承旧分类。
+
+回归：`python scripts/gallery_category_tests.py`（临时真实 PostgreSQL + 发布回归）和安装 Playwright 的 Python 执行 `scripts/gallery_browser_tests.py`（真实分类接口、搜索、管理员操作、桌面与移动端截图；其余控制台服务使用测试数据）。两者不连接生产库或调用模型。原生部署需包含 `gallery.py` 和三个 Gallery 前端文件，并同步 `server.py`、`frontend/script.js`、`frontend/mica.css`；Dockerfile 已包含新模块。
+
 ## Runtime
 
 The editor server launches an official DeepSeek Harness SDK runtime through

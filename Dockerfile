@@ -17,7 +17,7 @@ RUN env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -
     -r requirements.txt psycopg2-binary deepseek-harness-runtime-bin
 
 # 应用代码
-COPY server.py deepseek_harness_adapter.py site_files.py ai_jobs.py login_links.py study_engine.py personal_api.py study_coach.md site_runtime.py site_security.py ./
+COPY server.py deepseek_harness_adapter.py site_files.py ai_jobs.py login_links.py study_engine.py personal_api.py study_coach.md site_runtime.py site_security.py gallery.py ./
 COPY frontend ./frontend
 COPY deepseek_harness ./deepseek_harness
 COPY docker-entrypoint.sh ./

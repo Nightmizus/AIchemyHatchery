@@ -1,0 +1,117 @@
+"""Public gallery presentation and administrator-owned site categories."""
+from datetime import datetime, timezone
+import hashlib
+import html
+from pathlib import Path
+from string import Template
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS hatchery_gallery_categories(
+    slug TEXT PRIMARY KEY,
+    is_partner BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hatchery_gallery_migrations(
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+"""
+INITIAL_PARTNERS = (
+    "cogito", "racingbusiness", "sdszrootca", "sdszemergingmarketssociety",
+)
+
+
+def initialize(conn, existing_slugs):
+    """Seed only the four existing clubs, once, in the caller's transaction.
+
+    An absent club must not become a partner when somebody later takes its slug.
+    Restarts must also preserve an administrator's decision to move a club out.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with conn.cursor() as cur:
+        cur.execute(SCHEMA)
+        cur.execute(
+            "INSERT INTO hatchery_gallery_migrations(name,applied_at) VALUES(%s,%s) "
+            "ON CONFLICT (name) DO NOTHING RETURNING name",
+            ("initial-partner-clubs-20261019", now),
+        )
+        if cur.fetchone():
+            # A developer checkout may share the index without mirroring production
+            # files. Registered websites still count as existing in that case.
+            cur.execute("SELECT slug FROM hatchery_published_sites")
+            existing_slugs = set(existing_slugs) | {row[0] for row in cur.fetchall()}
+            for slug in INITIAL_PARTNERS:
+                if slug in existing_slugs:
+                    set_category(cur, slug, True, None, now)
+
+
+def categories(cur):
+    cur.execute("SELECT slug, is_partner FROM hatchery_gallery_categories")
+    return {row["slug"]: bool(row["is_partner"]) for row in cur.fetchall()}
+
+
+def set_category(cur, slug, is_partner, admin_id, now):
+    cur.execute(
+        "INSERT INTO hatchery_gallery_categories(slug,is_partner,updated_by,updated_at) VALUES(%s,%s,%s,%s) "
+        "ON CONFLICT (slug) DO UPDATE SET is_partner=EXCLUDED.is_partner, "
+        "updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at",
+        (slug, is_partner, admin_id, now),
+    )
+
+
+def move_category(cur, old_slug, new_slug):
+    if old_slug == new_slug:
+        return
+    # New sites never inherit a stale classification from an old occupant.
+    cur.execute("DELETE FROM hatchery_gallery_categories WHERE slug = %s", (new_slug,))
+    if old_slug:
+        cur.execute("UPDATE hatchery_gallery_categories SET slug = %s WHERE slug = %s", (new_slug, old_slug))
+
+
+CLUB_WORDMARKS = {
+    "cogito": ("Cogito", "violet"),
+    "racingbusiness": ("Racing", "blue"),
+    "sdszrootca": ("Root CA", "green"),
+    "sdszemergingmarketssociety": ("经济评论", "ochre"),
+}
+ARROW = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
+
+def card(site):
+    esc = lambda value: html.escape(str(value), quote=True)
+    slug = str(site["slug"])
+    name = site["siteName"] or slug
+    description = site["description"] or "介绍还在准备中，先去网站逛逛。"
+    url = str(site["publicUrl"])
+    host = url.removeprefix("https://").removeprefix("http://").rstrip("/")
+    partner = bool(site.get("isPartner"))
+    tone = ("violet", "blue", "green", "ochre")[hashlib.sha256(slug.encode()).digest()[0] % 4]
+    wordmark, tone = CLUB_WORDMARKS.get(slug, (name[:2], tone))
+    kind = "partner" if partner else "other"
+    search = esc(" ".join((name, description, slug, site.get("owner") or "")))
+    cover = f'<div class="club-cover tone-{tone}" aria-hidden="true"><span class="club-wordmark">{esc(wordmark)}</span><span class="club-cover-ring"></span></div>' if partner else ""
+    return (
+        f'<a class="site-card {kind}-card" data-gallery-card data-search="{search}" '
+        f'href="{esc(url)}" target="_blank" rel="noopener noreferrer">{cover}'
+        f'<div class="site-card-body"><div class="site-card-title"><h3>{esc(name)}</h3><span class="visit-icon">{ARROW}</span></div>'
+        f'<p class="site-description">{esc(description)}</p>'
+        f'<div class="site-card-meta"><span>{esc(site.get("owner") or "校园创作者")}</span>'
+        f'<span>更新于 <time>{esc(str(site["updatedAt"])[:10])}</time></span></div>'
+        f'<span class="site-address">{esc(host)}</span></div></a>'
+    )
+
+
+def render(sites, frontend: Path, asset_version):
+    public = [site for site in sites if site["listed"] and site["onDisk"]]
+    partners = [site for site in public if site.get("isPartner")]
+    others = [site for site in public if not site.get("isPartner")]
+    return Template((frontend / "gallery.html").read_text(encoding="utf-8")).substitute(
+        css_version=asset_version("/gallery.css"),
+        js_version=asset_version("/gallery.js"),
+        partner_count=len(partners), other_count=len(others), total=len(public),
+        partner_cards="".join(map(card, partners)), other_cards="".join(map(card, others)),
+        partner_empty="" if not partners else " hidden",
+        other_empty="" if not others else " hidden",
+    )

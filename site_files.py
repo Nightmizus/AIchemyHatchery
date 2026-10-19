@@ -131,6 +131,18 @@ def list_files(root: Path) -> list[str]:
     return result
 
 
+def preview_revision(root: Path, names: list[str]) -> str:
+    """Cheap change token for the preview; never read large assets to poll changes."""
+    digest = hashlib.sha256()
+    for name in names:
+        try:
+            info = confined_path(root, name).stat()
+            digest.update(json.dumps([name, info.st_mtime_ns, info.st_size, info.st_ino]).encode())
+        except (ValueError, FileNotFoundError):
+            continue
+    return digest.hexdigest()[:24]
+
+
 def file_manifest(root: Path) -> dict[str, str]:
     result = {}
     for name in list_files(root):

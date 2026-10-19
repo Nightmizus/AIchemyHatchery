@@ -619,7 +619,7 @@ body {
 .preview-dialog .publish-gallery-note a:hover{text-decoration:underline}
 /* 管理后台：已发布网站列表 */
 .admin-site-list{max-height:260px;overflow:auto}
-.admin-site-row{padding:11px 13px;display:grid;grid-template-columns:30px minmax(0,1fr) auto auto;align-items:center;gap:9px;border-top:1px solid var(--soft-line)}
+.admin-site-row{padding:15px 13px;display:grid;grid-template-columns:30px minmax(0,1fr) auto;align-items:start;gap:10px;border-top:1px solid var(--soft-line)}
 .admin-site-row:first-child{border-top:0}
 .admin-site-row>div b,.admin-site-row>div small{display:block}
 .admin-site-row>div b{font-size:9px;color:var(--ink)}
@@ -631,6 +631,22 @@ body {
 .admin-site-row>em.missing{background:rgba(248,81,73,.14);color:#f85149}
 .admin-site-row>a{min-width:45px;padding:6px;border:1px solid var(--line);border-radius:5px;background:transparent;color:#c9d1d9;font-size:7px;text-align:center;text-decoration:none;white-space:nowrap}
 .admin-site-row>a:hover{border-color:var(--mica-hover-line);color:var(--ink)}
+.admin-sites-manager .admin-sites-help{color:var(--muted);font-size:10px;line-height:1.8;margin:0;padding:0 13px 12px}
+.admin-site-row .admin-site-detail{min-width:0}
+.admin-site-row .admin-site-detail>b{font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.admin-site-row .admin-site-detail>small{font-size:9px;line-height:1.6;overflow-wrap:anywhere}
+.admin-site-row .admin-site-detail>.admin-site-url{font-family:inherit;color:var(--muted)}
+.admin-site-badges{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.admin-site-badges em{font-size:9px;font-style:normal;line-height:1.5;padding:3px 7px;border-radius:5px;background:rgba(240,246,252,.06);color:var(--muted)}
+.admin-site-badges .partner{background:rgba(138,180,248,.14);color:#b7ceff}
+.admin-site-badges .active{color:#86d5a3}.admin-site-badges .missing{color:#ffaba6}
+.admin-site-actions{display:flex;flex-direction:column;align-items:stretch;gap:8px}
+.admin-site-actions button,.admin-site-actions a{padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--ink);font:inherit;font-size:10px;line-height:1.5;text-align:center;text-decoration:none;white-space:nowrap;cursor:pointer}
+.admin-site-actions button:hover:not(:disabled),.admin-site-actions a:hover{border-color:#8ab4f8;background:rgba(138,180,248,.06)}
+.admin-site-actions button:disabled{opacity:.6;cursor:wait}
+.admin-site-actions button:focus-visible,.admin-site-actions a:focus-visible{outline:2px solid #8ab4f8;outline-offset:3px}
+.admin-site-actions a{border-color:transparent;color:var(--muted)}
+@media(max-width:560px){.admin-site-row{grid-template-columns:24px minmax(0,1fr);padding:13px 10px}.admin-site-actions{grid-column:2;flex-direction:row;flex-wrap:wrap}.admin-site-actions button,.admin-site-actions a{padding:8px 10px}.admin-site-list{max-height:420px}}
 .admin-console section>header>a{color:#8ab4f8;font-size:8px;text-decoration:none}
 .admin-console section>header>a:hover{text-decoration:underline}
 /* publish form & site admin credential */

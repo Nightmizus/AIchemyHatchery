@@ -39,6 +39,7 @@ import urllib.error
 import urllib.parse as urlparse_mod
 
 import site_files
+import gallery
 import ai_jobs
 import login_links
 import study_engine
@@ -281,7 +282,7 @@ AI_UPSTREAM_DEGRADED: dict | None = None
 # 前端静态文件统一放在 frontend/；对外 URL 仍是根路径（/styles.css…），由 handler 翻译
 FRONTEND_DIR = "frontend"
 AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "frontend/mica.css", "frontend/ai-chat.css", "frontend/motion.css", "frontend/auth.js", "frontend/script.js", "frontend/viewer.html", "frontend/viewer.js")
-PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/viewer.js", "/study.css", "/study.js", "/personal-api.js", "/markdown-it.min.js", "/ai-markdown.js", "/security.js"))
+PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/site-preview.js", "/viewer.js", "/study.css", "/study.js", "/personal-api.js", "/markdown-it.min.js", "/ai-markdown.js", "/security.js", "/gallery.css", "/gallery.js"))
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}
@@ -380,11 +381,16 @@ def user_site_directory(user_id) -> tuple[Path, str]:
             cur.execute("SELECT slug FROM hatchery_published_sites WHERE user_id = %s", (str(user_id),))
             row = cur.fetchone()
     slug = str(row[0]) if row else ""
+    return resolved_site_directory(user_id, slug), slug
+
+
+def resolved_site_directory(user_id, slug: str) -> Path:
+    """Resolve an already authorized database row without another round trip."""
     if slug and not SITE_SLUG_PATTERN.fullmatch(slug):
         raise ValueError("网站发布路径无效")
     directory = PUBLISHED / slug if slug else site_files.draft_directory(PUBLISHED, user_id)
     site_files.confined_path(directory, "site.json")
-    return directory, slug
+    return directory
 
 
 def ai_site_workspace(user_id) -> Path:
@@ -710,10 +716,10 @@ def published_site_index() -> list[dict]:
                 FROM hatchery_published_sites p
                 LEFT JOIN "User" u ON u.id = p.user_id
                 ORDER BY p.updated_at DESC
-                LIMIT 500
                 """
             )
             rows = cur.fetchall()
+            category_map = gallery.categories(cur)
     on_disk = published_site_slugs_on_disk()
     sites: list[dict] = []
     seen_slugs: set[str] = set()
@@ -728,6 +734,7 @@ def published_site_index() -> list[dict]:
             "owner": row["owner_name"] or "",
             "ownerCampusId": row["owner_campus_id"] or "",
             "listed": bool(row["listed_in_gallery"]),
+            "isPartner": category_map.get(slug, False),
             "onDisk": slug in on_disk,
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
@@ -745,6 +752,7 @@ def published_site_index() -> list[dict]:
             "owner": "",
             "ownerCampusId": "",
             "listed": True,
+            "isPartner": category_map.get(slug, False),
             "onDisk": True,
             "createdAt": mtime,
             "updatedAt": mtime,
@@ -924,6 +932,7 @@ def initialize_database() -> None:
                     cur.execute(statement)
             cur.execute(login_links.SCHEMA)
             cur.execute(personal_api.SCHEMA)
+        gallery.initialize(conn, published_site_slugs_on_disk())
     AI_JOB_STORE.initialize()
 
 
@@ -1112,6 +1121,7 @@ def delete_site_records(cur, site_username: str) -> None:
     ):
         cur.execute(f"DELETE FROM {table} WHERE site_username = %s", (site_username,))
     cur.execute("DELETE FROM hatchery_published_sites WHERE slug = %s", (site_username,))
+    cur.execute("DELETE FROM hatchery_gallery_categories WHERE slug = %s", (site_username,))
 
 
 def migrate_existing_site_accounts() -> None:
@@ -1777,6 +1787,29 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             invalidate_console_sessions()
         self.send_json({"ok": True, "username": target["name"], "status": status})
 
+    def handle_admin_site_category(self) -> None:
+        admin = self.require_console_user(admin=True)
+        if not admin:
+            return
+        data = self.read_json()
+        slug = data.get("slug")
+        is_partner = data.get("isPartner")
+        if not isinstance(slug, str) or not slug or len(slug) > 128 or "/" in slug or "\\" in slug or slug.startswith("."):
+            raise ValueError("网站路径无效")
+        if type(is_partner) is not bool:
+            raise ValueError("请选择有效的网站分类")
+        # Serialize with publishing so a concurrent rename cannot orphan the choice.
+        with site_files.site_lock("__publish__"):
+            with neon_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT user_id FROM hatchery_published_sites WHERE slug = %s", (slug,))
+                    if not cur.fetchone() and slug not in published_site_slugs_on_disk():
+                        self.send_json({"error": "网站不存在，请刷新列表"}, 404)
+                        return
+                    gallery.set_category(cur, slug, is_partner, str(admin["id"]), iso_time())
+                    audit_event(cur, str(admin["id"]), "admin.site_category", {"slug": slug, "isPartner": is_partner})
+        self.send_json({"ok": True, "slug": slug, "isPartner": is_partner})
+
     def handle_admin_impersonate(self) -> None:
         admin = self.require_console_user(admin=True)
         if not admin:
@@ -2260,6 +2293,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 self.handle_admin_user_status()
             elif path == "/api/admin/impersonate":
                 self.handle_admin_impersonate()
+            elif path == "/api/admin/sites/category":
+                self.handle_admin_site_category()
             elif path == "/api/study/outlines":
                 self.handle_study_outlines()
             elif path == "/api/study/outlines/delete":
@@ -2394,6 +2429,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         names = site_files.list_files(directory)
         public_url = public_site_url(slug) if slug else ''
         return {"metadata": site_files.read_metadata(directory), "files": names,
+                "previewRevision": site_files.preview_revision(directory, names),
                 "pages": sorted((n for n in names if n.endswith((".html", ".htm"))), key=lambda n: (n != "index.html", n)),
                 "previewUrl": f"/preview/{user_preview_id(str(user_id))}/", "slug": slug or "", "publicUrl": public_url,
                 "httpsPending": bool(slug and site_subdomain_url(slug) and not public_url.startswith('https://')), "format": "files"}
@@ -2757,6 +2793,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                                     cur.execute(f"UPDATE {table} SET site_username = %s WHERE site_username = %s", (slug, old_slug))
                         else:
                             cur.execute("INSERT INTO hatchery_published_sites(slug,user_id,created_at,updated_at,listed_in_gallery) VALUES(%s,%s,%s,%s,%s)", (slug, user_id, now, now, listed))
+                        gallery.move_category(cur, old_slug, slug)
                         site_files.save_metadata(target, data, slug=slug, url=public_site_url(slug))
                         audit_event(cur, user_id, "site.published", {"slug": slug, "replaced": old_slug if old_slug != slug else None})
             except Exception:
@@ -3740,59 +3777,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         """Hatchery Gallery：公开页面，收录所有发布时勾选“收录进 Gallery”的网站。
         与管理员总览共用 published_site_index()：数据库记录 ∪ 磁盘遗留站点；
         磁盘上已没有内容的残留记录（已删除 / 改名）不展示。"""
-        sites = [site for site in published_site_index() if site["listed"] and site["onDisk"]]
-        cards = []
-        for site in sites:
-            slug = str(site["slug"])
-            url = str(site["publicUrl"])
-            updated = str(site["updatedAt"])[:10]
-            host_label = url[len("https://"):] if url.startswith("https://") else url
-            cards.append(
-                f'<a class="card" href="{html.escape(url, quote=True)}" target="_blank" rel="noopener">'
-                f"<b>{html.escape(site['siteName'] or slug)}</b>"
-                f"<p>{html.escape(site['description'] or '这个网站还没有写介绍。')}</p>"
-                f"<small>{html.escape(str(site['owner'] or '匿名'))} · 更新于 {html.escape(updated)}</small>"
-                f'<span class="host">{html.escape(host_label)} ↗</span></a>'
-            )
-        grid = "".join(cards) or '<p class="empty">还没有收录的网站。发布你的网站时勾选「收录进 Hatchery Gallery」，就会出现在这里。</p>'
-        page = f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow">
-<title>Hatchery Gallery｜炼丹社Hatchery</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<style>
-*{{margin:0;box-sizing:border-box}}
-body{{min-height:100vh;padding:56px 24px 80px;background:#0d1117;color:#e6edf3;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color-scheme:dark}}
-.wrap{{max-width:960px;margin:0 auto}}
-header.top{{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:8px}}
-h1{{font-size:clamp(26px,4vw,36px);letter-spacing:-.02em}}
-.sub{{color:#9aa7b1;font-size:13px;margin-bottom:34px}}
-.back{{flex:0 0 auto;padding:8px 14px;border:1px solid rgba(240,246,252,.22);border-radius:99px;color:#c9d1d9;font-size:12px;text-decoration:none}}
-.back:hover{{background:rgba(240,246,252,.08);color:#f0f6fc}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}}
-.card{{display:flex;flex-direction:column;gap:8px;padding:18px;border:1px solid rgba(240,246,252,.14);border-radius:14px;background:rgba(240,246,252,.03);color:inherit;text-decoration:none;transition:border-color .16s,background .16s,transform .16s}}
-.card:hover{{border-color:rgba(240,246,252,.32);background:rgba(240,246,252,.06);transform:translateY(-2px)}}
-.card b{{font-size:16px}}
-.card p{{color:#9aa7b1;font-size:12px;flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
-.card small{{color:#6e7681;font-size:11px}}
-.card .host{{color:#8b949e;font:11px Consolas,monospace}}
-.card:hover .host{{color:#c9d1d9}}
-.empty{{padding:60px 0;color:#6e7681;font-size:13px;text-align:center}}
-.count{{color:#6e7681;font-size:12px;margin-bottom:16px}}
-</style>
-</head>
-<body>
-<div class="wrap">
-<header class="top"><h1>Hatchery Gallery</h1><a class="back" href="/hatchery">← 回到控制台</a></header>
-<p class="sub">这里收录了用炼丹社Hatchery创建并发布的网站。</p>
-<p class="count">共收录 {len(cards)} 个网站</p>
-<div class="grid">{grid}</div>
-</div>
-</body>
-</html>"""
+        page = gallery.render(published_site_index(), ROOT / FRONTEND_DIR, console_asset_version)
         body = page.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -3805,14 +3790,17 @@ h1{{font-size:clamp(26px,4vw,36px);letter-spacing:-.02em}}
     def serve_workspace_preview(self, path: str, preview_id: str, run_token: str | None = None) -> None:
         ban_col = user_column_name("bannedUntil")
         ban_filter = f'AND u."{ban_col}" IS NULL' if ban_col else ""
-        with neon_db() as conn:
+        with neon_db(autocommit=True) as conn:
             with conn.cursor() as cur:
-                cur.execute(f'SELECT ue.user_id FROM hatchery_user_extras ue JOIN "User" u ON u.id = ue.user_id WHERE ue.preview_id = %s {ban_filter}', (preview_id,))
+                cur.execute(f'SELECT ue.user_id, p.slug FROM hatchery_user_extras ue '
+                            f'JOIN "User" u ON u.id = ue.user_id '
+                            f'LEFT JOIN hatchery_published_sites p ON p.user_id = ue.user_id '
+                            f'WHERE ue.preview_id = %s {ban_filter}', (preview_id,))
                 row = cur.fetchone()
         if not row:
             self.send_error(404, "Preview not found")
             return
-        directory, _ = user_site_directory(row[0])
+        directory = resolved_site_directory(row[0], str(row[1] or ""))
         if site_files.read_metadata(directory).get("format") != "files":
             with site_files.site_lock(row[0], blocking=False):
                 with neon_db() as conn:
@@ -3840,23 +3828,31 @@ h1{{font-size:clamp(26px,4vw,36px);letter-spacing:-.02em}}
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        body = target.read_bytes()
         mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         download = (parse_qs(urlparse(self.path).query).get('__hatchery_download') or [''])[0]
         stat = target.stat()
-        etag = '"%x-%x"' % (int(stat.st_mtime), stat.st_size)
+        etag = '"%x-%x-%x"' % (stat.st_mtime_ns, stat.st_size, stat.st_ino)
         # 发布站的样式/脚本/图片可以缓存：重复翻页不再整站重下，过期后带 ETag 回源换 304。
-        # HTML 与预览保持 no-store，保证发布和 AI 预览永远是最新内容。
-        cacheable = not download and not preview and mime != "text/html"
+        # Preview assets always revalidate, allowing 304 without stale AI edits.
+        # HTML remains no-store. No permission/ownership lookup is skipped.
+        cacheable = not download and mime != "text/html"
+        cache_control = "private, no-cache, must-revalidate" if preview else "public, max-age=300"
         self.site_file_cacheable = cacheable
         # nginx 压缩后会把 ETag 变弱（W/"..."），比较前统一去掉 W/ 前缀。
         if_none_match = {item.strip().removeprefix("W/") for item in self.headers.get("If-None-Match", "").split(",")}
         if cacheable and etag in if_none_match:
             self.send_response(304)
             self.send_header("ETag", etag)
-            self.send_header("Cache-Control", "public, max-age=300")
+            self.send_header("Cache-Control", cache_control)
+            if prefix:
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-downloads; worker-src 'none'")
+            if preview:
+                self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
             self.end_headers()
             return
+        body = target.read_bytes() if self.command != "HEAD" or mime == "text/html" else b""
+        content_length = stat.st_size
         if prefix and mime == 'text/html' and not download:
             # A sandbox has an opaque origin, so browsers ignore download="..."
             # on normal HTTP links. Keep the sandbox and request an attachment
@@ -3868,11 +3864,19 @@ if(u.origin!==location.origin||!u.pathname.startsWith(p+'/'))return;
 u.searchParams.set('__hatchery_download',a.download||'1');a.href=u.href;
 },true);</script>'''.replace('__PREFIX__', json.dumps(prefix))
             body += helper.encode('utf-8')
+            if preview:
+                preview_token = (parse_qs(urlparse(self.path).query).get('__hatchery_preview') or [''])[0]
+                if re.fullmatch(r'[A-Za-z0-9-]{16,80}', preview_token):
+                    ready_script = '''<script>(()=>{const ready=()=>{if(parent!==window)parent.postMessage(
+{type:'hatchery-preview-ready',token:__TOKEN__},location.origin)};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',ready,{once:true});else ready();})();</script>'''
+                    body += ready_script.replace('__TOKEN__', json.dumps(preview_token)).encode('utf-8')
+            content_length = len(body)
         self.send_response(200)
         self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith("text/") else ""))
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(content_length))
         if cacheable:
-            self.send_header("Cache-Control", "public, max-age=300")
+            self.send_header("Cache-Control", cache_control)
             self.send_header("ETag", etag)
             self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
         else:
