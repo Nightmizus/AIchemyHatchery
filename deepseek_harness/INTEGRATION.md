@@ -215,6 +215,18 @@ index and existing previews/drafts before migration. This change does not config
 DNS, nginx path routing or TLS for the independent site domains.
 ## 持久任务与修复验证 2026 年 10 月
 
+### 浏览模板（2026-10-19）
+
+控制台提供 24 个模块的名称/用途搜索、分类筛选、只读布局示例、跨筛选多选（每次最多 8 个）、目标 HTML 页面选择与补充要求。选择和要求按账号保存在当前标签页的 sessionStorage，关闭或刷新可恢复；附件沿用聊天输入区，受理失败时不清空。登出清除页面内的账号状态。
+
+示例由独立的无脚本 sandbox iframe 展示，CSP 禁止脚本、表单和非样式网络资源，不加载网站后台或演示登录。模块代码只作结构参考：不调用旧编辑器的建页函数，不生成假详情页；账号、论坛、投票、报名等明确要求 AI 接通本站真实服务与权限检查，不能把演示状态当作已完成的功能。
+
+“交给 AI 添加”明确是本次修改操作，提交 `mode=full` 和所选 `activeFile`，不改变聊天的默认权限模式。仍通过原有鉴权、账号目录绑定及持久队列执行；浏览时无需等待其他任务，已有任务时新请求由服务器排队。提交期间锁定本次操作，收到有效 jobId/requestId 后才清空选择与已发送附件。失败保留输入；网络重试使用稳定请求编号，模板请求的待确认记录与普通聊天分开。关闭面板不会撤销已提交任务。
+
+回归：`scripts/template_browser_tests.py` 使用实际控制台、临时网站文件和真实请求校验接口，仅替换任务存储/执行端，不调用付费模型或修改生产网站。覆盖全部模块、无副作用预览、搜索与筛选、快速开关/重复点击、失败保留、排队时提交、断网及丢失确认重试、刷新、账号隔离、键盘与 320/390px 布局。与 `scripts/ai_queue_browser_tests.py`、`scripts/ai_markdown_browser_tests.py`、`scripts/preview_browser_tests.py` 一起回归。示例不是生成后网站功能已通过测试的保证；AI 生成的真实网站仍需针对实际内容验证。
+
+### 对话、队列与恢复
+
 最终回复与计划在浏览器中统一进行 Markdown 渲染，已有服务端历史在加载、轮询和刷新后同样生效；数据库仍保存原始报告，不修改用户消息或工具日志。段落、单换行、列表、标题、代码块、引用、表格和链接可正常显示，执行计划与后续上下文读取保留原始 Markdown。解析器为本地自托管的 markdown-it 15.0.3 UMD 构建（NPM `dist/browser/markdown-it.umd.min.js`；MIT 许可证保存在 `frontend/markdown-it.LICENSE.txt`），不依赖 CDN。禁用原生 HTML 与图片自动加载，沿用解析器的危险 URL 校验，外链使用 `noopener noreferrer`。系统提示要求在严格 JSON 的 summary/plan 字符串中使用 Markdown 和真实换行，不改变外层协议、网站权限或运行时限制。回归：`node scripts/ai_markdown_tests.mjs`、`scripts/ai_markdown_browser_tests.py`（真实控制台与历史渲染、受控提交接口、无模型调用）。
 
 异步与同步请求共用 PostgreSQL 的 `hatchery_ai_jobs`。客户端传入稳定的 `requestId`，相同请求重试返回同一任务；同账号按入队顺序执行，跨账号遵守 `HATCHERY_AI_MAX_PARALLEL`。浏览器只提交请求和读取历史，不能用 `messagesHtml` 覆盖已存会话。确认接收结果不会删除任务结果。
