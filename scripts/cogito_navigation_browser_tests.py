@@ -94,6 +94,10 @@ def main():
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 for name in PAGES:
                     page.goto(base + '/' + name + '.html', wait_until='networkidle')
+                    if name == 'admin':
+                        # Loopback is shorter than the public hostname. Reproduce
+                        # the actual address shown by the live admin page too.
+                        page.locator('#api-base').evaluate("e => e.textContent = 'https://cogito.aichemy.club/_api'")
                     for theme in ('cosmos', 'paper'):
                         page.evaluate('(theme) => COGITO_THEME.set(theme)', theme)
                         for width in WIDTHS:
@@ -133,6 +137,11 @@ def main():
                         }''')
                         assert result['scroll'] > result['client'] and result['left'] > 0, result
                         check_layout(page, 'graph scroll stays inside its container')
+                    if name == 'admin':
+                        page.set_viewport_size({'width': 320, 'height': 900})
+                        page.locator('#api-base').evaluate("e => e.textContent = 'https://aichemy.club/preview/' + 'a'.repeat(32) + '/_api'")
+                        check_layout(page, 'long preview backend address')
+                        layouts += 1
 
                 # A touch-enabled phone plus landscape rotation and actual theme clicks.
                 phone = browser.new_context(viewport={'width': 390, 'height': 844},

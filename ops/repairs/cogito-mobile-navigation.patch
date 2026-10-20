@@ -27,7 +27,15 @@ diff --git a/assets/css/style.css b/assets/css/style.css
  .stack>*+*{margin-top:1rem}
  .notice{
    border-left:3px solid var(--green);background:var(--green-soft);padding:.85rem 1rem;border-radius:0 var(--radius-sm) var(--radius-sm) 0;
-@@ -473,7 +477,7 @@
+@@ -409,6 +413,7 @@
+ .adminbar .wrap{display:flex;gap:1rem;flex-wrap:wrap;align-items:center;justify-content:space-between}
+ .adminbar a{color:#9fe0c4}
+ .panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:1.4rem}
++.panel code{overflow-wrap:anywhere}
+ .tabs{display:flex;flex-wrap:wrap;gap:.4rem;margin:1.4rem 0 1.2rem}
+ .tab{
+   border:1px solid var(--line-strong);background:transparent;border-radius:999px;padding:.4rem .95rem;cursor:pointer;font-size:.9rem
+@@ -473,7 +478,7 @@
  
  /* ---------- 人物关系图谱（genealogy.html） ---------- */
  .gx-layout{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr);gap:1.5rem;align-items:start}
@@ -36,7 +44,7 @@ diff --git a/assets/css/style.css b/assets/css/style.css
  
  .gx-figure{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:1rem}
  .gx-figure__scroll{overflow-x:auto}
-@@ -526,12 +530,13 @@
+@@ -526,12 +531,13 @@
  .gx-work__sub{font-family:var(--sans);font-size:.78rem;color:var(--muted)}
  .gx-work__note{font-size:.86rem;color:var(--muted);margin:.2rem 0 .4rem}
  .gx-links{list-style:none;padding:0;margin:.3rem 0 0;display:grid;gap:.3rem}
@@ -51,7 +59,7 @@ diff --git a/assets/css/style.css b/assets/css/style.css
  .gx-edgeitem{text-align:left;background:var(--card);border:1px solid var(--line);border-left:4px solid rgba(28,107,83,.4);border-radius:var(--radius-sm);padding:.75rem .9rem;cursor:pointer;display:grid;gap:.3rem}
  .gx-edgeitem:hover{background:#fff;border-color:var(--line-strong)}
  .gx-edgeitem.is-active{border-left-color:var(--ink);box-shadow:var(--shadow)}
-@@ -549,4 +554,4 @@
+@@ -549,4 +555,4 @@
  @media print{
    .gx-detail{position:static;max-height:none}
    .gx-edgelist{grid-template-columns:1fr 1fr}
