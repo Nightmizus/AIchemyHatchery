@@ -1,6 +1,68 @@
 # DeepSeek Harness integration
 
+## 历史错误回归（2026-10-19）
+
+本轮读取指定账号保留的任务和原生 v3 日志，不重发历史请求，不改线上聊天或网站数据。
+`scripts/history_audit_report.py` 将私有导出归类为不含消息正文、账号 ID、凭据或原始工具输出的报告；
+未识别错误会中止生成，避免漏统计。失败任务、工具调用失败、网站巡检发现分开计数。
+
+已固定的契约：
+
+- 数据库最多 8 个并发借用者，等待可用连接最多 30 秒，异常也归还槽位；这是数据库排队保护，不是 AI 总执行时限。
+- `replace_file` 按字面量写入 `$`，不会再把 JavaScript 的 `$$` 选择器变成 `$`；不匹配、损坏 JSON、越界写入仍拒绝。
+- `search_files` 支持本站根目录及递归子目录。浏览器接受本站相对路径，但仍拒绝其他网站、控制台路径和链接越界。
+- 浏览器用临时无痕上下文，[Chrome `--timeout`](https://developer.chrome.com/docs/automation-and-testing/headless-cli) 将 DOM/截图捕获等待限制为 15 秒；慢资源情况下返回的只是快照，不表示所有资源或交互验证成功。
+- 原生工具结果从 v3 的 `data.message.content` 读取，按调用 ID 匹配成功/失败；结束时没有结果的工具标记为未确认，不虚报成功。
+- 看门狗识别 v3 包装的进度块。没有最终答复、真实停滞和上游 HTTP 错误分别处理；400 不作为超时无限重放，429 不一概当余额耗尽。
+- 最终报告只取最后一条有效最终消息。不得把较早的过程说明、推理或内嵌 JSON 误认为完成；合法 Markdown 最终答复无需重新执行任务来补 JSON 包装。
+- 动态预览代理使用与预览 ID 生成器相同的 32 字符 URL-safe 范围，保留归属查询和控制台凭据隔离。
+
+回归入口（不调用真实模型）：
+
+```sh
+PYTHONPATH=scripts python -m unittest history_error_tests native_protocol_tests ai_jobs_tests ai_watchdog_tests ai_recovery_tests ai_context_tests site_security_tests site_runtime_tests site_files_tests personal_api_tests ai_web_tools_tests
+node scripts/site_file_tools_tests.mjs
+node scripts/site_runtime_tool_tests.mjs
+node scripts/site_tool_browser_tests.mjs
+python scripts/ai_queue_browser_tests.py
+python scripts/ai_markdown_browser_tests.py
+python scripts/preview_browser_tests.py
+python scripts/security_session_browser_tests.py
+```
+
+Python 使用项目依赖环境；数据库测试需要本机 PostgreSQL 测试二进制，浏览器测试需要 Playwright/Chromium，
+Node 浏览器测试可通过 `MIAODA_EDGE_BIN` 指定浏览器。
+`scripts/history_site_browser_tests.py /private/copied/cogito` 在临时数据库、Unix socket 和浏览器中复验指定网站副本，
+只在本机回环地址访问，测试账号和投稿均为新建假数据。它不等同于平台反向代理集成测试；后者由 `site_runtime_tests.py` 覆盖。
+历史巡检遗漏的空列表项通过 `ops/repairs/cogito-blank-list-items.patch` 单独修复，补丁只作用于该站 `assets/js/app.js`，
+不是全平台模板替换。部署前核对最新源文件并检查补丁能否干净应用，冲突时重新审查，不能覆盖用户后续编辑。
+
+仍需区分的外部限制：网关只给 `openai_error / INVALID_REQUEST` 时不能猜测真正原因；缺少原生搜索结果块时不能伪造搜索成功；
+非公网地址和跨域重定向拦截不能为了“全部通过”而解除。未完成的用户功能需求也不能因平台恢复机制修好就标成已交付。
+本轮代码与本站补丁均需另行授权提交/部署；验证不构成外部服务永不故障的保证。
+
 ## Website security audit
+
+Session isolation (2026-10-19): each audit request gets a server-derived
+`security-…` temporary conversation, distinct from the account's permanent
+website-building conversation. Success, failure and expired-lease recovery delete
+only this temporary conversation row. The job/report record remains for the
+security panel and idempotent retries; retrying a completed request must not
+recreate its deleted session. Building history, context and active/status APIs
+exclude both new audits and legacy audits previously attached to the building
+conversation. Legacy building conversation rows and their content are not deleted
+or rewritten. Audits do not read building history or update its revision.
+
+Each native audit attempt also runs with a fresh session ID and a private temporary
+`DSH_HOME` under `.deepseek-harness/security-sessions/`. Its process is closed before
+the temporary home is removed, including initialization, protocol and model-result
+failures. Audit recovery checkpoints remain in memory, not in building recovery
+directories. Only the security panel retains the report/progress. The unchanged
+building frontend is covered by `scripts/security_session_browser_tests.py`, using
+real isolated PostgreSQL and HTTP handlers to verify that audits never modify its
+draft, attachments, mode, history, busy state or context meter. Model configuration,
+global concurrency limits and the per-website filesystem lock remain shared safety
+infrastructure; this change does not enable concurrent edits during an audit.
 
 The 漏洞测试 panel audits the signed-in user's created website. `POST
 /api/security/run` accepts only an idempotency `requestId`; ownership, directory,
@@ -8,7 +70,8 @@ publish/preview route and read-only mode are selected by the server. Jobs share
 the durable AI queue, per-account serialization, model settings, personal API
 configuration, usage tracking and stalled-session recovery. `GET
 /api/security/latest` returns only that account's latest report, even after a
-different tab acknowledges completion. The report is also retained in chat history.
+different tab acknowledges completion. Reports are retained only in the security
+module, never in the website-building chat history.
 
 `site_security.py` performs bounded anonymous GETs to fixed paths below the own
 site's `/pages/<slug>/` or `/preview/<id>/` prefix on the local application. It

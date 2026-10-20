@@ -11,9 +11,11 @@ import signal
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -202,6 +204,20 @@ def reset_dsh_session(dsh_home: Path, project_root: Path, session_id: str) -> bo
     return True
 
 
+@contextmanager
+def _audit_runtime_environment(root: Path, mode: str, env: dict):
+    if mode != 'security':
+        yield env
+        return
+    # A whole private runtime home isolates native session files, locks, caches
+    # and logs. Exit order stops the process before deleting its temporary home,
+    # including initialization failures, watchdog errors and failed attempts.
+    parent = root / '.deepseek-harness' / 'security-sessions'
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix='audit-', dir=parent) as folder:
+        yield {**env, 'DSH_HOME': folder}
+
+
 # 漏洞（密钥经子进程环境泄露）：原先把整份服务端环境（NEON_DATABASE_URL、SSO_SECRET、
 # EMAIL_PASS、另一家厂商的 API Key）复制给第三方运行时；这里只保留本次任务需要的那一个 Key。
 _SENSITIVE_ENV = re.compile(r"SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|DATABASE_URL|_PASS$|_TOKEN$|API_KEY$|_ENCRYPTION_KEY$")
@@ -241,6 +257,8 @@ def _redact(text: str, secrets: tuple[str, ...]) -> str:
 
 def _extract_json_object(text: str) -> dict | None:
     candidate = text.strip()
+    if candidate.startswith('```') and candidate.endswith('```'):
+        candidate = re.sub(r'^```(?:json)?\s*\n?', '', candidate, count=1).removesuffix('```').strip()
     if not candidate:
         return None
     try:
@@ -248,14 +266,27 @@ def _extract_json_object(text: str) -> dict | None:
         return value if isinstance(value, dict) else None
     except json.JSONDecodeError:
         pass
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", candidate):
-        try:
-            value, _ = decoder.raw_decode(candidate[match.start() :])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
+    # Do not scan arbitrary nested objects: an unescaped {"ok":true} inside
+    # summary used to replace the entire report with a false generic success.
+    # Recover only the known outer summary string and a strictly valid report
+    # tail. No executable operations are inferred from malformed text.
+    opening = re.match(r'^\{\s*"summary"\s*:\s*"', candidate)
+    if opening:
+        for end in re.finditer(r'"\s*,\s*"(?:risk|checks|plan|siteOperations|askPresets|question)"\s*:', candidate[opening.end():]):
+            boundary = opening.end() + end.start()
+            tail_start = candidate.index(',', boundary) + 1
+            try:
+                tail = json.loads('{' + candidate[tail_start:])
+                if not set(tail) <= {'risk', 'checks', 'plan', 'siteOperations', 'askPresets', 'question'}:
+                    continue
+                raw = candidate[opening.end():boundary]
+                # Preserve already escaped quotes/backslashes, escaping only
+                # bare interior quotes (e.g. JSON examples in Markdown).
+                repaired = re.sub(r'\\.|"', lambda m: '\\"' if m.group() == '"' else m.group(), raw, flags=re.S)
+                summary = json.loads('"' + repaired + '"', strict=False)
+                return {**tail, 'summary': summary, 'siteOperations': [], 'reportFormatRecovered': True}
+            except (ValueError, TypeError):
+                continue
     return None
 
 
@@ -326,6 +357,7 @@ class _JsonRpcRuntime:
         self.stderr: deque[str] = deque(maxlen=200)
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
+        self.reader_threads: list[threading.Thread] = []
 
     def __enter__(self) -> "_JsonRpcRuntime":
         self.start()
@@ -350,8 +382,10 @@ class _JsonRpcRuntime:
             creationflags=creation_flags,
             start_new_session=os.name != 'nt',
         )
-        threading.Thread(target=self._read_stdout, name="deepseek-harness-rpc", daemon=True).start()
-        threading.Thread(target=self._read_stderr, name="deepseek-harness-stderr", daemon=True).start()
+        for reader, name in ((self._read_stdout, 'deepseek-harness-rpc'), (self._read_stderr, 'deepseek-harness-stderr')):
+            thread = threading.Thread(target=reader, name=name, daemon=True)
+            self.reader_threads.append(thread)
+            thread.start()
 
     def close(self) -> None:
         process = self.process
@@ -382,6 +416,11 @@ class _JsonRpcRuntime:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+            for thread in self.reader_threads:
+                thread.join(timeout=2)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
             self.process = None
 
     def request(self, method: str, params: dict | None, timeout: float | None = None) -> object:
@@ -500,6 +539,7 @@ class _EventProjector:
         self.pending_text: list[str] = []
         self.analysis_sequence = 0
         self.trace: list[dict] = []
+        self.trace_by_call: dict[str, dict] = {}
 
     def accept(self, event: dict) -> None:
         event_type = event.get("type")
@@ -516,22 +556,27 @@ class _EventProjector:
             event_id = f"dsh-{call_id}"
             detail = self._tool_detail(name, data.get("arguments"))
             self.tool_events[call_id] = (event_id, name, detail)
-            self.trace.append({"tool": name, "status": "running", "detail": detail})
+            item = {"tool": name, "status": "running", "detail": detail}
+            self.trace.append(item)
+            self.trace_by_call[call_id] = item
             self._report(event_id, "tool", TOOL_LABELS.get(name, name or "网站工具"), detail, "running", name)
             return
         if event_type == "tool/result":
-            call_id = str(data.get("callId") or "")
-            recorded = self.tool_events.get(call_id)
-            if not recorded:
-                return
-            event_id, name, detail = recorded
-            failed = bool(data.get("isError"))
-            for item in self.trace:
-                if item.get("tool") == name and item.get("status") == "running" and item.get("detail") == detail:
-                    item["status"] = "failed" if failed else "done"
-                    break
-            completed_detail = f"{detail} · 调用失败" if failed else detail
-            self._report(event_id, "tool", TOOL_LABELS.get(name, name or "网站工具"), completed_detail, "failed" if failed else "done", name)
+            message = data.get('message') if isinstance(data.get('message'), dict) else {}
+            blocks = message.get('content') if isinstance(message.get('content'), list) else []
+            results = [block for block in blocks if isinstance(block, dict) and block.get('type') == 'tool-result']
+            if not results:
+                results = [data]  # Older runtime protocol.
+            for result in results:
+                call_id = str(result.get('toolCallId') or result.get('callId') or '')
+                recorded = self.tool_events.get(call_id)
+                if not recorded:
+                    continue
+                event_id, name, detail = recorded
+                failed = bool(result.get('isError'))
+                self.trace_by_call[call_id]['status'] = 'failed' if failed else 'done'
+                completed_detail = f"{detail} · 调用失败" if failed else detail
+                self._report(event_id, "tool", TOOL_LABELS.get(name, name or "网站工具"), completed_detail, "failed" if failed else "done", name)
 
     def _flush_analysis(self) -> None:
         text = "".join(self.pending_text).strip()
@@ -584,16 +629,21 @@ class _EventProjector:
 
 def _final_response(events: list[dict]) -> str:
     for event in reversed(events):
+        if event.get('type') in ('tool/call', 'tool/result'):
+            return ''  # Earlier commentary is not a report of later work.
         if event.get("type") != "assistant/message":
             continue
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
         message = data.get("message") if isinstance(data.get("message"), dict) else data
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
-            continue
+            return ''
+        if any(isinstance(block, dict) and block.get('type') == 'tool-call' for block in content):
+            return ''
         parts = [str(block.get("text", "")) for block in content if isinstance(block, dict) and block.get("type") == "text"]
-        if parts:
-            return "".join(parts)
+        # Never publish reasoning or use an older reply when the model stops
+        # after reasoning only. That is a missing final answer, not completion.
+        return "".join(parts)
     return ""
 
 
@@ -642,6 +692,45 @@ def _upstream_failure(events: list[dict]) -> str:
                 if message:
                     return message
     return ""
+
+
+def _upstream_error(events: list[dict]) -> HarnessRuntimeError:
+    """Expose stable codes, never a gateway body, credentials or a guessed cause."""
+    detail = {}
+    for event in reversed(events):
+        data = event.get('data') if isinstance(event.get('data'), dict) else {}
+        if event.get('type') == 'turn/end':
+            reason = data.get('reason') if isinstance(data.get('reason'), dict) else {}
+            if isinstance(reason.get('error'), dict):
+                detail = reason['error']
+                break
+        stream = data.get('stream') if isinstance(data.get('stream'), list) else [data.get('chunk', {})]
+        for item in reversed(stream):
+            chunk = item.get('chunk', item) if isinstance(item, dict) else {}
+            reason = chunk.get('reason') if isinstance(chunk.get('reason'), dict) else {}
+            if chunk.get('type') == 'finish' and isinstance(reason.get('failure'), dict):
+                detail = reason['failure']
+                break
+        if detail:
+            break
+    status = detail.get('status')
+    code = str(detail.get('code') or '')
+    if not re.fullmatch(r'[A-Z0-9_]{1,48}', code):
+        code = ''
+    tag = '，'.join([*([f'HTTP {status}'] if isinstance(status, int) and 100 <= status <= 599 else []), *([code] if code else [])])
+    tag = f'（{tag}）' if tag else ''
+    message = _upstream_failure(events).lower()
+    if any(word in message for word in ('insufficient', 'quota', 'balance', 'billing', 'usage limit', '余额', '额度', '配额', '欠费')):
+        return HarnessRuntimeError(f'AI 服务上游配额已用尽{tag}；请检查服务配额或账户余额', reason='upstream_quota')
+    if status in (401, 403) or code == 'AUTH':
+        return HarnessRuntimeError(f'AI 服务上游拒绝认证或授权{tag}；请检查 API Key、模型访问权限或服务策略', reason='upstream_auth')
+    if status == 400 or code == 'INVALID_REQUEST':
+        return HarnessRuntimeError(f'AI 服务上游拒绝了请求{tag}；网关未提供可确认的具体原因。此错误不是会话超时，未自动重复执行', reason='upstream_invalid_request')
+    if status == 429 or code == 'RATE_LIMIT':
+        return HarnessRuntimeError(f'AI 服务上游限流{tag}；请稍后重试，不代表余额耗尽', reason='upstream_rate_limit')
+    transient = (isinstance(status, int) and 500 <= status <= 599) or code in {'TRANSPORT', 'TIMEOUT', 'SERVER'}
+    return HarnessRuntimeError(f'AI 服务上游调用失败{tag}；已保存文件保留', recoverable=transient,
+                               reason='upstream_transient' if transient else 'upstream_error')
 
 
 def _token_usage(events: list[dict]) -> dict | None:
@@ -793,7 +882,8 @@ def run_deepseek_harness(
     if runtime_token:
         system_prompt += DYNAMIC_SITE_RULES
     dsh_home = (root / ".deepseek-harness" / "home").resolve()
-    dsh_home.mkdir(parents=True, exist_ok=True)
+    if mode != 'security':
+        dsh_home.mkdir(parents=True, exist_ok=True)
     model = api_config["model"] if api_config else os.environ.get(provider["model_env"], "").strip() or provider["default_model"]
     reasoning = os.environ.get(provider["effort_env"], "").strip() or provider["default_effort"]
     # Only RPC acknowledgements are bounded. Useful ongoing work has no total
@@ -842,11 +932,13 @@ def run_deepseek_harness(
     events: list[dict] = []
     projector = _EventProjector(progress)
     # 用户对话 ID 不变；每次原生尝试使用独立 ID，不与旧磁盘会话/锁冲突。
-    session_id = dsh_session_id(runtime_session_key(session_key, api_config)) + '-' + uuid.uuid4().hex[:12]
+    session_id = ('security-' + uuid.uuid4().hex if mode == 'security' else
+                  dsh_session_id(runtime_session_key(session_key, api_config)) + '-' + uuid.uuid4().hex[:12])
     # 不删除其他尝试的日志；历史和检查点由服务端 prompt 负责恢复。
-    reset_dsh_session(dsh_home, root, session_id)
+    if mode != 'security':
+        reset_dsh_session(dsh_home, root, session_id)
 
-    with personal_api.search_transport(env, None if mode == 'security' else api_config) as runtime_env, _JsonRpcRuntime(
+    with _audit_runtime_environment(root, mode, env) as isolated_env, personal_api.search_transport(isolated_env, None if mode == 'security' else api_config) as runtime_env, _JsonRpcRuntime(
         args, root, runtime_env, rpc_timeout,
         secrets=(key, runtime_env["HATCHERY_DEEPSEEK_SEARCH_API_KEY"], runtime_token),
     ) as runtime:
@@ -911,9 +1003,10 @@ def run_deepseek_harness(
                 event_type = str(event.get('type') or '')
                 attempt_data = event.get('data') if isinstance(event.get('data'), dict) else {}
                 attempt_stream = attempt_data.get('stream') if isinstance(attempt_data.get('stream'), list) else []
+                attempt_chunks = [item.get('chunk', item) for item in attempt_stream if isinstance(item, dict)]
                 attempt_progress = event_type == 'assistant/attempt' and any(
                     isinstance(chunk, dict) and chunk.get('type') in ('text-delta', 'reasoning-delta', 'tool-call', 'tool-call-delta', 'finish')
-                    for chunk in attempt_stream)
+                    for chunk in attempt_chunks)
                 if event_type in ('request/context', 'assistant/message', 'assistant/chunk', 'turn/end') or event_type.startswith('tool/') or attempt_progress:
                     received = True
                 if event.get("type") == "agent/inbox/spliced":
@@ -941,16 +1034,19 @@ def run_deepseek_harness(
     if finish_reason == 'max-tokens':
         raise HarnessRuntimeError('AI 输出达到长度上限，任务未完整完成；已保存的文件仍保留，请检查后继续')
     if finish_reason not in {None, "completed"}:
-        failure = _upstream_failure(events)
-        if failure:
-            lowered = failure.lower()
-            if any(keyword in lowered for keyword in ("usage limit", "quota", "insufficient", "balance", "billing", "429", "rate limit", "exceeded", "余额", "额度", "配额", "欠费")):
-                raise HarnessRuntimeError(f"AI 服务上游配额已用尽（{provider['label']} 返回额度类错误）：等待配额重置、购买额外用量或更换 API Key 后即可恢复")
-            raise HarnessRuntimeError(f"AI 服务上游调用失败：{_redact(failure[:200], (key,))}{runtime._diagnostics()}")
-        raise HarnessRuntimeError(f"DeepSeek Harness 未正常完成网站任务（{finish_reason}）{runtime._diagnostics()}")
+        error = _upstream_error(events)
+        error.recovery_checkpoint = projector.trace[-20:]
+        error.partial_usage = _token_usage(events)
+        raise error
     result = _extract_json_object(response)
-    if result is None:
-        error = HarnessRuntimeError("DeepSeek Harness 会话未返回完整结果", recoverable=True, reason='incomplete_response')
+    if result is None and response.strip() and not response.lstrip().startswith(('{', '[', '```json')):
+        # A real final Markdown answer needs no second execution just to wrap
+        # it in JSON. Never take reasoning or pre-tool commentary as the final.
+        result = {'summary': response, 'plan': response if mode == 'plan' else '', 'risk': 'medium', 'checks': []}
+    if not isinstance(result, dict) or not isinstance(result.get('summary'), str) or not result['summary'].strip():
+        reason = 'empty_final_response' if not response.strip() else 'invalid_final_report'
+        error = HarnessRuntimeError('AI 上游已结束，但没有返回最终答复' if reason == 'empty_final_response' else 'AI 最终报告格式不完整，不能确认本轮完成',
+                                    recoverable=True, reason=reason)
         error.recovery_checkpoint = projector.trace[-20:]
         error.partial_usage = _token_usage(events)
         raise error

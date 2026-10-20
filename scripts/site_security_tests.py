@@ -151,10 +151,82 @@ class SecurityTests(unittest.TestCase):
                 self.assertEqual(call['context']['security']['target']['path'], f'/preview/{PREVIEW}/')
                 self.assertNotIn('ignore scope', call['prompt'])
                 self.assertNotIn('modify every site', call['prompt'])
+                self.assertTrue(call['session_key'].startswith('security:run-'))
+                self.assertNotEqual(call['session_key'], USER['id'])
             self.assertEqual(result['security']['model'], own['model'])
             self.assertEqual(before, site_files.file_manifest(f.directory))
             self.assertTrue(any(event.get('security') for event in events))
             self.assertNotIn('private-key', json.dumps(result))
+            self.assertFalse((f.root / '.ai-job-results/recoveries').exists())
+
+    def test_worker_never_loads_building_conversation_for_an_audit(self):
+        payload = {'kind': 'security', 'mode': 'security', 'prompt': site_security.PROMPT,
+                   'context': {}, 'includeSite': True, 'attachments': [], 'chosenPresets': [], 'presetSnippets': []}
+        job = {'id': 'job-' + '1' * 24, 'user_id': USER['id'], 'session_id': ai_jobs.conversation_id(USER['id']),
+               'seq': 2, 'payload_json': json.dumps(payload)}
+        with patch.object(server.AI_JOB_STORE, 'context', side_effect=AssertionError('must not read building history')) as context, \
+                patch.object(server.PERSONAL_API_STORE, 'load', return_value=None), \
+                patch.object(server.AIchemyHatcheryHandler, 'run_ai_harness', return_value={'summary': 'audit report'}) as model, \
+                patch.object(server, 'record_ai_usage'):
+            self.assertEqual(server.execute_durable_ai_job(job, None)['summary'], 'audit report')
+            context.assert_not_called()
+            self.assertEqual(model.call_args.args[7], [])
+
+    def test_audit_runtime_home_is_disposable_on_success_and_every_failure_stage(self):
+        homes, sessions = [], []
+        owner = self
+        class Runtime:
+            def __init__(self, args, root, env, timeout, **kwargs):
+                self.home = Path(env['DSH_HOME']); homes.append(self.home)
+                self.events = iter([])
+            def __enter__(self):
+                (self.home / 'cache').mkdir()
+                (self.home / 'cache/private-runtime-data').write_text('audit data')
+                if stage == 'enter': raise adapter.HarnessRuntimeError('enter failed')
+                return self
+            def __exit__(self, *args):
+                owner.assertTrue(self.home.exists(), 'process must stop before temporary home is deleted')
+            def _diagnostics(self): return ''
+            def request(self, method, params, *args):
+                if stage == 'initialize' and method == 'initialize': raise adapter.HarnessRuntimeError('initialize failed')
+                if method == 'session/prompt':
+                    self.sid = params['sessionId']; sessions.append(self.sid)
+                    (self.home / self.sid).mkdir()
+                    if stage == 'prompt': raise adapter.HarnessRuntimeError('prompt failed')
+                    text = '{"summary":' if stage == 'result' else json.dumps({'summary': 'independent audit'})
+                    self.events = iter([
+                        {'method': 'session.event', 'params': {'sessionId': self.sid, 'event': {
+                            'type': 'assistant/message', 'data': {'message': {'content': [{'type': 'text', 'text': text}]}}}}},
+                        {'method': 'session.status', 'params': {'sessionId': self.sid, 'status': 'idle'}},
+                    ])
+                    return {'messageId': 'message-1'}
+            def next_notification(self, deadline):
+                if stage == 'stream': raise adapter.HarnessRuntimeError('stream failed', recoverable=True)
+                return next(self.events)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {'MIAODA_LLM': 'deepseek', 'DEEPSEEK_API_KEY': 'fixture-key'}), \
+                patch.object(adapter, 'resolve_harness_binary', return_value=Path('/fixture/runtime')), \
+                patch.object(adapter, '_JsonRpcRuntime', Runtime), \
+                patch.object(adapter, 'reset_dsh_session', side_effect=AssertionError('must not touch building session')):
+            root = Path(directory); (root / 'deepseek_harness').mkdir()
+            for name in ('site-agent.patch.yml', 'site-tools.mjs', 'security-audit.patch.yml'):
+                (root / 'deepseek_harness' / name).touch()
+            building_home = root / '.deepseek-harness/home'
+            building_home.mkdir(parents=True)
+            sentinel = building_home / 'building-session.jsonl'; sentinel.write_text('keep the building session')
+            for stage in ('success', 'enter', 'initialize', 'prompt', 'stream', 'result', 'success'):
+                with self.subTest(stage=stage):
+                    call = lambda: adapter.run_deepseek_harness(root=root, prompt='audit', context={}, attachments=[],
+                        workspace=root, preview_port=1, mode='security', session_key=USER['id'])
+                    if stage == 'success': self.assertEqual(call()['summary'], 'independent audit')
+                    else:
+                        with self.assertRaises(adapter.HarnessRuntimeError): call()
+                    self.assertFalse(homes[-1].exists())
+                    self.assertEqual(list((root / '.deepseek-harness/security-sessions').iterdir()), [])
+                    self.assertEqual(sentinel.read_text(), 'keep the building session')
+            self.assertEqual(len(set(homes)), len(homes))
+            self.assertEqual(len(set(sessions)), len(sessions))
+            self.assertTrue(all(sid.startswith('security-') for sid in sessions))
 
     def test_adapter_forces_readonly_and_disables_network_tools_and_capability(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'MIAODA_LLM': 'deepseek', 'DEEPSEEK_API_KEY': 'fixture-key'}), \
@@ -228,6 +300,83 @@ class SecurityQueueTests(unittest.TestCase):
             store.finish(first['jobId'], {'summary': '## Audit', 'security': {'target': {'path': '/pages/owned/'}}})
             store.ack('one', first['jobId'])
             self.assertEqual(store.latest_security('one')['result']['summary'], '## Audit')
+
+    def test_audit_sessions_are_separate_ephemeral_and_retries_do_not_recreate_them(self):
+        with LocalPostgres() as pg:
+            store = ai_jobs.JobStore(pg.db)
+            with pg.db() as conn, conn.cursor() as cur:
+                cur.execute('CREATE TABLE hatchery_ai_chat_sessions(id TEXT PRIMARY KEY,user_id TEXT,title TEXT,messages_html TEXT,created_at TEXT,updated_at TEXT)')
+            store.initialize()
+            building = store.enqueue({'id': 'one'}, {'prompt': 'build my site', 'mode': 'full'}, str(uuid.uuid4()))
+            store.claim(2); store.finish(building['jobId'], {'summary': 'building answer'}); store.ack('one', building['jobId'])
+            before = store.session('one', building['sessionId'])
+            payload = {'kind': 'security', 'mode': 'security', 'prompt': 'audit without building history'}
+            first = store.enqueue({'id': 'one'}, payload, str(uuid.uuid4()))
+            second = store.enqueue({'id': 'one'}, payload, str(uuid.uuid4()))
+            self.assertEqual(len({building['sessionId'], first['sessionId'], second['sessionId']}), 3)
+            self.assertEqual(store.active('one'), [])
+            self.assertEqual(store.queue_status('one', 2)['ownQueued'], 0)
+            self.assertEqual(store.session('one', building['sessionId']), before)
+            self.assertIsNotNone(store.session('one', first['sessionId']))
+            self.assertEqual(store.claim(2)['id'], first['jobId'])
+            store.finish(first['jobId'], {'summary': 'audit report'})
+            self.assertIsNone(store.session('one', first['sessionId']))
+            self.assertIsNotNone(store.session('one', second['sessionId']))
+            retry = store.enqueue({'id': 'one'}, payload, first['requestId'])
+            self.assertEqual(retry['jobId'], first['jobId'])
+            self.assertEqual(retry['result']['summary'], 'audit report')
+            self.assertIsNone(store.session('one', first['sessionId']))
+            self.assertIsNone(store.get('two', first['jobId']))
+            self.assertEqual(store.session('one', building['sessionId']), before)
+
+    def test_failure_and_expired_lease_delete_only_the_temporary_session(self):
+        with LocalPostgres() as pg:
+            store = ai_jobs.JobStore(pg.db)
+            with pg.db() as conn, conn.cursor() as cur:
+                cur.execute('CREATE TABLE hatchery_ai_chat_sessions(id TEXT PRIMARY KEY,user_id TEXT,title TEXT,messages_html TEXT,created_at TEXT,updated_at TEXT)')
+            store.initialize()
+            payload = {'kind': 'security', 'mode': 'security', 'prompt': 'audit'}
+            for terminal in ('failed', 'interrupted'):
+                job = store.enqueue({'id': 'one'}, payload, str(uuid.uuid4()))
+                self.assertIsNone(store.session('one', ai_jobs.conversation_id('one')))
+                store.claim(1)
+                if terminal == 'failed': store.finish(job['jobId'], error='fixture failure')
+                else:
+                    with pg.db() as conn, conn.cursor() as cur:
+                        cur.execute("UPDATE hatchery_ai_jobs SET lease_until=now()-interval '6 minutes' WHERE id=%s", (job['jobId'],))
+                    self.assertIn(job['jobId'], store.recover_expired())
+                self.assertIsNone(store.session('one', job['sessionId']))
+                self.assertEqual(store.latest_security('one')['status'], terminal)
+                self.assertEqual(store.active('one'), [])
+            # A late result can repair an interrupted report, not recreate its session.
+            store.finish(job['jobId'], {'summary': 'late report'})
+            self.assertIsNone(store.session('one', job['sessionId']))
+            self.assertEqual(store.latest_security('one')['result']['summary'], 'late report')
+
+    def test_legacy_audits_are_hidden_without_deleting_or_updating_building_session(self):
+        with LocalPostgres() as pg:
+            store = ai_jobs.JobStore(pg.db)
+            with pg.db() as conn, conn.cursor() as cur:
+                cur.execute('CREATE TABLE hatchery_ai_chat_sessions(id TEXT PRIMARY KEY,user_id TEXT,title TEXT,messages_html TEXT,created_at TEXT,updated_at TEXT)')
+            store.initialize()
+            chat = store.enqueue({'id': 'one'}, {'prompt': 'build request', 'mode': 'full'}, str(uuid.uuid4()))
+            store.claim(1); store.finish(chat['jobId'], {'summary': 'original building answer'})
+            store.ack('one', chat['jobId'])
+            snapshot = store.session('one', chat['sessionId'])
+            payload = {'kind': 'security', 'mode': 'security', 'prompt': 'OLD AUDIT MUST NOT ENTER BUILDING CONTEXT'}
+            audit = store.enqueue({'id': 'one'}, payload, str(uuid.uuid4()))
+            with pg.db() as conn, conn.cursor() as cur:
+                cur.execute('UPDATE hatchery_ai_jobs SET session_id=%s WHERE id=%s', (chat['sessionId'], audit['jobId']))
+                cur.execute('DELETE FROM hatchery_ai_chat_sessions WHERE id=%s', (audit['sessionId'],))
+            self.assertEqual(store.session('one', chat['sessionId']), snapshot)
+            self.assertEqual(store.active('one'), [])
+            store.claim(1); store.finish(audit['jobId'], {'summary': 'OLD AUDIT REPORT'})
+            self.assertEqual(store.session('one', chat['sessionId']), snapshot)
+            history = store.context('one', chat['sessionId'], audit['sequence'] + 1)
+            self.assertIn('original building answer', json.dumps(history))
+            self.assertNotIn('AUDIT', json.dumps(history))
+            self.assertEqual(store.enqueue({'id': 'one'}, payload, audit['requestId'])['jobId'], audit['jobId'])
+            self.assertEqual(store.latest_security('one')['result']['summary'], 'OLD AUDIT REPORT')
 
 
 if __name__ == '__main__': unittest.main()

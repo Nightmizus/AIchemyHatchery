@@ -59,6 +59,10 @@ def main():
                                            'messagesHtml': ai_jobs.render_history('', jobs)}}
                 elif path == '/api/ai/run/active': payload = {'jobs': jobs}
                 elif path == '/api/ai/run/ack': payload = {'ok': True}
+                elif path == '/api/ai/run/status':
+                    # The plan test queues a synthetic job; polling must not
+                    # fall through to FileFixture's unrelated database stub.
+                    payload = {**calls[-1], 'jobId': 'job-' + '3' * 24, 'status': 'queued', 'events': []}
                 elif path == '/api/ai/run' and route.request.method == 'POST':
                     request = route.request.post_data_json; calls.append(request)
                     payload = {**request, 'jobId': 'job-' + '3' * 24, 'status': 'queued', 'createdAt': '2026-10-16T00:00:00Z'}

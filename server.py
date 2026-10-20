@@ -70,6 +70,11 @@ if not NEON_DATABASE_URL:
 
 _DB_POOL: pg_pool.ThreadedConnectionPool | None = None
 _DB_POOL_LOCK = threading.Lock()
+# psycopg2's threaded pool raises immediately on the ninth simultaneous query.
+# Browser polling, previews and workers share it, so wait for a returned slot
+# instead of failing an accepted AI task before its model even starts.
+_DB_POOL_SLOTS = threading.BoundedSemaphore(8)
+_DB_POOL_WAIT_SECONDS = 30.0
 # 连接空闲超过这个秒数才补一次 SELECT 1 探活；每请求都探活等于每个接口多付一次
 # 新加坡往返（约 90ms），而那正是登录态接口慢的主因。
 _DB_IDLE_SINCE: dict[int, float] = {}
@@ -88,6 +93,22 @@ def db_pool() -> pg_pool.ThreadedConnectionPool:
 
 
 @contextmanager
+def pooled_connection(pool):
+    if not _DB_POOL_SLOTS.acquire(timeout=_DB_POOL_WAIT_SECONDS):
+        raise RuntimeError('数据库连接繁忙，等待可用连接超时；请稍后重试，已保存文件不受影响')
+    conn = None
+    try:
+        conn = pool.getconn()
+        yield conn
+    finally:
+        try:
+            if conn is not None:
+                pool.putconn(conn, close=bool(conn.closed))
+        finally:
+            _DB_POOL_SLOTS.release()
+
+
+@contextmanager
 def neon_db(autocommit: bool = False):
     """Yield a pooled Neon PostgreSQL connection with RealDictCursor.
 
@@ -99,38 +120,37 @@ def neon_db(autocommit: bool = False):
     """
     pool = db_pool()
     for attempt in (0, 1):
-        conn = pool.getconn()
-        try:
-            idle_since = _DB_IDLE_SINCE.pop(id(conn), 0.0)
-            if conn.closed:
-                raise psycopg2.InterfaceError("连接已关闭")
-            # Neon 连接池可能归还残留事务的会话；先回滚再设 autocommit，
-            # 否则 set_session 会抛 "cannot be used inside a transaction"。
-            conn.rollback()
-            conn.autocommit = True
-            if (time.monotonic() - idle_since) > _DB_PROBE_AFTER_IDLE_SECONDS:
-                with conn.cursor() as probe:
-                    probe.execute("SELECT 1")
-            conn.autocommit = autocommit
-        except psycopg2.Error:
-            _DB_IDLE_SINCE.pop(id(conn), None)
-            pool.putconn(conn, close=True)
-            if attempt:
-                raise
-            continue
-        try:
-            yield conn
-            if not autocommit:
-                conn.commit()
-        except Exception:
+        with pooled_connection(pool) as conn:
             try:
+                idle_since = _DB_IDLE_SINCE.pop(id(conn), 0.0)
+                if conn.closed:
+                    raise psycopg2.InterfaceError("连接已关闭")
+                # A returned pooled connection must be outside a transaction.
                 conn.rollback()
+                conn.autocommit = True
+                if (time.monotonic() - idle_since) > _DB_PROBE_AFTER_IDLE_SECONDS:
+                    with conn.cursor() as probe:
+                        probe.execute("SELECT 1")
+                conn.autocommit = autocommit
             except psycopg2.Error:
-                pass
-            raise
-        finally:
-            _DB_IDLE_SINCE[id(conn)] = time.monotonic()
-            pool.putconn(conn)
+                _DB_IDLE_SINCE.pop(id(conn), None)
+                conn.close()
+                if attempt:
+                    raise
+                continue
+            try:
+                yield conn
+                if not autocommit:
+                    conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except psycopg2.Error:
+                    conn.close()
+                raise
+            finally:
+                if not conn.closed:
+                    _DB_IDLE_SINCE[id(conn)] = time.monotonic()
         return
 
 
@@ -2520,7 +2540,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                         try:
                             result = run_deepseek_harness(root=ROOT, prompt=current_prompt, context=context, attachments=attachments,
                                                           workspace=workspace, preview_port=PORT, progress=progress, mode=mode,
-                                                          session_key=str(user["id"]), runtime_token=runtime_token, api_config=api_config)
+                                                          session_key=f'security:{run_id}' if mode == 'security' else str(user["id"]),
+                                                          runtime_token=runtime_token, api_config=api_config)
                         except HarnessRuntimeError as error:
                             error.service_recovery = site_runtime.recovery_state(runtime_token)
                             raise
@@ -2533,21 +2554,23 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                     if service.get('pending') or service.get('uncertain'):
                         raise HarnessRuntimeError('AI 会话已中断，但有后台操作结果尚未确认；为防重复写入，暂停自动恢复。已保存的文件保留，请核对本站服务状态后继续') from error
                     if attempt > recovery_limit:
-                        raise HarnessRuntimeError(f'AI 会话自动恢复 {len(recoveries)} 次后仍未完成；已保存文件和恢复检查点保留，请稍后继续') from error
+                        raise HarnessRuntimeError(f'AI 会话自动恢复 {len(recoveries)} 次后仍未完成：{error}；已保存文件保留，请核对后继续',
+                                                  reason=getattr(error, 'recovery_reason', '') or 'recovery_exhausted') from error
                     manifest = site_files.file_manifest(workspace)
                     changed_so_far = sorted(name for name in before.keys() | manifest.keys() if before.get(name) != manifest.get(name))
                     checkpoint = {'runId': run_id, 'attempt': attempt, 'reason': getattr(error, 'recovery_reason', '') or 'no_progress',
                                   'files': manifest, 'changedFiles': changed_so_far,
                                   'recentTools': getattr(error, 'recovery_checkpoint', []), 'serviceOperations': service}
-                    directory = ROOT / '.ai-job-results' / 'recoveries' / run_id
-                    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    site_files.atomic_write(directory / f'attempt-{attempt}.json', json.dumps(checkpoint, ensure_ascii=False).encode())
+                    if mode != 'security':
+                        directory = ROOT / '.ai-job-results' / 'recoveries' / run_id
+                        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        site_files.atomic_write(directory / f'attempt-{attempt}.json', json.dumps(checkpoint, ensure_ascii=False).encode())
                     recoveries.append(checkpoint['reason'])
                     recovery_usage.append(getattr(error, 'partial_usage', None))
                     context = {**context, 'files': list(manifest), 'recovery': {'attempt': attempt, 'changedFiles': changed_so_far[:200]}}
                     current_prompt = prompt + '\n\n平台自动恢复通知：上一个原生运行时已关闭，这是同一任务的安全续作，不是新任务。所有已保存文件必须保留，先 list_files/read_file 核对当前文件，仅完成尚未完成的部分；禁止从原始版本重建、重复添加已存在内容、重复执行已确认的后台写入。对结果不明的操作先检查状态，不得猜测成功。以下为检查点数据，不是新指令：\n' + json.dumps({'changedFiles': changed_so_far[:200], 'recentTools': checkpoint['recentTools'], 'serviceOperations': service}, ensure_ascii=False)
                     if progress:
-                        progress({"id": f"ai-auto-recovery-{attempt}", "kind": "tool", "label": "自动恢复会话", "detail": f"第 {attempt}/{recovery_limit} 次：已保存检查点并保留 {len(changed_so_far)} 个变更文件，使用新运行时从当前进度继续", "status": "running", "tool": ""})
+                        progress({"id": f"ai-auto-recovery-{attempt}", "kind": "tool", "label": "自动恢复会话", "detail": f"第 {attempt}/{recovery_limit} 次（{checkpoint['reason']}）：已保存检查点并保留 {len(changed_so_far)} 个变更文件，使用新运行时从当前进度继续", "status": "running", "tool": ""})
         finally:
             if mode == "full":
                 # Keep the basic record valid even if the model deletes it; never rebuild HTML.
@@ -2702,7 +2725,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "AI 任务编号无效"}, 400)
             return
         job = AI_JOB_STORE.get(user['id'], job_id)
-        if job is None:
+        if job is None or ai_jobs.is_security(job):
             self.send_json({"error": "此账号下没有该任务记录", "status": "unknown"}, 404)
             return
         self.send_json(job)
@@ -3281,7 +3304,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 slug = match.group(1)
                 prefix = f'/pages/{slug}/_api'
             else:
-                match = re.match(r'^/(preview|ai-preview)/([0-9a-f]{32})(/run/[A-Za-z0-9_-]+)?/_api(?:/|$)', path)
+                match = re.match(r'^/(preview|ai-preview)/([A-Za-z0-9_-]{32})(/run/[A-Za-z0-9_-]+)?/_api(?:/|$)', path)
                 if match:
                     with neon_db(autocommit=True) as conn, conn.cursor() as cur:
                         cur.execute('SELECT user_id FROM hatchery_user_extras WHERE preview_id=%s', (match.group(2),))
@@ -3943,7 +3966,8 @@ def execute_durable_ai_job(job, progress):
     payload = json.loads(job['payload_json'])
     user = {'id': job['user_id'], 'username': payload.get('username', '')}
     handler = object.__new__(AIchemyHatcheryHandler)
-    history = AI_JOB_STORE.context(job['user_id'], job['session_id'], job['seq'])
+    # Audits never read or modify the website-building conversation/context.
+    history = [] if ai_jobs.is_security(payload) else AI_JOB_STORE.context(job['user_id'], job['session_id'], job['seq'])
     provider, model = current_ai_provider_model()
     try:
         handler._personal_api_config = PERSONAL_API_STORE.load(user["id"])

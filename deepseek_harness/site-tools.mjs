@@ -11,6 +11,9 @@ const workspace = resolve(process.env.MIAODA_AI_WORKSPACE || '.miaoda-ai-workspa
 const previewPort = Number.parseInt(process.env.MIAODA_PREVIEW_PORT || '4173', 10)
 
 function objectArgs(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value) } catch { throw new Error('arguments must be a complete JSON object; escape quotes and newlines in source strings, split large edits into smaller calls; no files were changed') }
+  }
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('arguments must be an object')
   }
@@ -61,17 +64,26 @@ async function listSiteFiles(directory = workspace, prefix = '', limit = { count
   return files
 }
 
-function localUrl(value) {
-  const path = typeof value === 'string' && value.trim() ? value.trim() : (process.env.MIAODA_PREVIEW_PATH || '/')
-  if (!path.startsWith('/') || path.startsWith('//') || path.includes('\\') || path.includes('\0')) {
-    throw new Error('browser tools only accept a local path beginning with /')
+export async function localUrl(value) {
+  const allowed = process.env.MIAODA_PREVIEW_PATH || '/__preview_unavailable__/'
+  const path = typeof value === 'string' && value.trim() ? value.trim() : allowed
+  let decoded
+  try { decoded = decodeURIComponent(path.split(/[?#]/, 1)[0]) } catch { throw new Error('invalid preview path encoding') }
+  if (path.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(path) || /[\\\0]/.test(decoded) || decoded.split('/').includes('..') || decoded.startsWith('//')) {
+    throw new Error('browser tools only accept paths inside this website preview')
   }
-  const url = new URL(path, `http://127.0.0.1:${previewPort}`)
+  if (path.startsWith('/') && !path.startsWith(allowed) && /^\/(?:api|preview|pages|c)(?:\/|$)/.test(decoded)) {
+    throw new Error('browser path must stay inside this website preview')
+  }
+  // index.html and /index.html are both website-relative, never console-root.
+  const scoped = path.startsWith(allowed) ? path : allowed + path.replace(/^\//, '')
+  const url = new URL(scoped, `http://127.0.0.1:${previewPort}`)
   if (url.hostname !== '127.0.0.1' || Number(url.port || '80') !== previewPort || url.protocol !== 'http:') {
     throw new Error('browser tools can only open the current local preview')
   }
-  const allowed = process.env.MIAODA_PREVIEW_PATH || '/__preview_unavailable__/'
   if (!url.pathname.startsWith(allowed)) throw new Error('browser path must stay inside this website preview')
+  const relative = decodeURIComponent(url.pathname.slice(allowed.length)).replace(/\/$/, '')
+  if (relative) await sitePath(relative)
   return url.toString()
 }
 
@@ -95,6 +107,7 @@ function edgeExecutable() {
 }
 
 async function runEdge(args, signal, timeoutMs = 45000) {
+  if (signal?.aborted) throw new Error('browser operation was cancelled')
   const edge = edgeExecutable()
   const profile = await mkdtemp(join(tmpdir(), 'miaoda-harness-edge-'))
   const fullArgs = [
@@ -103,8 +116,14 @@ async function runEdge(args, signal, timeoutMs = 45000) {
     '--disable-extensions',
     '--no-first-run',
     '--no-default-browser-check',
+    // Use a disposable off-the-record context. Some Chromium builds keep a
+    // normal profile alive after --dump-dom even after the page has loaded.
+    '--incognito',
     '--no-sandbox',
     '--disable-dev-shm-usage',
+    // Capture even when a slow remote resource never finishes loading. This is
+    // a DOM snapshot, not a claim that every page resource or action succeeded.
+    '--timeout=15000',
     `--user-data-dir=${profile}`,
     ...args,
   ]
@@ -132,6 +151,7 @@ async function runEdge(args, signal, timeoutMs = 45000) {
         finish(new Error('browser operation timed out'))
       }, timeoutMs)
       signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
       child.stdout.on('data', chunk => {
         size += chunk.length
         if (size <= 2_000_000) stdout.push(chunk)
@@ -200,7 +220,7 @@ export function apply(ctx) {
     description: 'Manage ONLY this website’s isolated backend. Source is /app (read-only to commands); edit source with website file tools. Private persistent data/SQLite: /data, dependencies: /data/python or /data/node/node_modules. Backend must listen on SOCKET_PATH; the platform serves it at this website’s /_api/. No host shell, host ports, platform credentials or other websites are available.',
     parameters: { type: 'object', properties: {
       action: { type: 'string', enum: TOOL_ALLOW[toolsMode] ? ['status', 'logs', 'secret_names'] : ['status', 'logs', 'secret_names', 'exec', 'install', 'deploy', 'stop', 'set_secrets', 'delete_secrets'] },
-      command: { type: 'string' }, manager: { type: 'string', enum: ['pip', 'npm'] }, packages: { type: 'array', items: { type: 'string' }, maxItems: 20 },
+      command: { type: 'string', minLength: 1, maxLength: 8000 }, manager: { type: 'string', enum: ['pip', 'npm'] }, packages: { type: 'array', items: { type: 'string' }, maxItems: 20 },
       runtime: { type: 'string', enum: ['python', 'node'] }, entry: { type: 'string' }, healthPath: { type: 'string' },
       values: { type: 'object', additionalProperties: { type: 'string' } },
       names: { type: 'array', items: { type: 'string' }, maxItems: 32 },
@@ -209,13 +229,14 @@ export function apply(ctx) {
       const { action, ...args } = objectArgs(value)
       const readonly = TOOL_ALLOW[toolsMode]
       if (readonly && !['status', 'logs', 'secret_names'].includes(action)) throw new Error('This mode cannot change website services')
-      if (!['status', 'logs', 'secret_names', 'exec', 'install', 'deploy', 'stop', 'set_secrets', 'delete_secrets'].includes(action)) throw new Error('Unknown website service action')
+      if (!['status', 'logs', 'secret_names', 'exec', 'install', 'deploy', 'stop', 'set_secrets', 'delete_secrets'].includes(action)) throw new Error('Unknown website service action; use status, logs, secret_names, exec, install, deploy, stop, set_secrets or delete_secrets')
+      if (action === 'exec' && (typeof args.command !== 'string' || !args.command || args.command.length > 8000)) throw new Error('command must be 1-8000 characters; split long commands or create a private script in /data and execute it; nothing was executed')
       const response = await fetch(`http://127.0.0.1:${previewPort}/api/ai/site-runtime`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.MIAODA_SITE_RUNTIME_TOKEN}` },
         body: JSON.stringify({ operation: action, args }), signal: execution?.signal,
       })
       const result = await response.json()
-      if (!response.ok) throw new Error(result.error || 'Website service request failed')
+      if (!response.ok) throw new Error(typeof result.error === 'string' ? result.error : 'Website service request failed; inspect site_service logs')
       return JSON.stringify(result)
     },
   })
@@ -262,7 +283,7 @@ export function apply(ctx) {
 
   register(ctx, {
     name: 'search_files',
-    description: 'Search files inside the current website folder for a literal text fragment.',
+    description: 'Search a file or directory inside the current website for literal text. Omit path or use . for the whole website; directory paths search recursively. Never use host paths or URLs.',
     parameters: {
       type: 'object',
       properties: { query: { type: 'string' }, path: { type: 'string' } },
@@ -273,7 +294,14 @@ export function apply(ctx) {
     async execute(value) {
       const args = objectArgs(value)
       if (typeof args.query !== 'string' || !args.query || args.query.length > 500) throw new Error('query must be 1-500 characters')
-      const names = args.path === undefined ? await listSiteFiles() : [args.path]
+      let names
+      if (args.path === undefined || args.path === '.' || args.path === './' || args.path === '') {
+        names = await listSiteFiles()
+      } else {
+        const name = typeof args.path === 'string' ? args.path.replace(/\/$/, '') : args.path
+        const path = await sitePath(name)
+        names = (await lstat(path)).isDirectory() ? await listSiteFiles(path, name) : [name]
+      }
       const matches = []
       for (const file of names) {
         const lines = (await readFile(await sitePath(file), 'utf8')).split(/\r?\n/u)
@@ -292,8 +320,8 @@ export function apply(ctx) {
       type: 'object',
       properties: {
         path: { type: 'string' },
-        search: { type: 'string' },
-        replace: { type: 'string' },
+        search: { type: 'string', minLength: 1, maxLength: 1_000_000 },
+        replace: { type: 'string', maxLength: 4_000_000 },
         reason: { type: 'string' },
       },
       required: ['path', 'search', 'replace'],
@@ -302,13 +330,15 @@ export function apply(ctx) {
     output: stringOutput(),
     async execute(value) {
       const args = objectArgs(value)
-      if (typeof args.search !== 'string' || !args.search || args.search.length > 1_000_000) throw new Error('search must be 1-1000000 characters')
-      if (typeof args.replace !== 'string' || args.replace.length > 4_000_000) throw new Error('replace must be at most 4000000 characters')
+      if (typeof args.search !== 'string' || !args.search || args.search.length > 1_000_000) throw new Error('search is required: copy 1-1000000 characters exactly from read_file (without line numbers); no files were changed')
+      if (typeof args.replace !== 'string' || args.replace.length > 4_000_000) throw new Error('replace is required and must be a string of at most 4000000 characters; use an empty string for deletion; no files were changed')
       const path = await sitePath(args.path)
       const before = await readFile(path, 'utf8')
       const occurrences = before.split(args.search).length - 1
-      if (occurrences !== 1) throw new Error(`search text must occur exactly once; found ${occurrences}`)
-      const after = before.replace(args.search, args.replace)
+      if (occurrences !== 1) throw new Error(`search text must occur exactly once; found ${occurrences}. Read the current file again and include unique surrounding text; no files were changed`)
+      // Replacement text is source code, not JavaScript's $&, $$, $`, $'
+      // replacement language. In particular $$ selectors must stay intact.
+      const after = before.replace(args.search, () => args.replace)
       await saveFile(args.path, Buffer.from(after))
       return `Updated ${basename(path)}${typeof args.reason === 'string' && args.reason.trim() ? `: ${args.reason.trim().slice(0, 240)}` : ''}`
     },
@@ -351,7 +381,7 @@ export function apply(ctx) {
 
   register(ctx, {
     name: 'browser_open',
-    description: 'Open only the current local website preview in a headless browser and inspect its rendered DOM.',
+    description: 'Inspect a rendered DOM snapshot of this website only. path may be index.html, /index.html, or the supplied preview URL path. Slow resources are capped at 15 seconds; this does not verify clicks or all network responses.',
     parameters: {
       type: 'object',
       properties: { path: { type: 'string' } },
@@ -360,9 +390,9 @@ export function apply(ctx) {
     output: stringOutput(),
     async execute(value, exec) {
       const args = objectArgs(value)
-      const url = localUrl(args.path)
-      const dom = await runEdge(['--dump-dom', url], exec.signal)
-      return `Opened ${url}\n${dom.slice(0, 30000)}`
+      const url = await localUrl(args.path)
+      const dom = await runEdge(['--dump-dom', url], exec?.signal)
+      return `DOM snapshot of ${url} (capture wait capped at 15 seconds; resources may still be loading)\n${dom.slice(0, 30000)}`
     },
   })
 
@@ -407,13 +437,13 @@ export function apply(ctx) {
     },
     async execute(value, exec) {
       const args = objectArgs(value)
-      const url = localUrl(args.path)
+      const url = await localUrl(args.path)
       const width = Number.isInteger(args.width) ? args.width : 1440
       const height = Number.isInteger(args.height) ? args.height : 1000
       const directory = await mkdtemp(join(tmpdir(), 'miaoda-harness-shot-'))
       const screenshot = join(directory, 'preview.png')
       try {
-        await runEdge([`--window-size=${width},${height}`, '--hide-scrollbars', `--screenshot=${screenshot}`, url], exec.signal)
+        await runEdge([`--window-size=${width},${height}`, '--hide-scrollbars', `--screenshot=${screenshot}`, url], exec?.signal)
         const data = await readFile(screenshot)
         const attachments = ctx.get('attachments')
         if (!attachments) throw new Error('screenshot attachment storage is unavailable')

@@ -231,6 +231,24 @@ class BrokerTests(unittest.TestCase):
 
 
 class HttpBoundaryTests(unittest.TestCase):
+    def test_urlsafe_preview_ids_route_to_the_same_own_backend(self):
+        with FileFixture() as fixture, patch.object(site_runtime, 'enabled', return_value=True), \
+                patch.object(site_runtime, 'call', return_value={'status': 200, 'headers': [['Content-Type', 'application/json']],
+                                                               'body': base64.b64encode(b'{"ok":true}').decode()}) as call:
+            preview_id = 'Az09_-' * 5 + 'QZ'
+            fixture.db.execute('UPDATE hatchery_user_extras SET preview_id=? WHERE user_id=?', (preview_id, USER['id']))
+            fixture.db.commit()
+            for prefix in (f'/preview/{preview_id}', f'/ai-preview/{preview_id}/run/fixture'):
+                status, headers, body = fixture.request(prefix + '/_api/content', headers={'Origin': 'null', 'Cookie': 'console-private'})
+                self.assertEqual(status, 200)
+                self.assertEqual(body, b'{"ok":true}')
+                self.assertEqual(call.call_args.args[:3], (USER['id'], fixture.directory, 'proxy'))
+                self.assertEqual(call.call_args.args[3]['path'], '/content')
+                self.assertNotIn('console-private', str(call.call_args))
+            before = call.call_count
+            self.assertEqual(fixture.request('/preview/' + 'Z' * 32 + '/_api/content')[0], 404)
+            self.assertEqual(call.call_count, before)
+
     def test_backend_source_is_not_public_but_owner_can_read_it(self):
         with FileFixture() as fixture:
             (fixture.directory / 'backend').mkdir()

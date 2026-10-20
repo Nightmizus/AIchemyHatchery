@@ -1,8 +1,8 @@
 """Durable AI requests and server-owned conversation history.
 
-Single-conversation model: every account has exactly one conversation, derived
-deterministically from its user id. There is no list, rename, or delete — a
-browser submits idempotent requests and reads its own history, nothing more.
+Each account has one persistent website-building conversation. Security audits
+use task-specific temporary sessions, deleted on completion; their report/job
+records remain independently available for status, retries and report display.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import re
 import threading
 import time
 import sys
+import traceback
 import uuid
 import os
 from pathlib import Path
@@ -28,6 +29,21 @@ def conversation_id(user_id) -> str:
     之后持续复用"不需要任何建表或状态迁移。
     """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"hatchery-conversation:{user_id}"))
+
+
+def is_security(payload) -> bool:
+    return payload.get('kind') == 'security' or payload.get('mode') == 'security'
+
+
+def security_session_id(user_id, request_id) -> str:
+    return 'security-' + uuid.uuid5(uuid.NAMESPACE_URL, f'hatchery-security:{user_id}:{request_id}').hex
+
+
+def _chat_jobs(alias=''):
+    # Constants only, never a client-supplied SQL fragment. Both markers cover
+    # older audit jobs that were attached to the website-building conversation.
+    return (f"{alias}payload_json::jsonb->>'kind' IS DISTINCT FROM 'security' AND "
+            f"{alias}payload_json::jsonb->>'mode' IS DISTINCT FROM 'security'")
 
 
 class Conflict(ValueError):
@@ -203,9 +219,10 @@ class JobStore:
                     cur.execute(statement)
 
     def enqueue(self, user, payload, request_id, limit=32):
-        """排队一条请求。会话由账号派生，调用方不选会话。"""
+        """Server binds chat to the account and audits to one temporary session."""
         uid = str(user['id'])
-        session_id = conversation_id(uid)
+        audit = is_security(payload)
+        session_id = security_session_id(uid, request_id) if audit else conversation_id(uid)
         job_id = 'job-' + uuid.uuid4().hex[:24]
         with self.db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Serializes acceptance, claiming, and queue limits across threads/processes.
@@ -213,7 +230,8 @@ class JobStore:
             cur.execute('SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND request_id=%s', (uid, request_id))
             previous = cur.fetchone()
             if previous:
-                if previous['session_id'] != session_id or json.loads(previous['payload_json']) != payload:
+                valid_sessions = {session_id, conversation_id(uid)} if audit else {session_id}
+                if previous['session_id'] not in valid_sessions or json.loads(previous['payload_json']) != payload:
                     raise Conflict('同一请求编号不能用于不同内容')
                 return public_job(previous)
             cur.execute("SELECT count(*) AS n FROM hatchery_ai_jobs WHERE user_id=%s AND status IN ('queued','running')", (uid,))
@@ -227,6 +245,17 @@ class JobStore:
             row = cur.fetchone()
             cur.execute('UPDATE hatchery_ai_chat_sessions SET updated_at=%s, revision=revision+1 WHERE id=%s', (now, session_id))
             return public_job(row)
+
+    @staticmethod
+    def _delete_security_session(cur, user_id, session_id):
+        # Never delete the building conversation, including when finishing a
+        # legacy audit that was incorrectly stored in that conversation.
+        if not re.fullmatch(r'security-[0-9a-f]{32}', session_id):
+            return
+        cur.execute(f'''DELETE FROM hatchery_ai_chat_sessions s WHERE s.id=%s AND s.user_id=%s
+            AND NOT EXISTS (SELECT 1 FROM hatchery_ai_jobs j WHERE j.session_id=s.id
+                AND j.user_id=s.user_id AND (j.status IN ('queued','running') OR ({_chat_jobs('j.')})))''',
+                    (session_id, str(user_id)))
 
     def claim(self, max_parallel):
         with self.db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -272,8 +301,12 @@ class JobStore:
             cur.execute("""UPDATE hatchery_ai_jobs SET status='interrupted',finished_at=now(),updated_at=now(),
                 error='服务中断，任务未完成；为避免重复执行，未自动重发。已保存的文件仍保留。'
                 WHERE status='running' AND lease_until < now() - interval '5 minutes'
-                RETURNING id""")
-            return [row[0] for row in cur.fetchall()]
+                RETURNING id,user_id,session_id,payload_json""")
+            rows = cur.fetchall()
+            for row in rows:
+                if is_security(json.loads(row[3])):
+                    self._delete_security_session(cur, row[1], row[2])
+            return [row[0] for row in rows]
 
     def progress(self, job_id, events):
         with self.db() as conn, conn.cursor() as cur:
@@ -282,10 +315,12 @@ class JobStore:
     def finish(self, job_id, result=None, error=None):
         with self.db() as conn, conn.cursor() as cur:
             cur.execute("""UPDATE hatchery_ai_jobs SET status=%s,result_json=%s,error=%s,finished_at=now(),updated_at=now(),
-                lease_until=NULL WHERE id=%s AND status IN ('running','interrupted') RETURNING session_id""",
+                lease_until=NULL WHERE id=%s AND status IN ('running','interrupted') RETURNING session_id,user_id,payload_json""",
                         ('failed' if error else 'completed', dumps(result) if result is not None else None, error, job_id))
             row = cur.fetchone()
-            if row:
+            if row and is_security(json.loads(row[2])):
+                self._delete_security_session(cur, row[1], row[0])
+            elif row:
                 cur.execute('UPDATE hatchery_ai_chat_sessions SET revision=revision+1,updated_at=%s WHERE id=%s',
                             (datetime.now(timezone.utc).isoformat(), row[0]))
 
@@ -297,7 +332,7 @@ class JobStore:
 
     def active(self, user_id):
         with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND (status IN ('queued','running') OR NOT acknowledged) ORDER BY seq", (str(user_id),))
+            cur.execute(f"SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND ({_chat_jobs()}) AND (status IN ('queued','running') OR NOT acknowledged) ORDER BY seq", (str(user_id),))
             return [public_job(r) for r in cur.fetchall()]
 
     def latest_security(self, user_id):
@@ -309,12 +344,12 @@ class JobStore:
     def queue_status(self, user_id, max_parallel):
         """Explain waiting without exposing another account's IDs or messages."""
         with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute('''WITH first_waiting AS (
-                SELECT min(seq) AS seq FROM hatchery_ai_jobs WHERE user_id=%s AND status='queued'
+            cur.execute(f'''WITH first_waiting AS (
+                SELECT min(seq) AS seq FROM hatchery_ai_jobs WHERE user_id=%s AND status='queued' AND ({_chat_jobs()})
             ) SELECT count(*) FILTER (WHERE status='running') AS running,
                 count(*) FILTER (WHERE status='queued') AS queued,
                 count(*) FILTER (WHERE status='running' AND user_id=%s) AS own_running,
-                count(*) FILTER (WHERE status='queued' AND user_id=%s) AS own_queued,
+                count(*) FILTER (WHERE status='queued' AND user_id=%s AND ({_chat_jobs()})) AS own_queued,
                 count(*) FILTER (WHERE status='queued' AND seq < (SELECT seq FROM first_waiting)) AS ahead
                 FROM hatchery_ai_jobs''', (str(user_id), str(user_id), str(user_id)))
             row = cur.fetchone()
@@ -332,9 +367,9 @@ class JobStore:
         with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             # One statement gives history and jobs the same snapshot without
             # three sequential round trips to the remote database.
-            cur.execute('''SELECT s.*, COALESCE((
+            cur.execute(f'''SELECT s.*, COALESCE((
                 SELECT json_agg(j ORDER BY j.seq) FROM hatchery_ai_jobs j
-                WHERE j.session_id=s.id AND j.user_id=s.user_id
+                WHERE j.session_id=s.id AND j.user_id=s.user_id AND ({_chat_jobs('j.')})
             ), '[]'::json) AS jobs
                 FROM hatchery_ai_chat_sessions s WHERE s.id=%s AND s.user_id=%s''',
                         (session_id, str(user_id)))
@@ -350,7 +385,7 @@ class JobStore:
         with self.db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute('SELECT messages_html FROM hatchery_ai_chat_sessions WHERE user_id=%s AND id=%s', (str(user_id), session_id))
             session = cur.fetchone()
-            cur.execute("SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND session_id=%s AND seq<%s ORDER BY seq DESC LIMIT 12",
+            cur.execute(f"SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND session_id=%s AND seq<%s AND ({_chat_jobs()}) ORDER BY seq DESC LIMIT 12",
                         (str(user_id), session_id, before_seq))
             rows = list(reversed(cur.fetchall()))
         parser = LegacyContext()
@@ -491,6 +526,16 @@ class Dispatcher:
             result = self.execute(job, progress)
         except Exception as exc:
             error = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else '任务执行失败，请稍后重试'
+            # Correlatable diagnostics without request bodies, SQL, credentials
+            # or exception messages from an external dependency.
+            frames = ' > '.join(f'{Path(frame.filename).name}:{frame.lineno}' for frame in traceback.extract_tb(exc.__traceback__)[-5:])
+            print(f'[ai-job-error] job={job["id"]} type={type(exc).__name__} frames={frames}', file=sys.stderr)
+        for event in events:
+            if event.get('status') == 'running':
+                if event.get('tool'):
+                    event.update(status='interrupted', detail=str(event.get('detail') or '') + ' · 任务已结束，此步骤结果未确认')
+                else:
+                    event['status'] = 'failed' if error else 'done'
         try:
             try:
                 self.save_result(job['id'], {'result': result, 'error': error, 'events': events})

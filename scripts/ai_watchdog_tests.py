@@ -100,6 +100,34 @@ class WatchdogTests(unittest.TestCase):
                     'data': {'stream': [{'type': 'reasoning-delta', 'text': 'working'}]}}}}] * 6
         self.assertEqual(self.run_protocol(events + self.events(), step=31)['summary'], 'ok')
 
+    def test_v3_wrapped_stream_chunks_count_as_progress_without_exposing_reasoning(self):
+        events = [{'method': 'session.event', 'params': {'event': {'type': 'assistant/attempt',
+                    'data': {'stream': [{'type': 'chunk', 'chunk': {'type': 'reasoning-delta', 'text': 'private reasoning'}}]}}}}] * 6
+        result = self.run_protocol(events + self.events(), step=31)
+        self.assertEqual(result['summary'], 'ok')
+        self.assertNotIn('private reasoning', json.dumps(result))
+
+    def test_final_markdown_is_preserved_without_reexecuting_tools(self):
+        events = self.events()
+        events[0]['params']['event']['data']['message']['content'][0]['text'] = '## 实际答复\n\n- 已检查\n- 未验证项保留'
+        self.assertEqual(self.run_protocol(events)['summary'], '## 实际答复\n\n- 已检查\n- 未验证项保留')
+
+    def test_reasoning_only_finish_is_not_completed_or_replaced_with_commentary(self):
+        events = self.events()
+        events[0]['params']['event']['data']['message']['content'] = [{'type': 'reasoning', 'text': 'private reasoning'}]
+        with self.assertRaises(dsh.HarnessRuntimeError) as raised:
+            self.run_protocol(events)
+        self.assertEqual(raised.exception.recovery_reason, 'empty_final_response')
+        self.assertTrue(raised.exception.recoverable)
+        self.assertNotIn('private reasoning', str(raised.exception))
+
+    def test_arbitrary_json_never_claims_success(self):
+        events = self.events()
+        events[0]['params']['event']['data']['message']['content'][0]['text'] = '{"ok":true}'
+        with self.assertRaises(dsh.HarnessRuntimeError) as raised:
+            self.run_protocol(events)
+        self.assertEqual(raised.exception.recovery_reason, 'invalid_final_report')
+
     def test_useful_work_has_no_total_deadline_even_with_legacy_limit(self):
         events = [{'method': 'session.event', 'params': {'event': {'type': 'assistant/chunk', 'data': {'chunk': {'type': 'text-delta', 'text': 'x'}}}}}] * 240
         # Simulate over two hours of useful work, beyond the former 30-minute

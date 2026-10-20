@@ -17,6 +17,11 @@ try {
     plugin.apply({ tools: { register: tool => registered.set(tool.name, tool) } })
     const tool = registered.get('site_service'); assert(tool)
     assert.deepEqual(JSON.parse(await tool.execute({ action: 'status' })), { active: false })
+    if (mode === 'full') {
+      await assert.rejects(tool.execute({ action: 'unknown' }), /use status, logs/)
+      await assert.rejects(tool.execute({ action: 'exec', command: 'x'.repeat(8001) }), /nothing was executed/)
+      assert.equal(tool.parameters.properties.command.maxLength, 8000)
+    }
     if (mode !== 'full') await assert.rejects(tool.execute({ action: 'exec', command: 'echo no' }))
     assert.equal(tool.parameters.additionalProperties, false)
     assert(!('workspace' in tool.parameters.properties)); assert(!('siteKey' in tool.parameters.properties))

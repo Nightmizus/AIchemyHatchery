@@ -1,0 +1,22 @@
+diff --git a/assets/js/app.js b/assets/js/app.js
+--- a/assets/js/app.js
++++ b/assets/js/app.js
+@@ -666,7 +666,7 @@
+     });
+     var cards = document.getElementById('home-cards');
+     if (cards && Object.prototype.toString.call(s.home_cards) === '[object Array]' && s.home_cards.length) {
+-      cards.innerHTML = s.home_cards.map(function (line) {
++      cards.innerHTML = s.home_cards.map(function (line) { return String(line == null ? '' : line).trim(); }).filter(Boolean).map(function (line) {
+         return '<li>' + richText(line) + '</li>';
+       }).join('');
+     }
+@@ -732,7 +732,8 @@
+       var v = s[pair[0]];
+       var host = document.getElementById(pair[1]);
+       if (host && Object.prototype.toString.call(v) === '[object Array]' && v.length) {
+-        host.innerHTML = v.map(function (line) { return '<li>' + richText(line) + '</li>'; }).join('');
++        host.innerHTML = v.map(function (line) { return String(line == null ? '' : line).trim(); }).filter(Boolean)
++          .map(function (line) { return '<li>' + richText(line) + '</li>'; }).join('');
+       }
+     });
+     // 统计行：模板里必须保留 {n}，否则退回页面默认写法（避免篇数显示不出来）
