@@ -23,7 +23,11 @@ export function apply(ctx) {
       {type:'text',text:'{"summary":"## Native fixture\\n\\nCompleted"}'};
     yield {type:'block-start',index:0,blockType:block.type};
     await new Promise(resolve => setTimeout(resolve, 30));
-    if (turn > 1) yield {type:'text-delta',index:0,text:block.text};
+    if (turn > 1) {
+      yield {type:'text-delta',index:0,text:block.text.slice(0, 28)};
+      await new Promise(resolve => setTimeout(resolve, 250));
+      yield {type:'text-delta',index:0,text:block.text.slice(28)};
+    }
     yield {type:'block-end',index:0,block};
     yield {type:'finish',reason:{kind:turn === 1 ? 'tool-calls' : 'stop'}};
   }
@@ -51,6 +55,7 @@ class NativeProtocolTests(unittest.TestCase):
             env.update({'DSH_HOME': str(root / 'home'), 'DSH_TELEMETRY_DISABLED': '1',
                         'MIAODA_AI_WORKSPACE': str(root / 'site'), 'MIAODA_TOOLS_MODE': 'chat'})
             events, progress, methods = [], [], collections.Counter()
+            first_stream = completed = None
             projector = adapter._EventProjector(progress.append)
             with adapter._JsonRpcRuntime([str(binary), '--profile', 'sdk-minimal', '--patch',
                     str(ROOT / 'deepseek_harness/site-agent.patch.yml'), '--patch', str(overlay)], root, env, 15, ()) as runtime:
@@ -63,11 +68,20 @@ class NativeProtocolTests(unittest.TestCase):
                     methods[notice.get('method')] += 1
                     params = notice.get('params', {})
                     if params.get('sessionId') != 'native-fixture': continue
+                    if notice.get('method') == 'hatchery.assistant':
+                        projector.accept_stream(params['frame'])
+                        if any(p['kind']=='message' for p in progress) and first_stream is None:
+                            first_stream = time.monotonic()
                     if notice.get('method') == 'session.event':
                         event = params['event']; events.append(event); projector.accept(event)
-                    if notice.get('method') == 'session.status' and params.get('status') == 'idle' and adapter._finish_reason(events): break
+                    if notice.get('method') == 'session.status' and params.get('status') == 'idle' and adapter._finish_reason(events):
+                        completed = time.monotonic(); break
             self.assertEqual(adapter._finish_reason(events), 'completed')
             self.assertIn('Native fixture', adapter._final_response(events))
+            self.assertIsNotNone(first_stream, 'Native WebUI stream did not reach the adapter')
+            self.assertGreater(completed - first_stream, 0.15, 'Text appeared only after completion')
+            self.assertFalse(any(p['detail'].startswith('{') for p in progress if p['kind']=='message'))
+            self.assertTrue(any(p['kind']=='message' and 'Native fixture' in p['detail'] for p in progress))
             self.assertEqual(projector.trace, [{'tool': 'list_files', 'status': 'done', 'detail': '读取获准的网站源码清单'}])
             self.assertTrue(all(stream.closed for stream in (process.stdin, process.stdout, process.stderr)))
             print(json.dumps({'nativeNotifications': dict(methods), 'realModelCalls': 0}))

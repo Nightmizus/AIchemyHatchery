@@ -15,11 +15,13 @@ import sys
 import traceback
 import uuid
 import os
+import copy
 from pathlib import Path
 from html.parser import HTMLParser
 from datetime import datetime, timezone
 
 from psycopg2.extras import RealDictCursor
+from job_events import EventHub
 
 
 def conversation_id(user_id) -> str:
@@ -120,7 +122,7 @@ def render_history(legacy, jobs):
         result = job.get('result') or {}
         attributes = f'data-ai-job-id="{esc(jid)}" data-ai-status="{esc(status)}"'
         files = ''.join(f'<span>{esc(a["name"])}</span>' for a in job.get('attachments', []))
-        chunks.append(f'<article class="ai-message user" data-ai-request-id="{esc(job["requestId"])}"><div><p>{esc(job["prompt"])}</p><div class="ai-message-files">{files}</div></div></article>')
+        chunks.append(f'<article class="ai-message user" data-ai-request-id="{esc(job["requestId"])}" data-ai-job-message="{esc(jid)}"><div><p>{esc(job["prompt"])}</p><div class="ai-message-files">{files}</div></div></article>')
         usage = result.get('contextUsage')
         if not usage:
             usage = next((e.get('contextUsage') for e in reversed(job.get('events', [])) if e.get('contextUsage')), None)
@@ -130,7 +132,7 @@ def render_history(legacy, jobs):
         if status in ('queued', 'running'):
             label = '已在服务器排队，关闭页面后仍会继续' if status == 'queued' else 'AI 正在处理请求'
             chunks.append(f'<p class="ai-working-status" role="status">{label}</p>')
-        events = ''.join(f'<p class="ai-run-tool {"failed" if e.get("status")=="failed" else ""}"><b>{esc(e.get("label"))}</b> {esc(e.get("detail"))}</p>'
+        events = ''.join(f'<p data-ai-event-id="{esc(e.get("id"))}" class="ai-run-tool {"failed" if e.get("status")=="failed" else ""}"><b>{esc(e.get("label"))}</b> {esc(e.get("detail"))}</p>'
                          for e in job.get('events', []) if e.get('kind') != 'context')
         chunks.append(f'<details class="ai-run-process"><summary>查看过程</summary><div class="ai-run-stream">{events}</div></details>')
         final_id = ' id="aiRunFinal"' if latest else ''
@@ -211,6 +213,42 @@ class JobStore:
         self.db = db
         # 只读查询走 autocommit 连接：省掉远端事务模式下的 BEGIN/COMMIT 两次往返。
         self.read_db = read_db or db
+        self.events = EventHub()
+        self.wake = threading.Event()
+        self._live_lock = threading.Lock()
+        self._live_progress = {}
+
+    def _public_job(self, row):
+        job = public_job(row)
+        with self._live_lock:
+            live = self._live_progress.get(row['id'])
+            if live and live['user_id'] == str(row['user_id']) and row['status'] == 'running':
+                job['events'] = copy.deepcopy(live['events'])
+                job['updatedAt'] = live['updated_at']
+        return job
+
+    def emit_state(self, row):
+        try: self._emit_state(row)
+        except Exception as exc:
+            # A best-effort downlink must never strand an already committed job.
+            print(f'[ai-live] 状态等待 HTTP 校准：{type(exc).__name__}', file=sys.stderr)
+
+    def _emit_state(self, row):
+        job = self._public_job(row)
+        if is_security(job): return
+        # The live projection doesn't duplicate file trees / attachment payloads.
+        if job['result']:
+            job['result'] = {k:v for k,v in job['result'].items() if k in ('summary','plan','contextUsage','changedFiles','mode')}
+        self.events.publish(row['user_id'], 'job', {'job':job,'html':render_history('', [job])})
+
+    def publish_progress(self, row, event, events):
+        now = datetime.now(timezone.utc).isoformat()
+        with self._live_lock:
+            self._live_progress[row['id']] = {'user_id':str(row['user_id']), 'events':copy.deepcopy(events), 'updated_at':now}
+        if not is_security(json.loads(row['payload_json'])):
+            try: self.events.publish(row['user_id'], 'progress', {'jobId':row['id'],'event':event,'updatedAt':now})
+            except Exception as exc:
+                print(f'[ai-live] 进度等待 HTTP 校准：{type(exc).__name__}', file=sys.stderr)
 
     def initialize(self):
         with self.db() as conn, conn.cursor() as cur:
@@ -244,7 +282,9 @@ class JobStore:
                         (job_id, uid, session_id, request_id, dumps(payload)))
             row = cur.fetchone()
             cur.execute('UPDATE hatchery_ai_chat_sessions SET updated_at=%s, revision=revision+1 WHERE id=%s', (now, session_id))
-            return public_job(row)
+        self.wake.set()
+        self.emit_state(row)
+        return public_job(row)
 
     @staticmethod
     def _delete_security_session(cur, user_id, session_id):
@@ -270,7 +310,9 @@ class JobStore:
             if not row:
                 return None
             cur.execute("UPDATE hatchery_ai_jobs SET status='running',started_at=now(),updated_at=now(),lease_until=now()+interval '60 seconds' WHERE id=%s RETURNING *", (row['id'],))
-            return dict(cur.fetchone())
+            claimed = dict(cur.fetchone())
+        self.emit_state(claimed)
+        return claimed
 
     def renew(self, ids):
         """续租。返回未能续上的 id，调用方据此判断租约是否真的丢了。
@@ -310,36 +352,42 @@ class JobStore:
 
     def progress(self, job_id, events):
         with self.db() as conn, conn.cursor() as cur:
+            # Bound locks/queries so a progress writer cannot hold finalization
+            # indefinitely. SET LOCAL doesn't leak into pooled connections.
+            cur.execute("SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='5s'")
             cur.execute("UPDATE hatchery_ai_jobs SET events_json=%s,updated_at=now() WHERE id=%s AND status='running'", (dumps(events), job_id))
 
     def finish(self, job_id, result=None, error=None):
-        with self.db() as conn, conn.cursor() as cur:
+        with self.db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""UPDATE hatchery_ai_jobs SET status=%s,result_json=%s,error=%s,finished_at=now(),updated_at=now(),
-                lease_until=NULL WHERE id=%s AND status IN ('running','interrupted') RETURNING session_id,user_id,payload_json""",
+                lease_until=NULL WHERE id=%s AND status IN ('running','interrupted') RETURNING *""",
                         ('failed' if error else 'completed', dumps(result) if result is not None else None, error, job_id))
             row = cur.fetchone()
-            if row and is_security(json.loads(row[2])):
-                self._delete_security_session(cur, row[1], row[0])
+            if row and is_security(json.loads(row['payload_json'])):
+                self._delete_security_session(cur, row['user_id'], row['session_id'])
             elif row:
                 cur.execute('UPDATE hatchery_ai_chat_sessions SET revision=revision+1,updated_at=%s WHERE id=%s',
-                            (datetime.now(timezone.utc).isoformat(), row[0]))
+                            (datetime.now(timezone.utc).isoformat(), row['session_id']))
+        with self._live_lock: self._live_progress.pop(job_id, None)
+        if row: self.emit_state(row)
+        self.wake.set()
 
     def get(self, user_id, job_id):
-        with self.db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute('SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND id=%s', (str(user_id), job_id))
             row = cur.fetchone()
-            return public_job(row) if row else None
+            return self._public_job(row) if row else None
 
     def active(self, user_id):
         with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(f"SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND ({_chat_jobs()}) AND (status IN ('queued','running') OR NOT acknowledged) ORDER BY seq", (str(user_id),))
-            return [public_job(r) for r in cur.fetchall()]
+            return [self._public_job(r) for r in cur.fetchall()]
 
     def latest_security(self, user_id):
         with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND payload_json::jsonb->>'kind'='security' ORDER BY seq DESC LIMIT 1", (str(user_id),))
             row = cur.fetchone()
-            return public_job(row) if row else None
+            return self._public_job(row) if row else None
 
     def queue_status(self, user_id, max_parallel):
         """Explain waiting without exposing another account's IDs or messages."""
@@ -376,7 +424,7 @@ class JobStore:
             row = cur.fetchone()
             if not row:
                 return None
-            jobs = [public_job(job) for job in row['jobs']]
+            jobs = [self._public_job(job) for job in row['jobs']]
         return {'id': row['id'], 'title': row['title'], 'messagesHtml': render_history(row['messages_html'], jobs),
                 'revision': row['revision'], 'createdAt': row['created_at'], 'updatedAt': row['updated_at'], 'jobs': jobs,
                 'serverOwned': True}
@@ -425,6 +473,7 @@ class Dispatcher:
         这类"部署即中断"。返回仍在运行、未能及时结束的任务数。
         """
         self.stop.set()
+        self.store.wake.set()
         deadline = time.monotonic() + max(0.0, grace_seconds)
         while time.monotonic() < deadline:
             with self.lock:
@@ -437,6 +486,7 @@ class Dispatcher:
     def loop(self):
         last_renew = 0
         while not self.stop.is_set():
+            self.store.wake.clear()
             try:
                 with self.lock:
                     running = set(self.running)
@@ -467,7 +517,7 @@ class Dispatcher:
             except Exception as exc:
                 # Never print request data, database credentials, or raw DB diagnostics.
                 print(f'[ai-dispatch] 存储暂不可用：{type(exc).__name__}', file=sys.stderr)
-            self.stop.wait(1)
+            self.store.wake.wait(1 if running else 5)
 
     def flush_results(self):
         if not self.spool:
@@ -503,23 +553,36 @@ class Dispatcher:
 
     def worker(self, job):
         events = []
-        last_save = 0
+        event_lock = threading.Lock()
+        dirty, finished = threading.Event(), threading.Event()
+
+        def save_progress():
+            while not finished.is_set():
+                dirty.wait(0.8)
+                if finished.is_set(): break
+                if not dirty.is_set(): continue
+                # Coalesce bursts; a remote DB round trip never blocks the RPC reader.
+                if finished.wait(0.25): break
+                with event_lock:
+                    snapshot = copy.deepcopy(events)
+                    dirty.clear()
+                try: self.store.progress(job['id'], snapshot)
+                except Exception: dirty.set()
+                finished.wait(0.55)
+
+        writer = threading.Thread(target=save_progress, name='hatchery-progress-'+job['id'][-6:], daemon=True)
+        writer.start()
 
         def progress(event):
-            nonlocal last_save
             event = dict(event)
-            existing = next((e for e in events if e.get('id') == event.get('id')), None)
-            if existing is not None:
-                existing.update(event)
-            else:
-                event['sequence'] = len(events)+1
-                events.append(event)
-            if time.monotonic()-last_save >= 0.8 or event.get('status') in ('done','failed'):
-                try:
-                    self.store.progress(job['id'], events)
-                    last_save = time.monotonic()
-                except Exception:
-                    pass  # A progress-save outage cannot cancel a model execution.
+            with event_lock:
+                existing = next((e for e in events if e.get('id') == event.get('id')), None)
+                if existing is not None: existing.update(event)
+                else:
+                    event['sequence'] = len(events)+1
+                    events.append(event)
+                self.store.publish_progress(job, event, events)
+                dirty.set()
 
         result = error = None
         try:
@@ -530,6 +593,10 @@ class Dispatcher:
             # or exception messages from an external dependency.
             frames = ' > '.join(f'{Path(frame.filename).name}:{frame.lineno}' for frame in traceback.extract_tb(exc.__traceback__)[-5:])
             print(f'[ai-job-error] job={job["id"]} type={type(exc).__name__} frames={frames}', file=sys.stderr)
+        finally:
+            finished.set()
+            dirty.set()
+            writer.join()
         for event in events:
             if event.get('status') == 'running':
                 if event.get('tool'):

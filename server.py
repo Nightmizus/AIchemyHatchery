@@ -38,9 +38,14 @@ import urllib.request
 import urllib.error
 import urllib.parse as urlparse_mod
 
+from trusted_client_ip import client_ip
+
 import site_files
 import gallery
 import ai_jobs
+import db_connections
+import job_events
+from email.message import Message
 import login_links
 import study_engine
 import personal_api
@@ -68,27 +73,34 @@ if not NEON_DATABASE_URL:
                 NEON_DATABASE_URL = line.split("=", 1)[1].strip().strip('"')
                 break
 
-_DB_POOL: pg_pool.ThreadedConnectionPool | None = None
+_DB_POOL: db_connections.RetainedConnectionPool | None = None
 _DB_POOL_LOCK = threading.Lock()
 # psycopg2's threaded pool raises immediately on the ninth simultaneous query.
 # Browser polling, previews and workers share it, so wait for a returned slot
 # instead of failing an accepted AI task before its model even starts.
 _DB_POOL_SLOTS = threading.BoundedSemaphore(8)
-_DB_POOL_WAIT_SECONDS = 30.0
+_DB_POOL_WAIT_SECONDS = 8.0
+_PUBLIC_BACKEND_SLOTS = threading.BoundedSemaphore(4)
 # 连接空闲超过这个秒数才补一次 SELECT 1 探活；每请求都探活等于每个接口多付一次
 # 新加坡往返（约 90ms），而那正是登录态接口慢的主因。
 _DB_IDLE_SINCE: dict[int, float] = {}
 _DB_PROBE_AFTER_IDLE_SECONDS = 45.0
 
 
-def db_pool() -> pg_pool.ThreadedConnectionPool:
+def db_pool() -> db_connections.RetainedConnectionPool:
     """惰性创建连接池，让 Neon 的建连（TLS 握手/冷启动）成本只付一次，
     而不是像从前那样每个请求都重新 psycopg2.connect（页面加载因此卡约 20 秒）。"""
     global _DB_POOL
     if _DB_POOL is None:
         with _DB_POOL_LOCK:
             if _DB_POOL is None:
-                _DB_POOL = pg_pool.ThreadedConnectionPool(1, 8, NEON_DATABASE_URL)
+                pool = db_connections.RetainedConnectionPool(
+                    1, 8, NEON_DATABASE_URL,
+                    connect_timeout=3, keepalives=1, keepalives_idle=5,
+                    keepalives_interval=2, keepalives_count=3, tcp_user_timeout=8000,
+                )
+                _DB_POOL = pool
+                pool.warm(4)
     return _DB_POOL
 
 
@@ -176,6 +188,10 @@ def cached_console_session(token_hash: str) -> dict | None:
     with _CONSOLE_SESSION_CACHE_LOCK:
         entry = _CONSOLE_SESSION_CACHE.get(token_hash)
     if not entry or entry[0] <= time.monotonic():
+        invalidate_console_sessions(token_hash)
+        return None
+    if datetime.fromisoformat(entry[1]["expires_at"]) <= utc_now():
+        invalidate_console_sessions(token_hash)
         return None
     return dict(entry[1])
 
@@ -305,7 +321,7 @@ AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "f
 PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/site-preview.js", "/viewer.js", "/study.css", "/study.js", "/personal-api.js", "/markdown-it.min.js", "/ai-markdown.js", "/security.js", "/gallery.css", "/gallery.js"))
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
-PUBLIC_STATIC_PATHS |= frozenset(gallery.PREVIEW_ASSETS.values())
+PUBLIC_STATIC_PATHS |= frozenset(gallery.PREVIEW_ASSETS.values()) | {'/job-stream.js'}
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}
 _CONSOLE_ASSET_CACHE = {}
 
@@ -728,19 +744,14 @@ def published_site_index() -> list[dict]:
     """全部已发布站点：数据库记录 ∪ 磁盘遗留目录，按更新时间倒序。
     Gallery 与管理员总览共用这一份索引，保证两边看到的站点一致。
     onDisk=False 表示数据库有行但磁盘没有 site.json（已删除 / 改名残留），这类站点不能进 Gallery。"""
-    with neon_db() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT p.slug, p.created_at, p.updated_at, p.listed_in_gallery,
-                       u.name AS owner_name, u."campusId" AS owner_campus_id
-                FROM hatchery_published_sites p
-                LEFT JOIN "User" u ON u.id = p.user_id
-                ORDER BY p.updated_at DESC
-                """
-            )
-            rows = cur.fetchall()
-            category_map = gallery.categories(cur)
+    with neon_db(autocommit=True) as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""SELECT COALESCE(json_agg(p ORDER BY p.updated_at DESC), '[]'::json) AS sites,
+            COALESCE((SELECT json_object_agg(slug,is_partner) FROM hatchery_gallery_categories), '{}'::json) AS categories
+            FROM (SELECT p.slug,p.created_at,p.updated_at,p.listed_in_gallery,
+                         u.name AS owner_name,u."campusId" AS owner_campus_id
+                  FROM hatchery_published_sites p LEFT JOIN "User" u ON u.id=p.user_id) p""")
+        record = cur.fetchone()
+        rows, category_map = record['sites'], record['categories']
     on_disk = published_site_slugs_on_disk()
     sites: list[dict] = []
     seen_slugs: set[str] = set()
@@ -1390,7 +1401,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         created_at = utc_now()
         max_age = CONSOLE_SESSION_DAYS * 86400 if remember else 12 * 3600
         expires_at = created_at + (timedelta(days=CONSOLE_SESSION_DAYS) if remember else timedelta(hours=12))
-        ip_address = self.client_address[0] if self.client_address else "unknown"
+        ip_address = client_ip(self.client_address, self.headers)
         user_agent = self.headers.get("User-Agent", "")[:300]
         with neon_db() as conn:
             with conn.cursor() as cur:
@@ -1404,6 +1415,44 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 f"HttpOnly; SameSite=Strict{self.cookie_security()}"
             )
         }
+
+    def complete_console_login(self, verified_user: dict, remember: bool) -> None:
+        """Persist login and issue its session in one atomic database round trip."""
+        token = secrets.token_urlsafe(36)
+        token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
+        now = utc_now()
+        max_age = CONSOLE_SESSION_DAYS * 86400 if remember else 12 * 3600
+        expires = now + timedelta(seconds=max_age)
+        params = {'uid': str(verified_user['id']), 'password': verified_user['password'],
+                  'token': token_hash, 'now': iso_time(now), 'expires': iso_time(expires),
+                  'ip': client_ip(self.client_address, self.headers), 'agent': self.headers.get('User-Agent', '')[:300]}
+        last_login = user_column_name('lastLoginAt')
+        # Recheck password/status after bcrypt: a concurrent revoke or password
+        # change must not create a new authenticated session from the stale row.
+        predicate = 'id=%(uid)s AND password=%(password)s AND "bannedUntil" IS NULL'
+        changed = (f'UPDATE "User" SET "{last_login}"=%(now)s WHERE {predicate} RETURNING *'
+                   if last_login else f'SELECT * FROM "User" WHERE {predicate}')
+        with neon_db(autocommit=True) as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f'''WITH logged_in AS ({changed}), issued AS (
+                INSERT INTO console_sessions(token_hash,user_id,created_at,expires_at,last_seen_at,ip_address,user_agent)
+                SELECT %(token)s,id,%(now)s,%(expires)s,%(now)s,%(ip)s,%(agent)s FROM logged_in
+                RETURNING user_id
+            ) SELECT u.*, extras.preview_id AS extra_preview_id,
+                     sites.slug AS published_slug, sites.listed_in_gallery AS published_listed
+                FROM logged_in u JOIN issued i ON i.user_id=u.id
+                LEFT JOIN hatchery_user_extras extras ON extras.user_id=u.id
+                LEFT JOIN hatchery_published_sites sites ON sites.user_id=u.id''', params)
+            row = cur.fetchone()
+        if not row:
+            self.send_json({'error': '账号状态已变更，请重新登录'}, 401)
+            return
+        cached = dict(row)
+        cached.pop('password', None)
+        cached.update(expires_at=iso_time(expires), token_hash=token_hash, username=row.get('name'),
+                      role='admin' if row.get('isAdmin') or is_site_owner_campus_id(row.get('campusId')) else 'user', status='active')
+        store_console_session(token_hash, cached)
+        headers = {'Set-Cookie': f'alchemy_hatchery_console_session={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Strict{self.cookie_security()}'}
+        self.send_json({'ok': True, 'user': self.attach_preview_id(self.public_user(row), row['id'], row)}, headers=headers)
 
     def public_user(self, user: dict) -> dict:
         # user 必须来自 SELECT * FROM "User"（列名以数据库实际为准）
@@ -1467,7 +1516,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         return normalized_username, normalized_password
 
     def login_is_limited(self) -> bool:
-        address = self.client_address[0] if self.client_address else "unknown"
+        address = client_ip(self.client_address, self.headers)
         cutoff = time.time() - 300
         with LOGIN_ATTEMPTS_LOCK:
             recent = [item for item in LOGIN_ATTEMPTS.get(address, []) if item > cutoff]
@@ -1475,12 +1524,12 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return len(recent) >= 10
 
     def record_login_failure(self) -> None:
-        address = self.client_address[0] if self.client_address else "unknown"
+        address = client_ip(self.client_address, self.headers)
         with LOGIN_ATTEMPTS_LOCK:
             LOGIN_ATTEMPTS.setdefault(address, []).append(time.time())
 
     def clear_login_failures(self) -> None:
-        address = self.client_address[0] if self.client_address else "unknown"
+        address = client_ip(self.client_address, self.headers)
         with LOGIN_ATTEMPTS_LOCK:
             LOGIN_ATTEMPTS.pop(address, None)
 
@@ -1493,7 +1542,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         password = str(data.get("password", ""))
         remember = bool(data.get("remember", True))
         row = None
-        with neon_db() as conn:
+        with neon_db(autocommit=True) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     'SELECT * FROM "User" WHERE name = %s OR email = %s OR "campusId" = %s',
@@ -1515,16 +1564,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "此账号已被管理员停用"}, 403)
             return
         self.clear_login_failures()
-        with neon_db() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                last_login_col = user_column_name("lastLoginAt")
-                if last_login_col:
-                    cur.execute(f'UPDATE "User" SET "{last_login_col}" = %s WHERE id = %s', (iso_time(), row["id"]))
-                # Fetch updated user for public_user
-                cur.execute('SELECT * FROM "User" WHERE id = %s', (row["id"],))
-                row = cur.fetchone()
-        headers = self.issue_console_session(row["id"], remember)
-        self.send_json({"ok": True, "user": self.attach_preview_id(self.public_user(row), row["id"])}, headers=headers)
+        self.complete_console_login(row, remember)
 
     def handle_send_otp(self) -> None:
         if self.login_is_limited():
@@ -1535,7 +1575,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         if not email or "@" not in email or len(email) > 254:
             raise ValueError("请输入有效邮箱地址")
         # 发信接口原先完全不限流：可被用来轰炸任意邮箱，也能无限刷新验证码
-        address = self.client_address[0] if self.client_address else "unknown"
+        address = client_ip(self.client_address, self.headers)
         if rate_limit_hit("otp-send-ip", address, 5, 600) or rate_limit_hit("otp-send-mail", email, 3, 600):
             self.send_json({"error": "验证码发送过于频繁，请 10 分钟后再试"}, 429)
             return
@@ -1599,6 +1639,73 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             headers={"Set-Cookie": [
                 f"alchemy_hatchery_console_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{self.cookie_security()}",
             ]},
+        )
+
+    def handle_auth_register(self) -> None:
+        """注册并认领一个预埋的数字校园号。
+
+        白名单语义：校园号必须由管理员预埋（password 为空 = 待注册）；
+        注册成功即占用，此后既不能再次注册，也不能换绑。
+        """
+        if self.login_is_limited():
+            self.send_json({"error": "操作过于频繁，请 5 分钟后再试"}, 429, {"Retry-After": "300"})
+            return
+        data = self.read_json(16_000)
+        username = str(data.get("username", "") or "").strip()
+        password = str(data.get("password", "") or "")
+        campus_id = str(data.get("campusId", "") or "").strip()
+        email = str(data.get("email", "") or "").strip().lower()
+        code = str(data.get("code", "") or "").strip()
+        real_name = str(data.get("realName", "") or "").strip()
+        grade = str(data.get("grade", "") or "").strip()
+        class_group = str(data.get("classGroup", "") or "").strip()
+        remember = bool(data.get("remember", False))
+        if not USERNAME_PATTERN.fullmatch(username):
+            raise ValueError("用户名必须为 3–32 位字母、数字、下划线或连字符")
+        if not campus_id or len(campus_id) > 32 or not campus_id.isalnum():
+            raise ValueError("请输入有效的数字校园号")
+        if "@" not in email or len(email) > 254:
+            raise ValueError("请输入有效邮箱地址")
+        if not re.fullmatch(r"\d{6}", code):
+            raise ValueError("请输入 6 位验证码")
+        if rate_limit_hit("register-ip", client_ip(self.client_address, self.headers), 5, 300) or \
+                rate_limit_hit("register-campus", campus_id.casefold(), 5, 300):
+            self.send_json({"error": "注册尝试过于频繁，请稍后再试"}, 429, {"Retry-After": "300"})
+            return
+        # 邮箱验证码：注册必须证明邮箱可用，验证码一次性消费
+        with neon_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT code, expires_at FROM email_verifications WHERE email = %s", (email,))
+                otp = cur.fetchone()
+        if not otp or str(otp[0]) != code or str(otp[1]) < iso_time():
+            raise ValueError("验证码无效或已过期")
+        _, digest = password_digest(password)
+        with neon_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute('SELECT * FROM "User" WHERE "campusId" = %s', (campus_id,))
+                target = cur.fetchone()
+                if target is None:
+                    raise ValueError("该数字校园号未开放注册")
+                if row_value(target, "password"):
+                    raise ValueError("校园号注册成功后即被占用")
+                cur.execute('SELECT 1 FROM "User" WHERE name = %s AND "id" != %s', (username, target["id"]))
+                if cur.fetchone():
+                    raise ValueError("用户名已存在")
+                cur.execute('SELECT 1 FROM "User" WHERE email = %s AND "id" != %s', (email, target["id"]))
+                if cur.fetchone():
+                    raise ValueError("该邮箱已被使用")
+                cur.execute(
+                    'UPDATE "User" SET name = %s, password = %s, email = %s, "realName" = %s, '
+                    'grade = %s, "classGroup" = %s WHERE id = %s',
+                    (username, digest, email, real_name or username, grade, class_group, target["id"]),
+                )
+                cur.execute("DELETE FROM email_verifications WHERE email = %s", (email,))
+                cur.execute('SELECT * FROM "User" WHERE id = %s', (target["id"],))
+                user = cur.fetchone()
+        headers = self.issue_console_session(user["id"], remember)
+        self.send_json(
+            {"ok": True, "user": self.attach_preview_id(self.public_user(user), user["id"])},
+            headers=headers,
         )
 
     # ── SSO (via sdsz) ──────────────────────────────────────────────
@@ -2304,6 +2411,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 login_links.handle_redeem(self, neon_db)
             elif path == "/api/auth/login":
                 self.handle_auth_login()
+            elif path == "/api/auth/register":
+                self.handle_auth_register()
             elif path == "/api/auth/send-otp":
                 self.handle_send_otp()
             elif path == "/api/auth/logout":
@@ -3290,12 +3399,29 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 pass
 
     def proxy_site_backend(self) -> bool:
+        path = urlparse(self.path).path
+        routed = (site_slug_from_host(self.headers.get('Host', ''))
+                  and (path == '/_api' or path.startswith('/_api/')))
+        routed = routed or re.match(r'^/pages/([A-Za-z0-9_-]{3,32})/_api(?:/|$)', path)
+        routed = routed or re.match(r'^/(preview|ai-preview)/([A-Za-z0-9_-]{32})(/run/[A-Za-z0-9_-]+)?/_api(?:/|$)', path)
+        if not routed:
+            return False
+        if not _PUBLIC_BACKEND_SLOTS.acquire(timeout=0.1):
+            self.send_json({'error': '网站动态服务繁忙，请稍后重试'}, 503, {'Retry-After': '2'})
+            return True
+        try:
+            return self._proxy_site_backend()
+        finally:
+            _PUBLIC_BACKEND_SLOTS.release()
+
+    def _proxy_site_backend(self) -> bool:
         """Route only this website's /_api/ requests to its private backend socket."""
         parsed = urlparse(self.path)
         path = parsed.path
         slug = site_slug_from_host(self.headers.get('Host', ''))
         prefix = ''
         user_id = None
+        resolved_slug = ''
         if slug and (path == '/_api' or path.startswith('/_api/')):
             prefix = '/_api'
         else:
@@ -3307,9 +3433,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 match = re.match(r'^/(preview|ai-preview)/([A-Za-z0-9_-]{32})(/run/[A-Za-z0-9_-]+)?/_api(?:/|$)', path)
                 if match:
                     with neon_db(autocommit=True) as conn, conn.cursor() as cur:
-                        cur.execute('SELECT user_id FROM hatchery_user_extras WHERE preview_id=%s', (match.group(2),))
+                        cur.execute('SELECT e.user_id,p.slug FROM hatchery_user_extras e LEFT JOIN hatchery_published_sites p ON p.user_id=e.user_id WHERE e.preview_id=%s', (match.group(2),))
                         row = cur.fetchone()
                     user_id = str(row[0]) if row else None
+                    resolved_slug = str(row[1] or '') if row else ''
                     prefix = match.group(0).rstrip('/')
         if not prefix:
             return False
@@ -3318,6 +3445,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 cur.execute('SELECT user_id FROM hatchery_published_sites WHERE slug=%s', (slug,))
                 row = cur.fetchone()
             user_id = str(row[0]) if row else None
+            resolved_slug = slug
         if not user_id or not site_runtime.enabled(user_id):
             self.send_json({'error': '当前网站没有已开通的动态服务'}, 404)
             return True
@@ -3338,7 +3466,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
             self.send_header('Content-Length', '0'); self.end_headers()
             return True
-        directory, _ = user_site_directory(user_id)
+        directory = resolved_site_directory(user_id, resolved_slug)
         headers = {name: value for name, value in self.headers.items()
                    if name.lower() not in {'cookie', 'authorization', 'host', 'connection', 'content-length', 'transfer-encoding'}
                    and not name.lower().startswith('x-')}
@@ -3987,6 +4115,14 @@ def execute_durable_ai_job(job, progress):
         raise
 
 
+def live_stream_user(headers):
+    handler = object.__new__(AIchemyHatcheryHandler)
+    handler.headers = Message()
+    for name, value in headers.raw_items(): handler.headers[name] = value
+    handler.client_address = ('127.0.0.1', 0)
+    return handler.console_user()
+
+
 def run_server(host: str, port: int) -> int:
     os.chdir(ROOT)
     initialize_database()
@@ -3998,6 +4134,8 @@ def run_server(host: str, port: int) -> int:
     print(f"炼丹社Hatchery（AIchemyHatchery）服务：http://{host}:{port}")
     http = ThreadingHTTPServer((host, port), AIchemyHatcheryHandler)
     dispatcher = ai_jobs.Dispatcher(AI_JOB_STORE, execute_durable_ai_job, ai_parallel_limit, ROOT / '.ai-job-results')
+    live = job_events.LiveServer(AI_JOB_STORE.events, live_stream_user, int(os.environ.get('HATCHERY_EVENT_PORT', port + 1)))
+    live.start()
     dispatcher.start()
     # systemd 停止时先发 SIGTERM。默认动作是立刻终止进程，finally 不会执行，
     # 在途任务的结果就写不回库。改成置位停止事件，让 serve_forever 正常返回。
@@ -4018,6 +4156,7 @@ def run_server(host: str, port: int) -> int:
         remaining = dispatcher.shutdown(grace_seconds=20.0)
         if remaining:
             print(f"[shutdown] {remaining} 个 AI 任务未在宽限期内结束", file=sys.stderr)
+        live.close()
         http.server_close()
     return 0
 

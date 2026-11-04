@@ -42,6 +42,9 @@
     compression: none
 
 - insert:
+    - id: hatchery-live-events
+      name: './live-events.mjs'
+
     - id: web
       name: '@deepseek-ai/dsh-web'
       config:

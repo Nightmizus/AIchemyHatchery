@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import hashlib
 import os
 import queue
 import re
@@ -540,6 +541,58 @@ class _EventProjector:
         self.analysis_sequence = 0
         self.trace: list[dict] = []
         self.trace_by_call: dict[str, dict] = {}
+        self.stream_attempt = None
+        self.stream_revision = 0
+        self.stream_index = 0
+        self.stream_text = ''
+        self.stream_last_emit = 0.0
+
+    def accept_stream(self, frame: dict) -> bool:
+        """Consume DSH's transient WebUI stream without inventing a final result."""
+        if not isinstance(frame, dict) or not isinstance(frame.get('revision'), int): return False
+        if frame.get('type') == 'start':
+            if not isinstance(frame.get('attemptId'), str): return False
+            self.stream_attempt = frame['attemptId']
+            self.stream_revision, self.stream_index = frame['revision'], 0
+            self.stream_text, self.stream_last_emit = '', 0.0
+            return True
+        if frame.get('attemptId') != self.stream_attempt or frame['revision'] != self.stream_revision + 1:
+            return False
+        self.stream_revision = frame['revision']
+        if frame.get('type') == 'chunk':
+            if frame.get('index') != self.stream_index: return False
+            self.stream_index += 1
+            chunk = frame.get('chunk') or {}
+            if chunk.get('type') == 'text-delta' and isinstance(chunk.get('text'), str):
+                self.stream_text = (self.stream_text + chunk['text'])[:32768]
+                if time.monotonic() - self.stream_last_emit >= 0.12: self._stream_preview(False)
+            return True
+        if frame.get('type') == 'end':
+            self._stream_preview(True)
+            self.stream_attempt = None
+            return True
+        return False
+
+    def _stream_preview(self, done: bool) -> None:
+        text = self.stream_text.strip()
+        if text.startswith('{'):
+            # Structured reports often stream {"summary":"..."}. Show only the
+            # partial summary string, not JSON syntax, operations or private fields.
+            match = re.match(r'^\{\s*"summary"\s*:\s*"', text)
+            if not match: return
+            chars, escaped = [], False
+            for char in text[match.end():]:
+                if char == '"' and not escaped: break
+                chars.append(char)
+                escaped = char == '\\' and not escaped
+            if escaped: chars.pop()
+            try: text = json.loads('"' + ''.join(chars) + '"')
+            except ValueError: return  # An incomplete Unicode escape waits for more.
+        if not text: return
+        self.stream_last_emit = time.monotonic()
+        key = hashlib.sha256(str(self.stream_attempt).encode()).hexdigest()[:16]
+        self._report('dsh-message-' + key, 'message', 'AI 正在回复', text,
+                     'done' if done else 'running', '')
 
     def accept(self, event: dict) -> None:
         event_type = event.get("type")
@@ -621,7 +674,7 @@ class _EventProjector:
                 "id": event_id,
                 "kind": kind,
                 "label": label[:100],
-                "detail": detail[:600],
+                "detail": detail[:32768] if kind == 'message' else detail[:600],
                 "status": status,
                 "tool": tool,
             })
@@ -993,6 +1046,12 @@ def run_deepseek_harness(
             method = notification.get("method")
             payload = notification.get("params") if isinstance(notification.get("params"), dict) else {}
             if payload.get("sessionId") != session_id:
+                continue
+            if method == 'hatchery.assistant':
+                if projector.accept_stream(payload.get('frame')):
+                    last_useful = time.monotonic()
+                    received = True
+                    heartbeat_reported = False
                 continue
             if method == "session.event":
                 event = payload.get("event")

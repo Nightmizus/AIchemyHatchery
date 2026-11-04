@@ -756,7 +756,9 @@ function fetchAiChatSession(){
 }
 function acceptServerSession(session){
   if(!session)return;
-  for(const job of session.jobs||[])rememberServerJob(job);
+  const current=[...aiRuns.values()].filter(run=>run.jobId).map(run=>run.snapshot);
+  const jobs=window.HatcheryJobStream?window.HatcheryJobStream.mergeOrderedBaseline(current,session.jobs||[],job=>job.jobId):session.jobs||[];
+  for(const job of jobs)rememberServerJob(job);
   aiChatSessionId=session.id;
   aiSessionHtml=session.messagesHtml||AI_CHAT_INITIAL_HTML;
   applyAiChatHtml(aiSessionHtml);
@@ -982,8 +984,76 @@ function archiveAiRunOutputInto(root){
   if(resultShown)freeze(result);
   freeze(card);
 }
+let aiLiveConnection=null;
+let aiLastReconcile=0;
+function stopAiLiveUpdates(){aiLiveConnection?.stop();aiLiveConnection=null}
+function refreshLiveChatMarkup(){
+  const messages=document.querySelector('#aiChatMessages');
+  messages._serverHtml=null;aiSessionHtml=messages.innerHTML;
+  updateAiBusy();updateAiEmptyState();updateAiContextRing();renderAiQueueStatus();
+}
+function applyAiLiveJob(payload){
+  const job=payload?.job;if(!job||job.kind==='security'||job.mode==='security')return;
+  const previous=aiRuns.get(job.jobId)?.snapshot;
+  if(previous&&Date.parse(previous.updatedAt)>Date.parse(job.updatedAt))return;
+  const messages=document.querySelector('#aiChatMessages'),conversation=document.querySelector('#aiConversation');
+  const atBottom=conversation.scrollHeight-conversation.scrollTop-conversation.clientHeight<120;
+  // A queued event may arrive before the POST response. Replace its local receipt.
+  for(const run of aiRuns.values())if(run.requestId===job.requestId&&run.status==='submitting')messages.querySelector(`[data-ai-local-run="${CSS.escape(run.id)}"]`)?.remove();
+  const key=CSS.escape(job.jobId),old=messages.querySelector(`section[data-ai-job-id="${key}"]`);
+  const expanded=old?.querySelector('details')?.open;
+  const fragment=document.createElement('template');fragment.innerHTML=String(payload.html||'');
+  const output=fragment.content.querySelector(`section[data-ai-job-id="${key}"]`);
+  const prompt=fragment.content.querySelector(`[data-ai-job-message="${key}"]`);
+  if(!output||!prompt)throw new Error('Invalid live job projection');
+  const oldPrompt=messages.querySelector(`[data-ai-job-message="${key}"]`);
+  if(old){old.replaceWith(output);if(oldPrompt)oldPrompt.replaceWith(prompt);else output.before(prompt)}
+  else{
+    const next=[...messages.querySelectorAll('section[data-ai-job-id]')].find(node=>Number(aiRuns.get(node.dataset.aiJobId)?.snapshot?.sequence)>Number(job.sequence));
+    const before=next?messages.querySelector(`[data-ai-job-message="${CSS.escape(next.dataset.aiJobId)}"]`)||next:null;
+    messages.insertBefore(prompt,before);messages.insertBefore(output,before);
+  }
+  rememberServerJob(job);
+  const details=output.querySelector('details');if(details)details.open=Boolean(expanded||(job.status==='running'&&previous?.status!=='running'));
+  for(const node of messages.querySelectorAll('#aiRunCard,#aiRunFinal,#aiRunSummary'))node.removeAttribute('id');
+  const latest=[...messages.querySelectorAll('section[data-ai-job-id]')].at(-1);
+  if(latest){latest.id='aiRunCard';const final=latest.querySelector('.ai-run-final');if(final){final.id='aiRunFinal';if(final.firstElementChild)final.firstElementChild.id='aiRunSummary'}}
+  window.AIchemyHatcheryMarkdown.renderAll(output);
+  refreshLiveChatMarkup();
+  if(!['queued','running'].includes(job.status)){ackAiRun(job.jobId);if(aiFilesNeedRefresh){aiFilesNeedRefresh=false;void reloadSiteFiles().catch(()=>{aiFilesNeedRefresh=true})}}
+  if(atBottom)scrollAiConversation(true);
+}
+function applyAiLiveProgress(payload){
+  const run=aiRuns.get(payload?.jobId),event=payload?.event;
+  if(!run||!event||run.status!=='running'||Date.parse(run.snapshot.updatedAt)>Date.parse(payload.updatedAt))return;
+  const events=run.snapshot.events||(run.snapshot.events=[]),prior=events.find(item=>item.id===event.id);
+  if(prior)Object.assign(prior,event);else events.push({...event});
+  run.snapshot.updatedAt=payload.updatedAt;
+  const output=document.querySelector(`section[data-ai-job-id="${CSS.escape(payload.jobId)}"]`);if(!output)return;
+  if(event.kind==='context'){output.dataset.contextUsage=JSON.stringify(event.contextUsage||{});updateAiContextRing();return}
+  const stream=output.querySelector('.ai-run-stream');if(!stream)return;
+  const conversation=document.querySelector('#aiConversation'),atBottom=conversation.scrollHeight-conversation.scrollTop-conversation.clientHeight<120;
+  let node=stream.querySelector(`[data-ai-event-id="${CSS.escape(String(event.id))}"]`);
+  if(!node){node=document.createElement('p');node.dataset.aiEventId=String(event.id);stream.append(node)}
+  node.className=`ai-run-tool${event.status==='failed'?' failed':''}`;
+  const label=document.createElement('b');label.textContent=String(event.label||'');
+  node.replaceChildren(label,document.createTextNode(' '+String(event.detail||'')));
+  document.querySelector('#aiChatMessages')._serverHtml=null;if(atBottom)scrollAiConversation(true);
+}
+function startAiLiveUpdates(user){
+  stopAiLiveUpdates();if(!window.HatcheryJobStream||currentConsoleUser!==user)return;
+  const endpoint=new URL('/api/ai/events',location.href);endpoint.protocol=location.protocol==='https:'?'wss:':'ws:';
+  // The development HTTP and WebSocket listeners are adjacent loopback ports.
+  if(location.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(location.hostname)&&location.port)endpoint.port=String(Number(location.port)+1);
+  aiLiveConnection=new window.HatcheryJobStream.Connection({url:endpoint.href,
+    snapshot:()=>currentConsoleUser===user?resumeAiRuns({fromStream:true}):Promise.resolve(),
+    event:(type,payload)=>{if(currentConsoleUser!==user)return;if(type==='job')applyAiLiveJob(payload);else applyAiLiveProgress(payload)}});
+  aiLiveConnection.start();
+}
+
 const aiSeenCompletions=new Set();
 let aiHistoryPollBusy=false;
+let aiHistoryPollPromise=null;
 let aiFilesNeedRefresh=false;
 let aiQueueStatus=null;
 function renderAiQueueStatus(){
@@ -996,14 +1066,22 @@ function renderAiQueueStatus(){
 function rememberServerJob(job){
   if(!job?.jobId||!['queued','running','completed','failed','interrupted'].includes(job.status))throw new Error('服务器未返回有效任务确认');
   const previous=aiRuns.get(job.jobId);
+  if(previous?.snapshot&&Date.parse(previous.snapshot.updatedAt)>Date.parse(job.updatedAt))return;
   aiRuns.set(job.jobId,{id:job.jobId,jobId:job.jobId,mode:job.mode,status:job.status,
     startedAt:Date.parse(job.startedAt||job.createdAt),snapshot:job,payload:job.result});
     if(!['queued','running'].includes(job.status)&&!aiSeenCompletions.has(job.jobId)){
     aiSeenCompletions.add(job.jobId);aiFilesNeedRefresh=true;
   }
 }
-async function resumeAiRuns(){
-  if(!currentConsoleUser||aiHistoryPollBusy)return;
+function resumeAiRuns({fromStream=false}={}){
+  if(!currentConsoleUser)return Promise.resolve();
+  if(aiLiveConnection?.connected&&!fromStream)return aiLiveConnection.refresh();
+  if(aiHistoryPollPromise)return aiHistoryPollPromise;
+  aiHistoryPollPromise=refreshAiRuns(fromStream).finally(()=>{aiHistoryPollPromise=null;aiLastReconcile=Date.now()});
+  return aiHistoryPollPromise;
+}
+async function refreshAiRuns(strict=false){
+  if(!currentConsoleUser)return;
   const user=currentConsoleUser;
   aiHistoryPollBusy=true;
   try{
@@ -1022,10 +1100,10 @@ async function resumeAiRuns(){
     }
     if(aiChatSessionId)await syncAiChatSessionFromServer();
     if(aiFilesNeedRefresh){aiFilesNeedRefresh=false;try{await reloadSiteFiles()}catch(error){aiFilesNeedRefresh=true;throw error}}
-  }catch{/* Keep the existing transcript during a network outage. */}
+  }catch(error){/* Preserve the transcript; reconnect if its baseline failed. */if(strict)throw error}
   finally{aiHistoryPollBusy=false;renderAiQueueStatus();updateAiBusy()}
 }
-setInterval(()=>{if(currentConsoleUser&&document.visibilityState==='visible')void resumeAiRuns()},1800);
+setInterval(()=>{const interval=aiLiveConnection?.connected?60000:anyAiRunActive()?5000:15000;if(currentConsoleUser&&document.visibilityState==='visible'&&Date.now()-aiLastReconcile>=interval)void resumeAiRuns()},1000);
 window.addEventListener('focus',()=>{void resumeAiRuns();if(currentConsoleUser)void reloadSiteFiles().catch(()=>{})});
 window.addEventListener('online',()=>void resumeAiRuns());
 
@@ -1056,6 +1134,7 @@ async function consoleRequest(path,options={}){
   }finally{clearTimeout(timer)}
 }
 function showAuthGate(message=''){
+  stopAiLiveUpdates();
   resetTemplatePicker();
   clearAiComposer();
   window.AIchemyHatcherySecurity?.reset();
@@ -1067,6 +1146,7 @@ function updateConsoleAccount(){
   document.querySelector('#consoleAvatar').textContent=initial;document.querySelector('#menuAvatar').textContent=initial;document.querySelector('#menuUsername').textContent=username;const railName=document.querySelector('#activityAccountName');if(railName)railName.textContent=username;document.querySelector('#accountUsername').textContent=username;document.querySelector('#accountPreviewPath').textContent=currentConsoleUser.previewId?`/preview/${currentConsoleUser.previewId}`:'首次预览后生成';document.querySelector('#accountPublishPath').textContent=currentConsoleUser.publishSlug?new URL(currentConsoleUser.publishUrl||`/pages/${currentConsoleUser.publishSlug}/`,location.origin).href:'未发布';document.querySelector('#inviteManagerBtn').hidden=currentConsoleUser.role!=='admin';
 }
 async function enterConsole(user){
+  stopAiLiveUpdates();
   resetTemplatePicker();
   const loadId=++consoleLoadId;
   const isCurrentLoad=()=>currentConsoleUser===user&&consoleLoadId===loadId;
@@ -1091,7 +1171,7 @@ async function enterConsole(user){
     }catch(error){if(!isCurrentLoad())return;window.HatcheryPreview.fail(`读取网站文件失败：${error.message}`);showToast(`读取网站文件失败：${error.message}`);if(error.status===401){showAuthGate('登录已过期，请重新登录');return}}
     finally{if(isCurrentLoad())fileSiteLoading=false}
   })();
-  const loadAiSessions=initAiChatSessions().then(()=>void resumeAiRuns());
+  const loadAiSessions=initAiChatSessions().then(async()=>{await resumeAiRuns();if(isCurrentLoad())startAiLiveUpdates(user)});
   // Status now depends on the signed-in account's personal API configuration.
   void loadAiStatus();
   updateConsoleAccount();loadAiPermissionMode();uiHide(document.querySelector('#authGate'));restoreAiReloadUi();
@@ -1223,7 +1303,7 @@ async function executeAiRun(run){
     if(user!==currentConsoleUser)return {accepted:false,error:'登录账号已变更'};
     aiRuns.delete(run.id);rememberServerJob(job);
     try{if(JSON.parse(sessionStorage.getItem(pendingKey)||'null')?.id===run.requestId)sessionStorage.removeItem(pendingKey)}catch{}
-    await syncAiChatSessionFromServer();
+    if(aiLiveConnection?.connected)await aiLiveConnection.refresh();else await syncAiChatSessionFromServer();
     showToast(job.status==='queued'?'已在服务器排队，关闭页面后仍会继续':'请求已受理');
     return {accepted:true,job};
   }catch(error){
