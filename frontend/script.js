@@ -1064,7 +1064,7 @@ function renderAiQueueStatus(){
   for(const node of document.querySelectorAll('[data-ai-status="queued"] .ai-working-status'))node.textContent=`已在服务器排队 · ${detail}；关闭页面后仍会继续`;
 }
 function rememberServerJob(job){
-  if(!job?.jobId||!['queued','running','completed','failed','interrupted'].includes(job.status))throw new Error('服务器未返回有效任务确认');
+  if(!job?.jobId||!['queued','running','completed','failed','interrupted','cancelled'].includes(job.status))throw new Error('服务器未返回有效任务确认');
   const previous=aiRuns.get(job.jobId);
   if(previous?.snapshot&&Date.parse(previous.snapshot.updatedAt)>Date.parse(job.updatedAt))return;
   aiRuns.set(job.jobId,{id:job.jobId,jobId:job.jobId,mode:job.mode,status:job.status,
@@ -1222,7 +1222,7 @@ async function openInviteManager(){
   try{const [userPayload,usagePayload,aiConfig,sitesPayload]=await Promise.all([consoleRequest('/api/admin/users'),consoleRequest('/api/admin/ai-usage'),consoleRequest('/api/admin/ai-config'),consoleRequest('/api/admin/sites')]);const users=(userPayload.users||[]).map(item=>{const own=item.username.toLowerCase()===currentConsoleUser?.username?.toLowerCase();const status=item.status==='active'?'正常':'已停用';return `<div class="admin-user-row"><span class="console-avatar">${esc(item.username.slice(0,1).toUpperCase())}</span><div><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${item.role==='admin'?'管理员':'用户'} · ${item.published?'已发布':'未发布'} · ${item.sessionCount} 个会话</small></div><em class="${item.status}">${status}</em>${own?'<i>当前账号</i>':`<button data-user-status="${item.status==='active'?'disabled':'active'}" data-user-name="${esc(item.username)}">${item.status==='active'?'停用':'启用'}</button>${item.status==='active'?`<button data-impersonate data-user-name="${esc(item.username)}">登录</button>`:''}`}</div>`}).join('')||'<div class="invite-empty">暂无用户</div>';const usageRows=(usagePayload.usage||[]).map(item=>`<div class="admin-usage-row"><span><b>${esc(item.username)}</b><small>${item.realName?esc(item.realName)+' · ':''}${esc(item.campusId||'')} · ${item.runs} 次任务</small></span><em>${fmtTokenCount(item.dayTokens)}</em><em>${fmtTokenCount(item.weekTokens)}</em><em>${fmtTokenCount(item.totalTokens)}</em><button data-ai-chats="${esc(String(item.userId))}" data-user-name="${esc(item.username)}">记录</button></div>`).join('')||'<div class="invite-empty">还没有 AI 使用记录</div>';const siteRows=(sitesPayload.sites||[]).map(renderAdminSiteRow).join('')||'<div class="invite-empty">还没有发布的网站</div>';const totals=usagePayload.totals||{};const aiKeySection=renderAiServiceSettings(aiConfig);openModal('管理后台',`<div class="admin-console"><section><header><div><small>USERS</small><h3>控制台用户</h3></div><b>${userPayload.total||0}</b></header><div class="admin-user-list">${users}</div></section><section class="ai-usage-manager"><header><div><small>AI TOKENS</small><h3>AI 用量统计</h3></div><button data-ai-chats="" data-user-name="全部用户">全部记录</button></header><p>今日 ${fmtTokenCount(totals.dayTokens)} · 近 7 天 ${fmtTokenCount(totals.weekTokens)} · 累计 ${fmtTokenCount(totals.totalTokens)} tokens（已知用量；${totals.unknownRuns||0} 次任务用量未知）</p><div class="admin-usage-head"><span>用户</span><span>今日</span><span>近 7 天</span><span>累计</span><span></span></div><div class="admin-usage-list">${usageRows}</div></section><section class="admin-sites-manager"><header><div><small>PUBLISHED SITES</small><h3>已发布网站</h3></div><a href="/gallery" target="_blank" rel="noopener">Gallery ↗</a></header><p class="admin-sites-help">新发布的网站默认归入其他网站；点击按钮即可调整分类。未收录的网站仍不会公开展示。</p><div class="admin-site-list">${siteRows}</div></section>${aiKeySection}</div>`)}catch(error){openModal('管理后台',`<div class="invite-empty">${esc(error.message)}</div>`)}
 }
 async function openAiChats(userId,username){
-  try{const payload=await consoleRequest(`/api/admin/ai-chats${userId?`?userId=${encodeURIComponent(userId)}`:''}`);const rows=(payload.chats||[]).map(item=>{const time=esc(String(item.createdAt||'').replace('T',' ').slice(0,19));const atts=(item.attachments||[]).map(att=>`<i>${att.kind==='image'?'图片':'附件'} · ${esc(att.name||'')}</i>`).join('');return `<article class="ai-chat-item"><header><b>${esc(item.username)}</b><span>${time} · ${esc(item.model||item.provider||'AI')} · ${fmtTokenCount(item.totalTokens)} tokens（入 ${fmtTokenCount(item.inputTokens)} / 出 ${fmtTokenCount(item.outputTokens)}）· ${item.status==='completed'?'完成':'失败'}</span></header><p>${esc(item.prompt)}</p>${atts?`<div class="ai-chat-atts">${atts}</div>`:''}</article>`}).join('')||'<div class="invite-empty">暂无聊天记录</div>';openModal(`AI 记录 · ${username||'全部用户'}`,`<div class="ai-chat-manager"><button class="ai-chat-back" data-ai-chats-back>← 返回管理后台</button><div class="ai-chat-list">${rows}</div></div>`)}catch(error){showToast(error.message)}
+  try{const payload=await consoleRequest(`/api/admin/ai-chats${userId?`?userId=${encodeURIComponent(userId)}`:''}`);const rows=(payload.chats||[]).map(item=>{const time=esc(String(item.createdAt||'').replace('T',' ').slice(0,19));const atts=(item.attachments||[]).map(att=>`<i>${att.kind==='image'?'图片':'附件'} · ${esc(att.name||'')}</i>`).join('');return `<article class="ai-chat-item"><header><b>${esc(item.username)}</b><span>${time} · ${esc(item.model||item.provider||'AI')} · ${fmtTokenCount(item.totalTokens)} tokens（入 ${fmtTokenCount(item.inputTokens)} / 出 ${fmtTokenCount(item.outputTokens)}）· ${item.status==='completed'?'完成':item.status==='cancelled'?'已停止':'失败'}</span></header><p>${esc(item.prompt)}</p>${atts?`<div class="ai-chat-atts">${atts}</div>`:''}</article>`}).join('')||'<div class="invite-empty">暂无聊天记录</div>';openModal(`AI 记录 · ${username||'全部用户'}`,`<div class="ai-chat-manager"><button class="ai-chat-back" data-ai-chats-back>← 返回管理后台</button><div class="ai-chat-list">${rows}</div></div>`)}catch(error){showToast(error.message)}
 }
 async function logoutConsole(){
   try{await persistDraftSnapshot(JSON.stringify(state))}catch{}uiHide(document.querySelector('#consoleAccountMenu'));if(window.AIchemyHatcheryAuth)await window.AIchemyHatcheryAuth.logout();else showAuthGate();showToast('已退出控制台账号');
@@ -1232,6 +1232,28 @@ document.querySelector('#aiAdjustBtn').addEventListener('click',async()=>{
   const promptInput=document.querySelector('#aiPrompt');const typedPrompt=promptInput.value.trim();if(!typedPrompt&&!aiAttachments.length){showToast('输入修改要求，或先添加附件');promptInput.focus();return}
   const prompt=typedPrompt||'请根据附件内容调整网站。';const requestAttachments=aiAttachments.map(item=>({...item}));promptInput.value='';promptInput.style.height='auto';aiAttachments=[];renderAiAttachments();
   await startAiRun(prompt,requestAttachments);
+});
+document.querySelector('#aiChatMessages').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-ai-cancel]');
+  if(!button||button.disabled||!currentConsoleUser)return;
+  const user=currentConsoleUser,jobId=button.dataset.aiCancel;
+  button.disabled=true;button.textContent='正在请求停止…';
+  try{
+    const job=await consoleRequest('/api/ai/run/cancel',{method:'POST',body:{jobId}});
+    if(user!==currentConsoleUser)return;
+    rememberServerJob(job);
+    showToast(job.status==='running'?'停止请求已受理，正在结束任务':job.status==='cancelled'?'任务已取消':'任务已经结束');
+    try{await syncAiChatSessionFromServer()}catch{ /* Accepted control survives a failed history refresh. */ }
+  }catch(error){
+    if(user===currentConsoleUser)showToast(error.message||'暂时无法确认停止结果，请检查任务状态后重试');
+  }finally{
+    if(user===currentConsoleUser){
+      const run=aiRuns.get(jobId);
+      button.disabled=Boolean(run?.snapshot?.cancelRequested);
+      button.textContent=button.disabled?'正在停止…':run?.status==='queued'?'取消排队':'停止任务';
+      updateAiBusy();void resumeAiRuns();
+    }
+  }
 });
 function aiChatHistoryForContext(limit=8){
   // 提取最近几轮对话（用户消息 + AI 摘要），作为本次请求的上下文
@@ -1292,7 +1314,7 @@ async function executeAiRun(run){
             keepalive:new TextEncoder().encode(body).length<60000});
           const payload=await response.json();
           if(!response.ok){const error=new Error(payload.error||'请求未被接受');if(response.status<500)error.status=response.status;throw error}
-          if(!payload.jobId||payload.requestId!==run.requestId||!['queued','running','completed','failed','interrupted'].includes(payload.status))throw new Error('服务器未返回有效任务确认');
+          if(!payload.jobId||payload.requestId!==run.requestId||!['queued','running','completed','failed','interrupted','cancelled'].includes(payload.status))throw new Error('服务器未返回有效任务确认');
           job=payload;break;
         }finally{clearTimeout(timer)}
       }catch(error){
@@ -1303,7 +1325,8 @@ async function executeAiRun(run){
     if(user!==currentConsoleUser)return {accepted:false,error:'登录账号已变更'};
     aiRuns.delete(run.id);rememberServerJob(job);
     try{if(JSON.parse(sessionStorage.getItem(pendingKey)||'null')?.id===run.requestId)sessionStorage.removeItem(pendingKey)}catch{}
-    if(aiLiveConnection?.connected)await aiLiveConnection.refresh();else await syncAiChatSessionFromServer();
+    try{if(aiLiveConnection?.connected)await aiLiveConnection.refresh();else await syncAiChatSessionFromServer()}
+    catch{admission.textContent='服务器已受理，历史暂未同步；任务会继续执行'}
     showToast(job.status==='queued'?'已在服务器排队，关闭页面后仍会继续':'请求已受理');
     return {accepted:true,job};
   }catch(error){

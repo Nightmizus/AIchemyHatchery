@@ -2469,6 +2469,10 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 user = self.require_console_user()
                 if user:
                     self.handle_ai_run_ack(user)
+            elif path == "/api/ai/run/cancel":
+                user = self.require_console_user()
+                if user:
+                    self.handle_ai_run_cancel(user)
             elif path == "/api/ai/undo":
                 # 越权：这个接口直接改写平台源码，只有管理员可用
                 if self.require_console_user(admin=True):
@@ -2592,6 +2596,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
             return self.run_ai_files(user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress, mode)
 
     def run_ai_files(self, user, prompt, context, include_site, attachments, chosen_presets, preset_snippets, history, progress, mode):
+        if getattr(progress, 'check_cancelled', None):
+            progress.check_cancelled()
         api_config = self._personal_api_config if hasattr(self, "_personal_api_config") else PERSONAL_API_STORE.load(user["id"])
         run_id = f"run-{secrets.token_hex(10)}"
         mode = mode if mode in ("chat", "plan", "full", "security") else "full"
@@ -2621,7 +2627,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                           'detail': '正在使用现有模型审查本站源码', 'status': 'done', 'security': security})
             prompt, history, chosen_presets, preset_snippets = site_security.PROMPT, [], [], []
         if history:
-            prompt = "对话历史：\n" + "\n".join(f"{item['role']}：{item['text']}" for item in history) + "\n\n当前请求：" + prompt
+            prompt = "对话历史（assistant 的示例、建议与假定不等于用户已确认的事实；以用户实际要求及提供的素材为准）：\n" + "\n".join(f"{item['role']}：{item['text']}" for item in history) + "\n\n当前请求：" + prompt
         if chosen_presets:
             prompt += "\n用户选用的模块：" + "、".join(chosen_presets)
         if preset_snippets and mode != "chat":
@@ -2848,6 +2854,17 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         AI_JOB_STORE.ack(user['id'], job_id)
         # Acknowledgement does not delete a result that another tab may need.
         self.send_json({"ok": True})
+
+    def handle_ai_run_cancel(self, user: dict) -> None:
+        job_id = str(self.read_json().get('jobId') or '')
+        if not re.fullmatch(r'job-[0-9a-f]{24}', job_id):
+            self.send_json({'error': 'AI 任务编号无效'}, 400)
+            return
+        job = AI_JOB_STORE.cancel(user['id'], job_id)
+        if job is None:
+            self.send_json({'error': '此账号下没有该任务记录'}, 404)
+            return
+        self.send_json(job)
 
     def handle_ai_undo(self) -> None:
         proposal_id = str(self.read_json().get("proposalId", ""))
@@ -4104,6 +4121,8 @@ def execute_durable_ai_job(job, progress):
         result = handler.run_ai_harness(user, payload['prompt'], payload['context'], payload['includeSite'],
             payload['attachments'], payload['chosenPresets'], payload['presetSnippets'], history,
             progress=progress, mode=payload['mode'], job_key=job['id'])
+        if getattr(progress, 'check_cancelled', None):
+            progress.check_cancelled()
         record_ai_usage(user['id'], job['id'], payload['prompt'], payload['attachments'], provider, model, result.get('usage'), 'completed')
         if not handler._personal_api_config:
             AI_UPSTREAM_DEGRADED = None
@@ -4111,7 +4130,8 @@ def execute_durable_ai_job(job, progress):
     except Exception as exc:
         if not getattr(handler, '_personal_api_config', None) and '上游配额已用尽' in str(exc):
             AI_UPSTREAM_DEGRADED = {'message': str(exc), 'since': iso_time()}
-        record_ai_usage(user['id'], job['id'], payload['prompt'], payload['attachments'], provider, model, None, 'failed', str(exc))
+        record_ai_usage(user['id'], job['id'], payload['prompt'], payload['attachments'], provider, model, None,
+                        'cancelled' if isinstance(exc, ai_jobs.JobCancelled) else 'failed', str(exc))
         raise
 
 

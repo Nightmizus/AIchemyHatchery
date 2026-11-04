@@ -10,6 +10,7 @@ from pathlib import Path
 import secrets
 import socket
 import threading
+import time
 
 SOCKET = '/run/hatchery-sites/control.sock'
 _capabilities = {}
@@ -78,6 +79,15 @@ def capability(user_id, workspace, mode):
     finally:
         with _lock:
             _capabilities.pop(token, None)
+        # Revocation prevents new calls. Keep the website task/lock alive until
+        # already accepted HTTP operations return (their socket timeout is 120s).
+        deadline = time.monotonic() + 125
+        while time.monotonic() < deadline:
+            with _lock:
+                if not _effects.get(token, {}).get('pending'):
+                    break
+            time.sleep(0.05)
+        with _lock:
             _effects.pop(token, None)
 
 

@@ -56,6 +56,23 @@ class QueueFull(ValueError):
     pass
 
 
+STOP_MESSAGE = '已停止本次任务；已保存的文件保留。已提交的后台操作可能仍在收尾，请核对后再继续。'
+
+
+class JobCancelled(RuntimeError):
+    def __init__(self):
+        super().__init__(STOP_MESSAGE)
+
+
+def is_stop_request(payload):
+    # Only standalone controls. “停止网站服务” and quoted instructions are tasks.
+    text = re.sub(r'[\s，。！？,.!?]+', '', payload.get('prompt', '')).lower()
+    return (not is_security(payload) and not payload.get('attachments') and text in {
+        '停', '停停', '停停停', '停止', '停止生成', '停止任务', '暂停', '暂停生成',
+        '先停一下', '停一下', '等一下', '等一下我要添加文件', '先等等我要上传文件',
+        'stop', 'cancel', '/stop', '/cancel'})
+
+
 DDL = """
 ALTER TABLE hatchery_ai_chat_sessions ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS hatchery_ai_jobs (
@@ -80,6 +97,7 @@ CREATE TABLE IF NOT EXISTS hatchery_ai_jobs (
 CREATE INDEX IF NOT EXISTS hatchery_ai_jobs_session_idx ON hatchery_ai_jobs(user_id, session_id, seq);
 CREATE INDEX IF NOT EXISTS hatchery_ai_jobs_queue_idx ON hatchery_ai_jobs(status, seq);
 CREATE UNIQUE INDEX IF NOT EXISTS hatchery_ai_jobs_running_user_idx ON hatchery_ai_jobs(user_id) WHERE status = 'running';
+ALTER TABLE hatchery_ai_jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT false;
 """
 
 
@@ -97,6 +115,7 @@ def public_job(row):
             "sessionId": row["session_id"], "prompt": payload["prompt"],
             "mode": payload.get("mode", "full"), "status": row["status"],
             "kind": payload.get("kind", "chat"),
+            "cancelRequested": bool(row.get('cancel_requested')),
             "events": json.loads(row["events_json"]),
             "result": json.loads(row["result_json"]) if row["result_json"] else None,
             "error": row["error"], "createdAt": iso(row["created_at"]),
@@ -131,7 +150,12 @@ def render_history(legacy, jobs):
         chunks.append(f'<section class="ai-run-output ai-run-archive"{card_id} {attributes}{usage_attr}>')
         if status in ('queued', 'running'):
             label = '已在服务器排队，关闭页面后仍会继续' if status == 'queued' else 'AI 正在处理请求'
+            if job.get('cancelRequested'):
+                label = '正在停止，等待执行进程退出；已保存的文件会保留'
             chunks.append(f'<p class="ai-working-status" role="status">{label}</p>')
+            disabled = ' disabled' if job.get('cancelRequested') else ''
+            control = '正在停止…' if disabled else ('取消排队' if status == 'queued' else '停止任务')
+            chunks.append(f'<button type="button" data-ai-cancel="{esc(jid)}"{disabled}>{control}</button>')
         events = ''.join(f'<p data-ai-event-id="{esc(e.get("id"))}" class="ai-run-tool {"failed" if e.get("status")=="failed" else ""}"><b>{esc(e.get("label"))}</b> {esc(e.get("detail"))}</p>'
                          for e in job.get('events', []) if e.get('kind') != 'context')
         chunks.append(f'<details class="ai-run-process"><summary>查看过程</summary><div class="ai-run-stream">{events}</div></details>')
@@ -146,7 +170,7 @@ def render_history(legacy, jobs):
         hidden = ' hidden' if status in ('queued', 'running') else ''
         chunks.append(f'<div class="ai-run-final"{final_id}{hidden}><p{summary_id}>{summary}</p>')
         plan = result.get('plan')
-        if plan:
+        if plan and status == 'completed':
             chunks.append(f'<div class="ai-plan-box"><p>{esc(plan)}</p><button type="button" data-ai-plan-execute>按此计划执行</button></div>')
         for name in result.get('changedFiles', []):
             chunks.append(f'<div class="ai-change">已修改文件：{esc(name)}</div>')
@@ -217,6 +241,52 @@ class JobStore:
         self.wake = threading.Event()
         self._live_lock = threading.Lock()
         self._live_progress = {}
+        self._cancel_signals = {}
+
+    def signal_cancellation(self, rows):
+        with self._live_lock:
+            for row in rows:
+                signal = self._cancel_signals.get(row['id'])
+                if signal is not None:
+                    signal.set()
+        self.wake.set()
+        for row in rows:
+            self.emit_state(row)
+
+    def poll_cancellations(self, ids):
+        if not ids:
+            return
+        with self.read_db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('SELECT id FROM hatchery_ai_jobs WHERE id=ANY(%s) AND cancel_requested', (list(ids),))
+            rows = cur.fetchall()
+        # Polling covers another process accepting a cancellation; do not emit
+        # duplicate state each second. Local acceptance signals immediately.
+        with self._live_lock:
+            for row in rows:
+                signal = self._cancel_signals.get(row['id'])
+                if signal is not None:
+                    signal.set()
+
+    @staticmethod
+    def _cancel_rows(cur, uid, job_id=None):
+        cur.execute(f'''UPDATE hatchery_ai_jobs SET cancel_requested=true,
+            status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,
+            finished_at=CASE WHEN status='queued' THEN now() ELSE finished_at END,
+            error=CASE WHEN status='queued' THEN %s ELSE error END,updated_at=now()
+            WHERE user_id=%s AND status IN ('queued','running') AND NOT cancel_requested
+                AND ({_chat_jobs()}) {'AND id=%s' if job_id else ''} RETURNING *''',
+            ('已取消排队，本任务未开始执行。', str(uid), job_id) if job_id else ('已取消排队，本任务未开始执行。', str(uid)))
+        return cur.fetchall()
+
+    def cancel(self, user_id, job_id):
+        with self.db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('LOCK TABLE hatchery_ai_jobs IN SHARE ROW EXCLUSIVE MODE')
+            rows = self._cancel_rows(cur, user_id, job_id)
+            cur.execute(f'SELECT * FROM hatchery_ai_jobs WHERE user_id=%s AND id=%s AND ({_chat_jobs()})',
+                        (str(user_id), job_id))
+            row = cur.fetchone()
+        self.signal_cancellation(rows)
+        return self._public_job(row) if row else None
 
     def _public_job(self, row):
         job = public_job(row)
@@ -224,7 +294,8 @@ class JobStore:
             live = self._live_progress.get(row['id'])
             if live and live['user_id'] == str(row['user_id']) and row['status'] == 'running':
                 job['events'] = copy.deepcopy(live['events'])
-                job['updatedAt'] = live['updated_at']
+                if datetime.fromisoformat(live['updated_at']) > datetime.fromisoformat(job['updatedAt']):
+                    job['updatedAt'] = live['updated_at']
         return job
 
     def emit_state(self, row):
@@ -262,6 +333,8 @@ class JobStore:
         audit = is_security(payload)
         session_id = security_session_id(uid, request_id) if audit else conversation_id(uid)
         job_id = 'job-' + uuid.uuid4().hex[:24]
+        stopping = is_stop_request(payload)
+        cancelled_rows = []
         with self.db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Serializes acceptance, claiming, and queue limits across threads/processes.
             cur.execute('LOCK TABLE hatchery_ai_jobs IN SHARE ROW EXCLUSIVE MODE')
@@ -273,7 +346,7 @@ class JobStore:
                     raise Conflict('同一请求编号不能用于不同内容')
                 return public_job(previous)
             cur.execute("SELECT count(*) AS n FROM hatchery_ai_jobs WHERE user_id=%s AND status IN ('queued','running')", (uid,))
-            if cur.fetchone()['n'] >= limit:
+            if cur.fetchone()['n'] >= limit and not stopping:
                 raise QueueFull('等待中的任务已达上限，请等待现有任务结束后再发送')
             now = datetime.now(timezone.utc).isoformat()
             cur.execute('INSERT INTO hatchery_ai_chat_sessions(id,user_id,title,messages_html,created_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING',
@@ -281,7 +354,18 @@ class JobStore:
             cur.execute('INSERT INTO hatchery_ai_jobs(id,user_id,session_id,request_id,payload_json) VALUES(%s,%s,%s,%s,%s) RETURNING *',
                         (job_id, uid, session_id, request_id, dumps(payload)))
             row = cur.fetchone()
+            if stopping:
+                # Bypass FIFO and cancel only work preceding this control.
+                # Never cancel tasks submitted after it or another account's audit.
+                cur.execute("UPDATE hatchery_ai_jobs SET status='completed',started_at=now(),finished_at=now() WHERE id=%s", (job_id,))
+                cancelled_rows = self._cancel_rows(cur, uid)
+                message = ('已请求停止此前的任务，并取消此前的排队请求；等待运行进程退出，已保存的文件保留。'
+                           if cancelled_rows else '停止请求已处理；如有任务正在停止，请等待其收尾。')
+                cur.execute('UPDATE hatchery_ai_jobs SET result_json=%s WHERE id=%s RETURNING *',
+                            (dumps({'summary': message, 'changedFiles': []}), job_id))
+                row = cur.fetchone()
             cur.execute('UPDATE hatchery_ai_chat_sessions SET updated_at=%s, revision=revision+1 WHERE id=%s', (now, session_id))
+        self.signal_cancellation(cancelled_rows)
         self.wake.set()
         self.emit_state(row)
         return public_job(row)
@@ -340,8 +424,8 @@ class JobStore:
         抖动就会把健康任务判死。这里要求过期超过 5 分钟才认定真的丢了。
         """
         with self.db() as conn, conn.cursor() as cur:
-            cur.execute("""UPDATE hatchery_ai_jobs SET status='interrupted',finished_at=now(),updated_at=now(),
-                error='服务中断，任务未完成；为避免重复执行，未自动重发。已保存的文件仍保留。'
+            cur.execute("""UPDATE hatchery_ai_jobs SET status=CASE WHEN cancel_requested THEN 'cancelled' ELSE 'interrupted' END,finished_at=now(),updated_at=now(),
+                error=CASE WHEN cancel_requested THEN '停止请求已保留，执行进程失联；请核对已保存文件与后台操作。' ELSE '服务中断，任务未完成；为避免重复执行，未自动重发。已保存的文件仍保留。' END
                 WHERE status='running' AND lease_until < now() - interval '5 minutes'
                 RETURNING id,user_id,session_id,payload_json""")
             rows = cur.fetchall()
@@ -359,9 +443,10 @@ class JobStore:
 
     def finish(self, job_id, result=None, error=None):
         with self.db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""UPDATE hatchery_ai_jobs SET status=%s,result_json=%s,error=%s,finished_at=now(),updated_at=now(),
+            cur.execute("""UPDATE hatchery_ai_jobs SET status=CASE WHEN cancel_requested THEN 'cancelled' ELSE %s END,
+                result_json=%s,error=CASE WHEN cancel_requested THEN %s ELSE %s END,finished_at=now(),updated_at=now(),
                 lease_until=NULL WHERE id=%s AND status IN ('running','interrupted') RETURNING *""",
-                        ('failed' if error else 'completed', dumps(result) if result is not None else None, error, job_id))
+                        ('failed' if error else 'completed', dumps(result) if result is not None else None, STOP_MESSAGE, error, job_id))
             row = cur.fetchone()
             if row and is_security(json.loads(row['payload_json'])):
                 self._delete_security_session(cur, row['user_id'], row['session_id'])
@@ -442,7 +527,9 @@ class JobStore:
         for row in rows:
             job = public_job(row)
             history.append({'role': 'user', 'text': job['prompt']})
-            if job['result']:
+            if job['status'] == 'cancelled':
+                history.append({'role': 'assistant', 'text': job.get('error') or STOP_MESSAGE})
+            elif job['result']:
                 history.append({'role': 'assistant', 'text': job['result'].get('summary', '') + ('\n'+job['result']['plan'] if job['result'].get('plan') else '')})
         return history
 
@@ -490,6 +577,10 @@ class Dispatcher:
             try:
                 with self.lock:
                     running = set(self.running)
+                try:
+                    self.store.poll_cancellations(running)
+                except Exception as exc:
+                    print(f'[ai-dispatch] 停止状态暂未同步：{type(exc).__name__}', file=sys.stderr)
                 if time.monotonic()-last_renew >= 10:
                     lost = self.store.renew(running)
                     if lost:
@@ -553,6 +644,13 @@ class Dispatcher:
 
     def worker(self, job):
         events = []
+        cancelled = threading.Event()
+        with self.store._live_lock:
+            self.store._cancel_signals[job['id']] = cancelled
+
+        def check_cancelled():
+            if cancelled.is_set():
+                raise JobCancelled()
         event_lock = threading.Lock()
         dirty, finished = threading.Event(), threading.Event()
 
@@ -574,6 +672,7 @@ class Dispatcher:
         writer.start()
 
         def progress(event):
+            check_cancelled()
             event = dict(event)
             with event_lock:
                 existing = next((e for e in events if e.get('id') == event.get('id')), None)
@@ -584,9 +683,16 @@ class Dispatcher:
                 self.store.publish_progress(job, event, events)
                 dirty.set()
 
+        progress.check_cancelled = check_cancelled
         result = error = None
         try:
+            # Covers acceptance racing with worker registration or a restart.
+            self.store.poll_cancellations({job['id']})
+            check_cancelled()
             result = self.execute(job, progress)
+            check_cancelled()
+        except JobCancelled as exc:
+            error = str(exc)
         except Exception as exc:
             error = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else '任务执行失败，请稍后重试'
             # Correlatable diagnostics without request bodies, SQL, credentials
@@ -621,5 +727,7 @@ class Dispatcher:
                     if self.stop.wait(2):
                         break
         finally:
+            with self.store._live_lock:
+                self.store._cancel_signals.pop(job['id'], None)
             with self.lock:
                 self.running.discard(job['id'])

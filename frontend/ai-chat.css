@@ -181,3 +181,5 @@
 @keyframes previewLoadingSpin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.preview-load-icon{animation:none}}
 #siteFileSelect{max-width:240px;border:1px solid var(--line,#ddd);border-radius:6px;padding:4px 8px;background:transparent;color:inherit;font:inherit}
+
+.ai-run-output [data-ai-cancel]{margin:8px 0;padding:6px 12px;border:1px solid var(--border,#414452);border-radius:8px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12px}.ai-run-output [data-ai-cancel]:disabled{opacity:.65;cursor:wait}

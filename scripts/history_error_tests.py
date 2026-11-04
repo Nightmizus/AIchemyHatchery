@@ -109,6 +109,9 @@ class HistoryErrorTests(unittest.TestCase):
         import ai_jobs
         from unittest.mock import Mock
         store = Mock()
+        import threading
+        store._live_lock = threading.Lock()
+        store._cancel_signals = {}
         def execute(job, progress):
             progress({'id': 'tool', 'tool': 'write_file', 'status': 'running', 'detail': 'index.html'})
             progress({'id': 'heartbeat', 'tool': '', 'status': 'running', 'detail': 'waiting'})

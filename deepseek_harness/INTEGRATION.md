@@ -1,5 +1,34 @@
 # DeepSeek Harness integration
 
+## Stop controls and report integrity (2026-11-04)
+
+`POST /api/ai/run/cancel` accepts an owned chat `jobId`. Queue cancellation is
+immediate; a running job persists `cancel_requested` and retains its account and
+global execution slot until the runtime process group exits. Accepted backend
+HTTP operations drain before the website lock is released. Already committed
+external effects are not rolled back; the final notice asks users to check them.
+Cancellation survives refresh, another worker process, late results and restarts.
+Explicit standalone controls such as `停停停`, `等一下我要添加文件` and `/stop`
+bypass FIFO and cancel earlier building tasks only. Idempotent retries cannot
+cancel later requests. Security audit tasks remain separate.
+
+The console distinguishes requesting a stop, stopping and cancelled. Successful
+admission remains accepted if history refresh fails. Streamed fenced JSON reports
+display only their summary, including split prefixes; tool-role and older nested
+tool-result messages both resolve by call ID. The runtime wheel is pinned to the
+production-tested `0.1.5rc1`; upgrades require the native fixture regression.
+
+Website instructions distinguish user facts and attachments from assistant
+assumptions. Unknown business data must be labelled or requested; “continue” does
+not confirm an invented business model. A completed execution is not proof that
+the generated site meets every user requirement.
+
+Regression additions: `scripts/ai_cancellation_tests.py` (real isolated PostgreSQL,
+HTTP ownership/origin checks, worker cleanup, silent subprocess cancellation and
+stream parsing) and `scripts/ai_cancellation_browser_tests.py` (actual console,
+HTTP, PostgreSQL and worker; no model calls). Private conversation exports and
+runtime logs are not included in the repository.
+
 ## 历史错误回归（2026-10-19）
 
 本轮读取指定账号保留的任务和原生 v3 日志，不重发历史请求，不改线上聊天或网站数据。
