@@ -73,7 +73,7 @@
     if (title) title.textContent = authState.mode === 'login' ? '欢迎回来' : '创建你的账号';
     if (description) description.textContent = authState.mode === 'login'
       ? '使用账号继续编辑、同步并发布网站。'
-      : '用户名、密码和数字校园号缺一不可；校园号注册成功后即被占用。';
+      : '先验证数字校园号，再填写资料并验证邮箱。注册后可登录 Hatchery 和 Groovin。';
     authError();
     document.querySelector(`#${authState.mode}Form input`)?.focus();
   }

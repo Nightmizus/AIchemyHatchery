@@ -7,6 +7,7 @@
   <title>炼丹社Hatchery｜页面编辑器</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/styles.css?v=20261015-2">
+  <link rel="stylesheet" href="/registration.css">
   <link rel="stylesheet" href="/mica.css?v=20261014-gpt9">
   <link rel="stylesheet" href="/ai-chat.css?v=20261014-gpt10">
   <link rel="stylesheet" href="/motion.css?v=20260917-1">
@@ -18,7 +19,7 @@
       <header><span class="auth-mark">🐣</span><div><b>炼丹社Hatchery控制台</b><small>AIchemyHatchery</small></div></header>
       <p class="auth-checking">正在确认登录状态…</p>
       <div class="auth-copy"><span>ACCOUNT SYSTEM</span><h1 id="authTitle">欢迎回来</h1><p id="authDescription">登录后继续编辑、保存并发布你的网站。</p></div>
-      <p class="auth-notice">请使用 <b>sdsz.groovin.cn</b> 账号登录。如没有账号，请前往 <a href="https://sdsz.groovin.cn/register" target="_blank" rel="noopener">groovin 平台注册</a>。</p>
+      <p class="auth-notice">与 <b>sdsz.groovin.cn</b> 共用账号，可在这里完成注册。已有账号请直接登录。</p>
       <div class="auth-tabs" role="tablist"><button class="active" role="tab" aria-selected="true" data-auth-tab="login">登录</button><button role="tab" aria-selected="false" data-auth-tab="register">注册</button></div>
       <form class="auth-form" id="loginForm" data-auth-form="login" method="post" action="/api/auth/login" autocomplete="on" novalidate>
         <label class="auth-field"><span>用户名 / 邮箱 / 校园号</span><input id="loginUsername" name="username" autocomplete="username" required placeholder="用户名、邮箱或数字校园号"><small class="field-error" hidden></small></label>
@@ -26,10 +27,33 @@
         <div class="auth-options"><label><input name="remember" type="checkbox" checked><span>在这台设备保持登录 7 天</span></label><button type="button" data-auth-help>忘记密码？</button></div>
         <button class="auth-submit" type="submit"><b>登录控制台</b><span>→</span></button>
       </form>
-      <div class="auth-form" id="registerForm" data-auth-form="register" hidden>
-        <p class="auth-sso-note">账号注册已迁移到 SDSZ 统一账号系统，两站共用同一套账号。注册完成后回到这里直接登录。</p>
-        <a class="auth-submit auth-register-link" href="https://sdsz.groovin.cn/register" target="_blank" rel="noopener"><b>前往注册账号</b><span>↗</span></a>
-      </div>
+      <section class="auth-form registration" id="registerForm" aria-label="注册学生账号" hidden>
+        <ol class="registration-steps" aria-label="注册步骤"><li data-registration-step="campus" aria-current="step"><b>1</b>验证校园号</li><li data-registration-step="info"><b>2</b>填写信息</li></ol>
+        <form id="registrationCampus" method="post" action="/api/auth/campus">
+          <label class="auth-field"><span>数字校园号</span><input id="registrationCampusId" name="campusId" required maxlength="64" autocomplete="username" placeholder="输入你的数字校园号"><small class="registration-hint">数字校园号由学校管理员分配，注册前请确认已获取</small></label>
+          <p class="auth-error" id="registrationCampusError" role="alert" hidden></p>
+          <button class="auth-submit" type="submit"><b>验证校园号</b><span>→</span></button>
+          <p class="registration-login">已有账号？<button type="button" data-auth-tab="login">直接登录</button></p>
+        </form>
+        <form id="registrationInfo" method="post" action="/api/auth/register" hidden>
+          <p class="registration-verified">已验证校园号 <b id="registrationVerifiedCampus"></b></p>
+          <label class="auth-field"><span>用户名（站内公开显示）</span><input name="name" required maxlength="50" autocomplete="username" placeholder="设置公开用户名"><small class="registration-hint">用户名会作为你的站内公开身份显示，之后可在个人资料中修改</small></label>
+          <label class="auth-field"><span>真实姓名（仅本人可见）</span><input name="realName" required maxlength="80" autocomplete="name" placeholder="填写你的真实姓名"><small class="registration-hint">真实姓名不会公开展示；精确搜索可用于找到你的公开用户名</small></label>
+          <div class="registration-columns">
+            <label class="auth-field"><span>年级</span><select name="grade" required><option value="">请选择年级</option><option>初一</option><option>初二</option><option>初三</option><option>高一</option><option>高二</option><option>高三</option><option>毕业年级</option></select></label>
+            <label class="auth-field"><span>班级</span><select name="classGroup" required><option value="">请选择班级</option></select></label>
+          </div>
+          <label class="auth-field"><span>邮箱</span><div class="registration-email"><input id="registrationEmail" name="email" type="email" required maxlength="254" autocomplete="email" placeholder="你的常用邮箱"><button type="button" id="registrationSendOtp" disabled>发送验证码</button></div></label>
+          <p class="auth-error" id="registrationOtpError" role="alert" hidden></p>
+          <label class="auth-field"><span>邮箱验证码</span><input name="code" required maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code" placeholder="6 位验证码"><small class="registration-hint" id="registrationOtpHint" aria-live="polite" hidden>验证码已发送，10 分钟内有效</small></label>
+          <label class="auth-field"><span>设置密码</span><div class="password-input"><input id="registrationPassword" name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="至少 8 位"><button type="button" id="registrationTogglePassword" aria-pressed="false" aria-label="显示密码">显示</button></div><div class="password-strength empty" id="registrationStrength" aria-live="polite"><i></i><i></i><i></i><span>至少 8 位</span></div></label>
+          <label class="auth-field"><span>确认密码</span><input name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128" placeholder="再次输入密码"><small class="registration-mismatch" id="registrationMismatch" hidden>密码不一致</small></label>
+          <p class="auth-error" id="registrationError" role="alert" hidden></p>
+          <button class="auth-submit" type="submit" disabled><b>完成注册</b><span>→</span></button>
+          <button class="registration-back" type="button" id="registrationBack">← 重新填写校园号</button>
+        </form>
+      </section>
+      <p class="registration-success" id="registrationSuccess" role="status" hidden></p>
       <p class="auth-error" id="authError" role="alert" hidden></p>
     </div>
   </section>
@@ -207,6 +231,7 @@
   <script src="/ai-markdown.js"></script>
   <script src="/security.js"></script>
   <script src="/auth.js?v=20260916-2"></script>
+  <script src="/registration.js"></script>
   <script src="/site-preview.js"></script>
   <script src="/job-stream.js?v=20261025-1"></script>
   <script src="/script.js?v=20261015-personal-api-2"></script>

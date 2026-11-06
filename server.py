@@ -47,6 +47,7 @@ import db_connections
 import job_events
 from email.message import Message
 import login_links
+import groovin_registration
 import study_engine
 import personal_api
 import site_runtime
@@ -321,7 +322,7 @@ AI_SOURCE_FILES = ("server.py", "frontend/index.html", "frontend/styles.css", "f
 PUBLIC_STATIC_PATHS = frozenset(("/index.html", "/styles.css", "/mica.css", "/ai-chat.css", "/motion.css", "/auth.js", "/script.js", "/site-preview.js", "/viewer.js", "/study.css", "/study.js", "/personal-api.js", "/markdown-it.min.js", "/ai-markdown.js", "/security.js", "/gallery.css", "/gallery.js"))
 # 这些资源在页面里一律带 ?v= 版本号引用，可以放心让浏览器/边缘长期缓存；
 # HTML 外壳（/ 与 /index.html）必须每次校验，否则发布与登录态更新会滞后。
-PUBLIC_STATIC_PATHS |= frozenset(gallery.PREVIEW_ASSETS.values()) | {'/job-stream.js'}
+PUBLIC_STATIC_PATHS |= frozenset(gallery.PREVIEW_ASSETS.values()) | {'/job-stream.js', '/registration.js', '/registration.css'}
 VERSIONED_STATIC_PATHS = PUBLIC_STATIC_PATHS - {"/index.html"}
 _CONSOLE_ASSET_CACHE = {}
 
@@ -620,7 +621,9 @@ def password_matches(password: str, salt_hex: str, expected_hex: str, iterations
     if not isinstance(expected_hex, str) or not expected_hex:
         return False
     try:
-        return bcrypt.checkpw(password.encode("utf-8"), expected_hex.encode("ascii"))
+        # The shared SDSZ service uses bcrypt's first-72-byte password format.
+        # bcrypt 5 raises for longer input unless compatibility is explicit.
+        return bcrypt.checkpw(password.encode("utf-8")[:72], expected_hex.encode("ascii"))
     except (ValueError, TypeError):
         return False
 
@@ -1566,65 +1569,21 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         self.clear_login_failures()
         self.complete_console_login(row, remember)
 
+    def handle_groovin_registration(self, operation: str) -> None:
+        data = groovin_registration.validate(operation, self.read_json(16_000))
+        identity = client_ip(self.client_address, self.headers)
+        limit = 30 if operation == 'campus' else 10
+        if rate_limit_hit('groovin-' + operation, identity, limit, 300):
+            self.send_json({'error': '操作过于频繁，请稍后再试', 'retryAfter': 300}, 429, {'Retry-After': '300'})
+            return
+        if operation == 'send-otp' and rate_limit_hit('groovin-otp-campus', data['campusId'], 1, 60):
+            self.send_json({'error': '请等待 60 秒后重新发送验证码', 'retryAfter': 60}, 429, {'Retry-After': '60'})
+            return
+        status, result, headers = groovin_registration.forward(SDSZ_BASE_URL, operation, data)
+        self.send_json(result, status, headers)
+
     def handle_send_otp(self) -> None:
-        if self.login_is_limited():
-            self.send_json({"error": "操作过于频繁，请 5 分钟后再试"}, 429)
-            return
-        data = self.read_json(64_000)
-        email = str(data.get("email", "")).strip().lower()
-        if not email or "@" not in email or len(email) > 254:
-            raise ValueError("请输入有效邮箱地址")
-        # 发信接口原先完全不限流：可被用来轰炸任意邮箱，也能无限刷新验证码
-        address = client_ip(self.client_address, self.headers)
-        if rate_limit_hit("otp-send-ip", address, 5, 600) or rate_limit_hit("otp-send-mail", email, 3, 600):
-            self.send_json({"error": "验证码发送过于频繁，请 10 分钟后再试"}, 429)
-            return
-
-        # Generate 6-digit code
-        code = "".join(secrets.choice("0123456789") for _ in range(6))
-        expires = iso_time(datetime.now(timezone.utc) + timedelta(minutes=10))
-
-        with neon_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM email_verifications WHERE email = %s", (email,))
-                cur.execute(
-                    "INSERT INTO email_verifications(email, code, expires_at, created_at) VALUES(%s,%s,%s,%s)",
-                    (email, code, expires, iso_time()),
-                )
-
-        # Send via SMTP
-        smtp_host = os.environ.get("EMAIL_HOST", "")
-        smtp_port = int(os.environ.get("EMAIL_PORT", "465"))
-        smtp_user = os.environ.get("EMAIL_USER", "")
-        smtp_pass = os.environ.get("EMAIL_PASS", "")
-        smtp_from = os.environ.get("EMAIL_FROM", smtp_user)
-
-        if not smtp_host:
-            self.send_json({"error": "邮件服务未配置"}, 500)
-            return
-
-        try:
-            msg = MIMEText(f"你的验证码是：{code}\n\n10 分钟内有效。", "plain", "utf-8")
-            msg["Subject"] = "AIchemy Hatchery 注册验证码"
-            msg["From"] = smtp_from
-            msg["To"] = email
-
-            if smtp_port == 465:
-                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as server:
-                    server.login(smtp_user, smtp_pass)
-                    server.sendmail(smtp_from, [email], msg.as_string())
-            else:
-                with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
-                    server.starttls()
-                    server.login(smtp_user, smtp_pass)
-                    server.sendmail(smtp_from, [email], msg.as_string())
-        except Exception as exc:
-            # 不回显 SMTP 异常（会暴露邮件服务器地址、账号等内部信息）
-            print(f"[otp] 发送验证码失败：{exc}", file=sys.stderr)
-            self.send_json({"error": "发送邮件失败，请稍后再试"}, 500)
-            return
-
-        self.send_json({"ok": True, "message": "验证码已发送，10 分钟内有效"})
+        self.handle_groovin_registration('send-otp')
 
     def handle_auth_logout(self) -> None:
         token = self.console_token()
@@ -1642,71 +1601,7 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
         )
 
     def handle_auth_register(self) -> None:
-        """注册并认领一个预埋的数字校园号。
-
-        白名单语义：校园号必须由管理员预埋（password 为空 = 待注册）；
-        注册成功即占用，此后既不能再次注册，也不能换绑。
-        """
-        if self.login_is_limited():
-            self.send_json({"error": "操作过于频繁，请 5 分钟后再试"}, 429, {"Retry-After": "300"})
-            return
-        data = self.read_json(16_000)
-        username = str(data.get("username", "") or "").strip()
-        password = str(data.get("password", "") or "")
-        campus_id = str(data.get("campusId", "") or "").strip()
-        email = str(data.get("email", "") or "").strip().lower()
-        code = str(data.get("code", "") or "").strip()
-        real_name = str(data.get("realName", "") or "").strip()
-        grade = str(data.get("grade", "") or "").strip()
-        class_group = str(data.get("classGroup", "") or "").strip()
-        remember = bool(data.get("remember", False))
-        if not USERNAME_PATTERN.fullmatch(username):
-            raise ValueError("用户名必须为 3–32 位字母、数字、下划线或连字符")
-        if not campus_id or len(campus_id) > 32 or not campus_id.isalnum():
-            raise ValueError("请输入有效的数字校园号")
-        if "@" not in email or len(email) > 254:
-            raise ValueError("请输入有效邮箱地址")
-        if not re.fullmatch(r"\d{6}", code):
-            raise ValueError("请输入 6 位验证码")
-        if rate_limit_hit("register-ip", client_ip(self.client_address, self.headers), 5, 300) or \
-                rate_limit_hit("register-campus", campus_id.casefold(), 5, 300):
-            self.send_json({"error": "注册尝试过于频繁，请稍后再试"}, 429, {"Retry-After": "300"})
-            return
-        # 邮箱验证码：注册必须证明邮箱可用，验证码一次性消费
-        with neon_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT code, expires_at FROM email_verifications WHERE email = %s", (email,))
-                otp = cur.fetchone()
-        if not otp or str(otp[0]) != code or str(otp[1]) < iso_time():
-            raise ValueError("验证码无效或已过期")
-        _, digest = password_digest(password)
-        with neon_db() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute('SELECT * FROM "User" WHERE "campusId" = %s', (campus_id,))
-                target = cur.fetchone()
-                if target is None:
-                    raise ValueError("该数字校园号未开放注册")
-                if row_value(target, "password"):
-                    raise ValueError("校园号注册成功后即被占用")
-                cur.execute('SELECT 1 FROM "User" WHERE name = %s AND "id" != %s', (username, target["id"]))
-                if cur.fetchone():
-                    raise ValueError("用户名已存在")
-                cur.execute('SELECT 1 FROM "User" WHERE email = %s AND "id" != %s', (email, target["id"]))
-                if cur.fetchone():
-                    raise ValueError("该邮箱已被使用")
-                cur.execute(
-                    'UPDATE "User" SET name = %s, password = %s, email = %s, "realName" = %s, '
-                    'grade = %s, "classGroup" = %s WHERE id = %s',
-                    (username, digest, email, real_name or username, grade, class_group, target["id"]),
-                )
-                cur.execute("DELETE FROM email_verifications WHERE email = %s", (email,))
-                cur.execute('SELECT * FROM "User" WHERE id = %s', (target["id"],))
-                user = cur.fetchone()
-        headers = self.issue_console_session(user["id"], remember)
-        self.send_json(
-            {"ok": True, "user": self.attach_preview_id(self.public_user(user), user["id"])},
-            headers=headers,
-        )
+        self.handle_groovin_registration('register')
 
     # ── SSO (via sdsz) ──────────────────────────────────────────────
 
@@ -2411,6 +2306,8 @@ class AIchemyHatcheryHandler(SimpleHTTPRequestHandler):
                 login_links.handle_redeem(self, neon_db)
             elif path == "/api/auth/login":
                 self.handle_auth_login()
+            elif path == "/api/auth/campus":
+                self.handle_groovin_registration('campus')
             elif path == "/api/auth/register":
                 self.handle_auth_register()
             elif path == "/api/auth/send-otp":

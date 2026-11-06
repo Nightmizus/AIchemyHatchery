@@ -1,0 +1,27 @@
+.registration{gap:16px}
+.auth-gate:has(#registerForm:not([hidden])){place-items:start center}
+.registration form{display:grid;gap:12px;min-width:0}
+.registration [hidden],.registration-success[hidden]{display:none!important}
+.registration-steps{display:flex;gap:12px;align-items:center;padding:0;margin:0 0 4px;list-style:none}
+.registration-steps li{display:flex;align-items:center;gap:7px;color:#9aa7b1;font-size:11px;font-weight:700}
+.registration-steps li+li::before{content:"";width:24px;height:1px;background:#d3d5cc;margin-right:5px}
+.registration-steps b{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#30363d;font-size:10px}
+.registration-steps [aria-current="step"]{color:#e6edf3}
+.registration-steps [aria-current="step"] b{background:#e6edf3;color:#171814}
+.registration-steps .done b{background:#d9ff43;color:#171814}
+.registration-hint{display:block;color:#9aa7b1;font-size:10px;line-height:1.6;margin-top:6px;overflow-wrap:anywhere}
+.registration-verified{margin:0;font-size:10px;color:#9aa7b1;overflow-wrap:anywhere}
+.registration-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
+.registration select{width:100%;min-width:0;padding:12px;border:1px solid #30363d;border-radius:7px;background:#0f1419;font:inherit;font-size:11px;color:#e6edf3}
+.registration select:focus-visible,.registration button:focus-visible{outline:2px solid #e6edf3;outline-offset:3px}
+.registration-email{display:flex;gap:8px;min-width:0}
+.registration-email input{min-width:0;flex:1}
+.registration-email button{padding:0 10px;border:1px solid #30363d;border-radius:7px;background:#252b32;white-space:nowrap;font-size:10px;font-weight:700;cursor:pointer;color:#e6edf3}
+.registration button:disabled{opacity:.55;cursor:wait}
+.registration-back{padding:10px;border:0;background:transparent;color:#9aa7b1;cursor:pointer;font:inherit;font-size:11px}
+.registration-login{margin:2px 0 0;text-align:center;font-size:11px;color:#9aa7b1}
+.registration-login button{padding:4px;border:0;background:transparent;color:#e6edf3;text-decoration:underline;cursor:pointer;font:inherit}
+.registration .auth-error{margin:0;font-size:11px}
+.registration-mismatch{display:block;margin-top:5px;font-size:10px;color:#ff9b8d}
+.registration-success{padding:12px;margin:12px 0 0;background:#eff8d8;border-left:3px solid #5c7c22;color:#334817;font-size:11px;line-height:1.6}
+@media(max-width:360px){.registration-steps{gap:6px}.registration-steps li+li::before{width:12px;margin-right:0}.registration-email{gap:5px}.registration-email button{padding:0 7px}}
