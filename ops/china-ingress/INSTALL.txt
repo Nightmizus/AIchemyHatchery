@@ -1,0 +1,54 @@
+Mainland ingress (Aliyun gateway -> Windows WSL)
+
+The public domain and certificates remain unchanged. Nginx on Aliyun forwards
+TCP, including its trusted PROXY header. The Windows Nginx listeners on ports
+18080/18443 already accept PROXY protocol from loopback and the Windows NAT
+gateway. Do not expose these listeners to untrusted public clients.
+
+Provisioning
+1. Create an unprivileged hatchery-tunnel system user with a nologin shell and
+   home /var/lib/hatchery-tunnel on both hosts.
+2. Generate an Ed25519 key as that user on Windows WSL, in .ssh/id_ed25519.
+   Keep the private key only there. Install the public key on Aliyun with:
+   restrict,port-forwarding,permitlisten="127.0.0.1:28080",permitlisten="127.0.0.1:28443"
+   appended before the key type. Set .ssh to 0700 and authorized_keys to 0600.
+3. Install 60-hatchery-tunnel.conf under /etc/ssh/sshd_config.d on Aliyun.
+   Run sshd -t, inspect sshd -T -C user=hatchery-tunnel,host=localhost,addr=CLIENT_IP,
+   then reload ssh. The account may only open the two loopback reverse forwards;
+   shell sessions, other ports, local forwards and password login are disabled.
+4. Obtain the gateway's Ed25519 host public key over the existing authenticated
+   administrative SSH connection. Write '39.106.77.105 KEY_TYPE KEY_DATA' to the
+   WSL user's .ssh/known_hosts. Do not use an unverified ssh-keyscan result.
+5. Install hatchery-cn-tunnel.service in Windows WSL /etc/systemd/system.
+   Run systemd-analyze verify, daemon-reload, then enable --now the service.
+   Both remote listeners must be bound to 127.0.0.1, never 0.0.0.0.
+6. Probe the remote forwards with a PROXY header and valid TLS server name.
+   Verify the console, a published subdomain, redirects and unauthenticated API.
+   Before switching traffic, kill the tunnel process once and confirm systemd
+   reconnects. Test the Nginx backup in a separate loopback-only listener with
+   an unavailable primary; do not disrupt live AI streams for a failover test.
+7. Back up Aliyun /etc/nginx/nginx.conf, install nginx-gateway.conf, run nginx -t,
+   and reload nginx. Do not restart the application or enable the Aliyun worker.
+   Verify a fresh public HTTPS connection; restore the backup and reload if it
+   fails. Existing TCP sessions drain under worker_shutdown_timeout.
+
+Validation and monitoring
+- Run scripts/measure-cn-access.ps1 on the mainland Windows machine, before and
+  after, with the same sample count. It does not log credentials or response bodies.
+- An isolated browser profile on that machine can measure cold/warm navigation,
+  actual resource transfer, the login form and the registration tab.
+- Gateway access logs include upstream=127.0.0.1:28443 for the direct HTTPS path;
+  upstream=100.126.79.100:18443 identifies a Tailscale fallback.
+- Confirm the Windows ingress log still records the original client address.
+- The tunnel restarts after three seconds on process failure. SSH heartbeat
+  failures also trigger reconnection; Tailscale handles new connections while
+  the primary listener is absent. Established connections do not migrate between
+  transports, so a dropped stream reconnects through the existing application logic.
+- Gzip, versioned asset caching, TLS, CSRF and WebSocket routes remain configured
+  on Windows. This deployment does not cache private API responses.
+
+Rollback
+Restore the previous Aliyun Nginx configuration, run nginx -t and reload nginx.
+Leave the Windows application and Tailscale active. Once traffic is back on the
+old route, disable --now hatchery-cn-tunnel on WSL. Remove the dedicated gateway
+authorized key and SSH Match file only when the direct tunnel is being retired.

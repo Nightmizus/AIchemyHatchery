@@ -1,0 +1,37 @@
+[Unit]
+Description=Direct encrypted Hatchery ingress from Aliyun to Windows WSL
+Wants=network-online.target
+After=network-online.target nginx.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hatchery-tunnel
+Group=hatchery-tunnel
+# The key and pinned gateway host key are provisioned separately, never committed.
+ExecStart=/usr/bin/ssh -F /dev/null -N -T -4 \
+    -i /var/lib/hatchery-tunnel/.ssh/id_ed25519 \
+    -o UserKnownHostsFile=/var/lib/hatchery-tunnel/.ssh/known_hosts \
+    -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes -o ConnectTimeout=10 \
+    -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+    -o TCPKeepAlive=yes -o Compression=no \
+    -R 127.0.0.1:28080:127.0.0.1:18080 \
+    -R 127.0.0.1:28443:127.0.0.1:18443 \
+    hatchery-tunnel@39.106.77.105
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
